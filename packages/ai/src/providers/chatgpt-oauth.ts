@@ -592,6 +592,16 @@ export async function requestChatGptDeviceCode(options: TokenWireOptions = {}): 
 /** Wait `ms`, or until the sign-in is cancelled. */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
+		// An abort event does not replay for a listener added after it. The signal
+		// can already be aborted here — the poll loop's own check runs before its
+		// request, and a cancel during that await lands in this window — and
+		// without this the wait ran out its full interval before the next
+		// iteration's check noticed, keeping a cancelled sign-in waiting on a
+		// timer that no longer had anything to wait for.
+		if (signal?.aborted) {
+			reject(signal.reason ?? new Error("Sign-in aborted."));
+			return;
+		}
 		const onAbort = () => {
 			clearTimeout(timer);
 			reject(signal?.reason ?? new Error("Sign-in aborted."));

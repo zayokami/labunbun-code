@@ -263,12 +263,20 @@ export async function* mapResponsesStream(
 	/** The same states keyed by wire item id — a different key from the call id. */
 	const callsByItem = new Map<string, OpenCallState>();
 	const thinkingIndexByItem = new Map<string, number>();
+	/**
+	 * The open thinking blocks, by content index; the value is the item id whose
+	 * blob the block is filed under. One pair is not enough for a turn: a long
+	 * tool-calling turn carries one reasoning item per step, and a single index
+	 * and a single blob closed only the first block and handed it the last
+	 * item's signature — a block replayed with someone else's blob.
+	 */
+	const openThinking = new Map<number, string>();
+	/** Each reasoning item's latest blob, by item id. The done event can precede the block's deltas. */
+	const blobByItem = new Map<string, string>();
 	/** Content order, so text and reasoning land where the model put them. */
 	const slots = new Map<number, number>();
 	let nextContentIndex = 0;
-	let thinkingIndex = -1;
 	let textIndex = -1;
-	let encrypted: string | undefined;
 	let status: string | undefined;
 	let usage: ResponsesEnvelope["usage"];
 	let incompleteReason: string | undefined;
@@ -315,7 +323,7 @@ export async function* mapResponsesStream(
 					if (index === undefined) {
 						index = slot(event.output_index ?? 0);
 						thinkingIndexByItem.set(key, index);
-						if (thinkingIndex === -1) thinkingIndex = index;
+						openThinking.set(index, key);
 						yield builder.thinkingStart(index);
 					}
 					yield builder.thinkingDelta(index, event.delta);
@@ -342,7 +350,7 @@ export async function* mapResponsesStream(
 						yield builder.toolCallStart(state.index, state.callId, state.name);
 					}
 				} else if (item?.type === "reasoning") {
-					encrypted = item.encrypted_content ?? encrypted;
+					if (item.encrypted_content) blobByItem.set(item.id ?? "", item.encrypted_content);
 				}
 				break;
 			}
@@ -355,8 +363,10 @@ export async function* mapResponsesStream(
 				const item = event.item;
 				if (item?.type === "reasoning") {
 					// The blob arrives on the done event for the item, not on the
-					// summary deltas. It is what makes the block replayable next turn.
-					if (item.encrypted_content) encrypted = item.encrypted_content;
+					// summary deltas. It is what makes the block replayable next turn,
+					// and it is filed under the item id so each block keeps its own
+					// signature rather than the last one the turn saw.
+					if (item.encrypted_content) blobByItem.set(item.id ?? "", item.encrypted_content);
 				} else if (item?.type === "function_call" && item.arguments !== undefined) {
 					// A well-formed stream repeats the finished arguments here. Using them
 					// only when the deltas produced nothing keeps a stream that omits the
@@ -369,7 +379,9 @@ export async function* mapResponsesStream(
 			}
 			case "response.reasoning_encrypted_content.delta":
 			case "response.reasoning_encrypted_content.done": {
-				if (event.item?.encrypted_content) encrypted = event.item.encrypted_content;
+				if (event.item?.encrypted_content) {
+					blobByItem.set(event.item_id ?? event.item.id ?? "", event.item.encrypted_content);
+				}
 				break;
 			}
 			case "response.refusal.delta": {
@@ -423,9 +435,15 @@ export async function* mapResponsesStream(
 		return;
 	}
 
-	if (thinkingIndex !== -1) {
-		yield builder.thinkingEnd(thinkingIndex, encrypted);
+	// Every open thinking block closes, in content order, each with the blob
+	// filed under its own item. Closing only the first left the others without
+	// a thinking_end at all — and put the last item's signature on a block that
+	// replayed it as a prefix the model never wrote.
+	for (const index of [...openThinking.keys()].sort((a, b) => a - b)) {
+		yield builder.thinkingEnd(index, blobByItem.get(openThinking.get(index) ?? ""));
 	}
+	openThinking.clear();
+	blobByItem.clear();
 	if (textIndex !== -1) {
 		yield builder.textEnd(textIndex);
 	}

@@ -285,6 +285,54 @@ describe("mapResponsesStream", () => {
 		expect(partial.content[1]).toMatchObject({ type: "text", text: "answer" });
 	});
 
+	test("a second reasoning item keeps its own block and its own blob", async () => {
+		// One reasoning item per tool-calling step is the normal shape of a long
+		// turn. A single index and a single blob closed only the first block and
+		// stamped it with the last item's signature — two wrongs a replay pays
+		// for: the second block came back unsigned, and the first replayed a
+		// signature the model never attached to it.
+		const events = await collect(
+			mapResponsesStream(
+				raw([
+					{ type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: "rs_1" } },
+					{ type: "response.reasoning_summary_text.delta", item_id: "rs_1", output_index: 0, delta: "first" },
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "reasoning", id: "rs_1", encrypted_content: "enc-1" },
+					},
+					{
+						type: "response.output_item.added",
+						output_index: 1,
+						item: { type: "function_call", id: "fc_1", call_id: "call_abc", name: "read" },
+					},
+					{
+						type: "response.function_call_arguments.delta",
+						item_id: "fc_1",
+						output_index: 1,
+						delta: '{"path":"a.ts"}',
+					},
+					{ type: "response.reasoning_summary_text.delta", item_id: "rs_2", output_index: 2, delta: "second" },
+					{
+						type: "response.output_item.done",
+						output_index: 2,
+						item: { type: "reasoning", id: "rs_2", encrypted_content: "enc-2" },
+					},
+					{ type: "response.completed", response: { status: "completed" } },
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		// Both blocks close, and each carries its own text...
+		const ended = events.filter((e) => e.type === "thinking_end");
+		expect(ended.map((e) => e.content)).toEqual(["first", "second"]);
+		// ...and its own signature, on the block it belongs to and no other.
+		const done = events.at(-1);
+		const signatures = done.message.content.filter((b: any) => b.type === "thinking").map((b: any) => b.signature);
+		expect(signatures).toEqual(["enc-1", "enc-2"]);
+	});
+
 	test("a content-filtered response is a refusal, not a turn that ran out of room", async () => {
 		// `incomplete` is the status both of a turn that hit the output limit and
 		// of one the provider filtered; the reason is the only thing that tells

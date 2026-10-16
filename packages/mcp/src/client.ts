@@ -94,6 +94,15 @@ export interface McpConnection {
 	prompts: Array<{ name: string; description?: string }>;
 	/** The resource snapshot, refreshed when the server announces a change. */
 	resources: McpResourceSummary[];
+	/**
+	 * Where the connection stands: set to `"connected"` once it opens, then
+	 * `"closed"` for good when its transport ends. `"error"` is provisional — an
+	 * error the transport reported, which a later close overwrites, because "the
+	 * transport is closed" is the more precise fact once it is true. Absent on a
+	 * connection that never opened, and optional so a host's own literal of this
+	 * shape keeps compiling.
+	 */
+	state?: "connected" | "closed" | "error";
 	error?: string;
 	/**
 	 * The host's hook for a tool list that changed while the session runs.
@@ -667,7 +676,42 @@ export async function connectMcpServer(
 		opened = client;
 		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
 		/** The object the host holds; the notification handlers refresh it in place. */
-		const connection: McpConnection = { serverName, client, tools: [], prompts: [], resources: [] };
+		const connection: McpConnection = {
+			serverName,
+			client,
+			tools: [],
+			prompts: [],
+			resources: [],
+			state: "connected",
+		};
+
+		// The connection's own account of ending. Both hooks are the SDK's, fired
+		// by the transport (the stdio child exiting, the HTTP stream ending) and
+		// by the protocol (a request that closes it).
+		//
+		// `onerror` only labels: it fires for recoverable trouble too — the HTTP
+		// transport reports a stream it is already reconnecting, the protocol
+		// reports an unknown message id — so treating every one of them as the
+		// connection's death would drop a working server's tools over noise. The
+		// label is provisional; the close below overwrites it.
+		client.onerror = () => {
+			if (connection.state !== "closed") connection.state = "error";
+		};
+		// A close is terminal, and it is the event that has to reach the session:
+		// the host rebuilds its registry from `connections.flatMap(c => c.tools)`,
+		// so a connection that still lists the tools of a server that is gone
+		// leaves the model able to pick them, with every call failing at the wire
+		// and nothing on the screen saying why. Emptying the snapshots is what
+		// takes them out of the live session, and ringing the bell a
+		// tools/list_changed rings is what makes the host look.
+		client.onclose = () => {
+			if (connection.state === "closed") return;
+			connection.state = "closed";
+			connection.tools = [];
+			connection.prompts = [];
+			connection.resources = [];
+			connection.onToolsChanged?.();
+		};
 
 		// A refresh that fails keeps the last good snapshot: a server that stopped
 		// answering one of its lists has not thereby withdrawn what it already

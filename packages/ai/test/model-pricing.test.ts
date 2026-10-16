@@ -482,11 +482,14 @@ describe("the built-in catalog", () => {
 		// Opus 5.5 is the third cache-read regime and the reason the multiplier is
 		// a parameter: this one reads at 0.05x, between the 0.025x pair below and
 		// the tenth everywhere else. Its write rate is the standard 1.25x input.
+		// Every row here also carries the one-hour bucket's write rate — 2x input —
+		// which is what Anthropic charges for it against the 1.25x default.
 		expect(resolveModel("anthropic/claude-opus-5-5")?.pricing).toEqual({
 			input: 4,
 			output: 20,
 			cacheRead: 0.2,
 			cacheWrite: 5,
+			cacheWrite1h: 8,
 		});
 		// Fable 5.1 is the current Fable, and one of the two models in the catalog
 		// whose cache reads are billed at 0.025x input rather than 0.1x.
@@ -495,6 +498,7 @@ describe("the built-in catalog", () => {
 			output: 50,
 			cacheRead: 0.25,
 			cacheWrite: 12.5,
+			cacheWrite1h: 20,
 		});
 		// Mythos 5.1 is the other, and Mythos 5 is not: the 0.025x rate followed the
 		// ".1" releases, so the pair is where a copy-paste error would hide.
@@ -503,12 +507,14 @@ describe("the built-in catalog", () => {
 			output: 50,
 			cacheRead: 0.25,
 			cacheWrite: 12.5,
+			cacheWrite1h: 20,
 		});
 		expect(resolveModel("anthropic/claude-mythos-5")?.pricing).toEqual({
 			input: 10,
 			output: 50,
 			cacheRead: 1,
 			cacheWrite: 12.5,
+			cacheWrite1h: 20,
 		});
 		// Fable 5 is legacy — still served, still on the standard read multiplier.
 		expect(resolveModel("anthropic/claude-fable-5")?.pricing).toEqual({
@@ -516,12 +522,14 @@ describe("the built-in catalog", () => {
 			output: 50,
 			cacheRead: 1,
 			cacheWrite: 12.5,
+			cacheWrite1h: 20,
 		});
 		expect(resolveModel("anthropic/claude-opus-5")?.pricing).toEqual({
 			input: 5,
 			output: 25,
 			cacheRead: 0.5,
 			cacheWrite: 6.25,
+			cacheWrite1h: 10,
 		});
 		// The 4.6 generation: Opus held its price, Sonnet did not.
 		expect(resolveModel("anthropic/claude-opus-4-8")?.pricing).toEqual({
@@ -529,12 +537,14 @@ describe("the built-in catalog", () => {
 			output: 25,
 			cacheRead: 0.5,
 			cacheWrite: 6.25,
+			cacheWrite1h: 10,
 		});
 		expect(resolveModel("anthropic/claude-sonnet-4-6")?.pricing).toEqual({
 			input: 3,
 			output: 15,
 			cacheRead: 0.3,
 			cacheWrite: 3.75,
+			cacheWrite1h: 6,
 		});
 		// Sonnet 5.5 launched at the same four figures as the row below it, and the
 		// vendor page, models.dev's `anthropic` entry and its Zen-plan entry all
@@ -545,6 +555,7 @@ describe("the built-in catalog", () => {
 			output: 10,
 			cacheRead: 0.2,
 			cacheWrite: 2.5,
+			cacheWrite1h: 4,
 		});
 		// $2/$10 is the standard price, not an introductory one: the increase to
 		// $3/$15 that was scheduled for 2026-09-01 was cancelled.
@@ -553,6 +564,7 @@ describe("the built-in catalog", () => {
 			output: 10,
 			cacheRead: 0.2,
 			cacheWrite: 2.5,
+			cacheWrite1h: 4,
 		});
 		// The one Anthropic row with two bands: Haiku 5.5 is billed by prompt
 		// length, and these are the 100k-and-under figures. The vendor page,
@@ -565,12 +577,14 @@ describe("the built-in catalog", () => {
 			output: 0.5,
 			cacheRead: 0.01,
 			cacheWrite: 0.125,
+			cacheWrite1h: 0.2,
 		});
 		expect(resolveModel("anthropic/claude-haiku-4-5")?.pricing).toEqual({
 			input: 1,
 			output: 5,
 			cacheRead: 0.1,
 			cacheWrite: 1.25,
+			cacheWrite1h: 2,
 		});
 	});
 
@@ -601,6 +615,24 @@ describe("the built-in catalog", () => {
 			["anthropic/claude-haiku-5-5", "adaptive"],
 			["anthropic/claude-haiku-4-5", "extended"],
 		]);
+	});
+
+	test("no shipped row declares the effort rungs above high yet", () => {
+		// The adapter's gate sends xhigh and max only to a row whose
+		// `reasoningEfforts` names the rung; this is the conservative half of it.
+		// No vendor page read for this catalog states that any of these ids takes
+		// either rung, so no row declares one — the rungs are expressible, and a
+		// row that starts naming one has to show up here, because the adapter's
+		// fallback keeps the rest of the wire silent either way.
+		const declared = BUILT_IN_REFS.filter((ref) => {
+			const efforts = resolveModel(ref)?.reasoningEfforts;
+			return efforts?.includes("xhigh") || efforts?.includes("max");
+		});
+		expect(declared).toEqual([]);
+		// Not a vacuous pass: rows do carry declared sets — the OpenAI pair pins
+		// its subset in the provider's own test — so the empty list above is an
+		// absence of the top rungs and not a lookup that found no field anywhere.
+		expect(BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.reasoningEfforts)).not.toHaveLength(0);
 	});
 
 	test("the models that check thinking-block binding are named one by one", () => {
@@ -689,6 +721,9 @@ describe("the built-in catalog", () => {
 			const pricing = resolveModel(ref)?.pricing;
 			expect(pricing?.cacheRead).toBeCloseTo((pricing?.input ?? 0) * (offTheRule.get(ref) ?? 0.1), 10);
 			expect(pricing?.cacheWrite).toBeCloseTo((pricing?.input ?? 0) * 1.25, 10);
+			// The second derivation on the write channel: the one-hour bucket
+			// bills at 2x input, with no exceptions in this catalog.
+			expect(pricing?.cacheWrite1h).toBeCloseTo((pricing?.input ?? 0) * 2, 10);
 		}
 		// Every exception has to be a real one, or it is a loophole in the loop.
 		expect([...offTheRule.values()]).not.toContain(0.1);

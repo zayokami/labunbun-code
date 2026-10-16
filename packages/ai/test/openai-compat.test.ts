@@ -308,6 +308,57 @@ describe("mapOpenAIStream", () => {
 		expect((events.at(-1) as any).message.stopReason).toBe("toolUse");
 	});
 
+	test("an id that arrives on a later fragment replaces the placeholder", async () => {
+		// Not every provider leads with the id: some open the call with its name
+		// and send the id with a later fragment. The block was already created
+		// under the synthesized `call_0`, and the block is what the finish
+		// reads — so without the replacement this transcript replays an id the
+		// provider never wrote, and the tool result is matched against a call it
+		// cannot find.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{
+						choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "write", arguments: '{"pa' } }] } }],
+					},
+					{
+						choices: [{ delta: { tool_calls: [{ index: 0, id: "call_A", function: { arguments: 'th":"x"}' } }] } }],
+					},
+					{ choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+				]),
+				"deepseek",
+				"deepseek-chat",
+			),
+		);
+		const end = events.find((e) => e.type === "toolcall_end") as any;
+		expect(end.toolCall.id).toBe("call_A");
+		expect(end.toolCall.name).toBe("write");
+		expect(end.toolCall.arguments).toBe('{"path":"x"}');
+	});
+
+	test("fragments that never carry an index are one call under a stable placeholder", async () => {
+		// Ollama's shim omits the field entirely. `undefined` as a map key made
+		// the synthesized id read `call_undefined` — a string no provider could
+		// have written. The two fragments below are still one call's: a fragment
+		// that names no slot belongs to the open one, not to a call of its own.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { tool_calls: [{ function: { name: "write", arguments: '{"pa' } }] } }] },
+					{ choices: [{ delta: { tool_calls: [{ function: { arguments: 'th":"x"}' } }] } }] },
+					{ choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+				]),
+				"ollama",
+				"qwen3:8b",
+			),
+		);
+		expect(events.filter((e) => e.type === "toolcall_start")).toHaveLength(1);
+		const end = events.find((e) => e.type === "toolcall_end") as any;
+		expect(end.toolCall.id).toBe("call_0");
+		expect(end.toolCall.name).toBe("write");
+		expect(end.toolCall.arguments).toBe('{"path":"x"}');
+	});
+
 	test("two parallel tool calls stay in slot order", async () => {
 		const events = await collect(
 			mapOpenAIStream(
@@ -496,6 +547,45 @@ describe("mapOpenAIStream", () => {
 			reasoning: 15,
 			promptTotal: 10,
 		});
+	});
+
+	test("Mistral's own finish reasons map, because its rows ride this wire", async () => {
+		// `model_length` is the vendor's out-of-room value and `tool_call` is
+		// what it answers for a turn that ended in a call — both on the five
+		// `mistral/*` rows, which speak this wire. Left unmapped they land in
+		// the "Unrecognized finish reason" error branch: a normal finish
+		// reported as a failure.
+		const cut = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { content: "partial answer" } }] },
+					{ choices: [{ delta: {}, finish_reason: "model_length" }] },
+				]),
+				"mistral",
+				"mistral-medium-3-5",
+			),
+		);
+		expect((cut.at(-1) as any).message.stopReason).toBe("length");
+
+		const call = await collect(
+			mapOpenAIStream(
+				raw([
+					{
+						choices: [
+							{
+								delta: {
+									tool_calls: [{ index: 0, id: "call_A", function: { name: "read", arguments: '{"path":"a.ts"}' } }],
+								},
+							},
+						],
+					},
+					{ choices: [{ delta: {}, finish_reason: "tool_call" }] },
+				]),
+				"mistral",
+				"mistral-medium-3-5",
+			),
+		);
+		expect((call.at(-1) as any).message.stopReason).toBe("toolUse");
 	});
 
 	test("an unrecognized finish reason is named as an error, not passed off as a stop", async () => {

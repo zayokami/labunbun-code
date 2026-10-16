@@ -136,6 +136,31 @@ describe("buildAnthropicRequest", () => {
 		expect(effort("high")).toBe("high");
 	});
 
+	test("thinking: the two rungs above high are sent only to a row that declares them", () => {
+		const effort = (model: Model, level: ThinkingLevel) =>
+			buildAnthropicRequest(model, ctx(), { thinkingLevel: level }).output_config?.effort;
+		// A row that names the rung gets it back verbatim.
+		const supporting: Model = { ...MODEL, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] };
+		expect(effort(supporting, "xhigh")).toBe("xhigh");
+		expect(effort(supporting, "max")).toBe("max");
+		// A row whose declared set stops below what was asked gets the nearest rung
+		// it does take — never a deeper one, and never silence: the depth is capped,
+		// not dropped.
+		const capped: Model = { ...MODEL, reasoningEfforts: ["low", "medium", "high"] };
+		expect(effort(capped, "xhigh")).toBe("high");
+		expect(effort(capped, "max")).toBe("high");
+		const steeper: Model = { ...MODEL, reasoningEfforts: ["low", "xhigh"] };
+		expect(effort(steeper, "xhigh")).toBe("xhigh");
+		expect(effort(steeper, "max")).toBe("xhigh");
+		// A row that declares nothing is read as having confirmed nothing above the
+		// rung every adaptive row answers to: an effort the API rejects costs the
+		// whole request, so the unconfirmed rungs fall back to `high`.
+		expect(effort(MODEL, "xhigh")).toBe("high");
+		expect(effort(MODEL, "max")).toBe("high");
+		// The levels at or below high are not gated at all.
+		expect(effort(capped, "medium")).toBe("medium");
+	});
+
 	test("thinking: a budget row is unchanged, down to the max_tokens cap", () => {
 		const params = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "medium" });
 		expect(params.thinking).toEqual({ type: "enabled", budget_tokens: 16_384 });
@@ -149,6 +174,14 @@ describe("buildAnthropicRequest", () => {
 		// below the 1024 minimum, thinking is dropped entirely
 		const tiny = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "low", maxOutputTokens: 1024 });
 		expect(tiny.thinking).toBeUndefined();
+
+		// The rungs above high ask for the same top budget: the table stops at the
+		// deepest value it has ever sent rather than inventing a number, and the
+		// max_tokens cap still has the final word (2000 - 1 below).
+		const deeper = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "max" });
+		expect(deeper.thinking).toEqual({ type: "enabled", budget_tokens: 32_768 });
+		const deeperCapped = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "xhigh", maxOutputTokens: 2000 });
+		expect(deeperCapped.thinking).toEqual({ type: "enabled", budget_tokens: 1999 });
 	});
 
 	test("thinking: a row that declares no thinking shape is sent none, whatever the session asks", () => {
@@ -157,7 +190,7 @@ describe("buildAnthropicRequest", () => {
 		// through and put the budget shape on the wire — the 400 against a
 		// 4.6-or-later Claude row reached through a gateway, which is why those
 		// rows ship without a thinking shape in the first place.
-		for (const level of ["off", "minimal", "low", "medium", "high"] as ThinkingLevel[]) {
+		for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as ThinkingLevel[]) {
 			const params = buildAnthropicRequest(GATEWAY, ctx(), { thinkingLevel: level });
 			expect(params.thinking).toBeUndefined();
 			expect(params.output_config).toBeUndefined();

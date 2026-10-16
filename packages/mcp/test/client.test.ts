@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type AgentDeps, type AnyTool, runToolPipeline, sanitizeCwd } from "@labunbun/agent";
+import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
 	approveMcpServer,
 	connectAllMcpServers,
@@ -415,6 +416,40 @@ describe("list_changed notifications", () => {
 		// not be read back, and an empty or partial list would be a guess.
 		expect(connection.tools.map((tool) => tool.name)).toEqual(before);
 		expect(changes).toBe(0);
+	}, 20_000);
+});
+
+describe("a connection whose server goes away", () => {
+	// The failure this closes: the server process died and the connection kept
+	// serving a tool list from a server that was gone. Every call through one of
+	// those tools failed at the wire with nothing on the screen saying why — the
+	// host rebuilds its registry from `connections.flatMap(c => c.tools)`, and
+	// nothing ever took the tools out of that array.
+	test("killing the server process marks the connection closed, drops its snapshots, and tells the host", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		expect(connection.state).toBe("connected");
+		expect(connection.tools.length).toBeGreaterThan(0);
+
+		let changes = 0;
+		connection.onToolsChanged = () => {
+			changes += 1;
+		};
+
+		// The transport's own handle on the child: the same process the server
+		// runs in, killed the way a crash would end it.
+		const transport = connection.client.transport as StdioClientTransport;
+		const pid = transport.pid;
+		if (!pid) throw new Error("fixture transport has no process");
+		process.kill(pid, "SIGTERM");
+
+		await waitFor(() => connection.state === "closed");
+		// The close took the snapshots with it, and the host was told through the
+		// same bell a tools/list_changed rings — once.
+		expect(connection.tools).toHaveLength(0);
+		expect(connection.prompts).toHaveLength(0);
+		expect(connection.resources).toHaveLength(0);
+		expect(changes).toBe(1);
 	}, 20_000);
 });
 

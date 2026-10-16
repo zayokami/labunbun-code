@@ -734,4 +734,34 @@ describe("completeChatGptDeviceLogin", () => {
 			completeChatGptDeviceLogin({ deviceAuthId: "d", userCode: "u", intervalMs: 1, fetch }),
 		).rejects.toThrow("without a completed grant");
 	});
+
+	test("a cancel that lands while the poll is in flight ends the wait, not the interval", async () => {
+		const controller = new AbortController();
+		const { fetch, calls } = recordingFetch((call) => {
+			if (call.url.endsWith("/deviceauth/token")) {
+				// The cancel lands while the poll's answer is in flight. By the time
+				// the loop reaches its wait the signal is already aborted, and an
+				// abort event does not replay for a listener added after it — so a
+				// wait that only subscribes sits out its whole interval before the
+				// next poll notices. The 8s interval against a 5s bound is what
+				// tells the two apart: subscribing-only fails this test slowly.
+				controller.abort();
+				return new Response("", { status: 403, statusText: "Forbidden" });
+			}
+			return Response.json({});
+		});
+		const started = Date.now();
+		const error = await completeChatGptDeviceLogin({
+			deviceAuthId: "d",
+			userCode: "u",
+			intervalMs: 8_000,
+			fetch,
+			signal: controller.signal,
+		}).catch((e) => e);
+
+		expect(error.name).toBe("AbortError");
+		expect(Date.now() - started).toBeLessThan(5_000);
+		// One poll only: the cancel surfaced from the wait, not from a retry.
+		expect(calls).toHaveLength(1);
+	});
 });

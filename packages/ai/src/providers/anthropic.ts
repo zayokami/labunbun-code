@@ -88,20 +88,58 @@ const THINKING_BUDGETS: Record<Exclude<ThinkingLevel, "off">, number> = {
 	low: 4096,
 	medium: 16384,
 	high: 32768,
+	// The two rungs above `high`, asked for on an extended-thinking row: the
+	// table tops out at the deepest value it has ever sent rather than
+	// inventing a number the vendor never published. The `max_tokens - 1` cap
+	// below still has the final word.
+	xhigh: 32768,
+	max: 32768,
 };
 
 // Long-form design notes: docs/dev/ai-layer.md
 /** The depth dial for the models that think adaptively: what replaced the budget. */
-const THINKING_EFFORT: Record<ThinkingLevel, "low" | "medium" | "high"> = {
+const THINKING_EFFORT: Record<ThinkingLevel, AnthropicEffort> = {
 	off: "low",
 	minimal: "low",
 	low: "low",
 	medium: "medium",
 	high: "high",
+	// The two rungs above `high` are sent only to a row that declares them;
+	// `adaptiveEffort` is where that gate lives.
+	xhigh: "xhigh",
+	max: "max",
 };
 
 /** The effort rungs the wire accepts, all five of them. */
 type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** The dial's rungs, shallow to deep. */
+const EFFORT_LADDER: readonly AnthropicEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * The effort an adaptive row should be asked for.
+ *
+ * Up to `high`, the table's answer goes out as-is: those are the depths this
+ * path was built against, and every adaptive row answers to them. The two
+ * rungs above `high` are sent only to a row whose `reasoningEfforts` names
+ * the rung — these are the levels whose acceptance the vendor has not been
+ * seen to state for every model, and an effort the API rejects costs the
+ * whole request.
+ *
+ * A row that names neither rung falls back to the nearest rung it does
+ * declare at or below what was asked, and a row that declares nothing at all
+ * falls back to `high`, the deepest rung such a row is known to take. The
+ * fallback is the requested depth capped, never a deeper one.
+ */
+function adaptiveEffort(model: Model, thought: ThinkingLevel): AnthropicEffort {
+	const asked = THINKING_EFFORT[thought];
+	if (asked !== "xhigh" && asked !== "max") return asked;
+	const accepted = model.reasoningEfforts;
+	if (accepted?.includes(asked)) return asked;
+	const askedRank = EFFORT_LADDER.indexOf(asked);
+	const below = EFFORT_LADDER.filter((rung) => accepted?.includes(rung) && EFFORT_LADDER.indexOf(rung) <= askedRank);
+	return below.at(-1) ?? "high";
+}
 
 /** What the API should do when a replayed thinking block fails its prefix check. */
 interface AnthropicBlockBinding {
@@ -278,7 +316,7 @@ export function buildAnthropicRequest(
 		// measuring the effort against the default and skipping the field would
 		// save nothing, because the resolved setting is rendered into the prompt
 		// either way.
-		params.output_config = { effort: THINKING_EFFORT[thinking] };
+		params.output_config = { effort: adaptiveEffort(model, thinking) };
 	} else if (thinking !== "off") {
 		const budget = Math.min(THINKING_BUDGETS[thinking], params.max_tokens - 1);
 		if (budget >= 1024) {

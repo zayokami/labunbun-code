@@ -3,7 +3,7 @@
  * user-defined OpenAI-compatible providers from settings. No generated
  * mega-catalog; users extend via `registerOpenAICompatibleProvider`.
  */
-import type { ApiId, Model, ModelPricing } from "./types.ts";
+import type { ApiId, Model, ModelPricing, ThinkingLevel } from "./types.ts";
 
 const ANTHROPIC_BASE = "https://api.anthropic.com";
 /** Kimi's international host; the China host serves the same ids under its own keys. */
@@ -85,6 +85,10 @@ function anthropicPricing(input: number, output: number, cacheReadMultiplier = 0
 		output,
 		cacheRead: roundPrice(input * cacheReadMultiplier),
 		cacheWrite: roundPrice(input * 1.25),
+		// Anthropic prices a one-hour write at twice the input rate against 1.25x
+		// for the default five-minute one; the catalog bills the bucket at that
+		// rate wherever a usage record reports one.
+		cacheWrite1h: roundPrice(input * 2),
 	};
 }
 
@@ -118,6 +122,14 @@ function anthropicCompatModel(
 		maxOutputTokens: number;
 		reasoning?: boolean;
 		thinkingMode?: "adaptive" | "extended";
+		/**
+		 * The levels this row takes, when that is a proper subset of the session's.
+		 * The effort dial above `high` (xhigh, max) is sent only to a row that
+		 * names the rung: leaving the field off is read as "nothing above high
+		 * has been confirmed", and the request falls back to `high` rather than
+		 * gamble the vendor's acceptance. See `adaptiveEffort` in the adapter.
+		 */
+		reasoningEfforts?: readonly Exclude<ThinkingLevel, "off">[];
 		pricing: ModelPricing;
 	},
 ): Model {
@@ -135,6 +147,7 @@ function anthropicCompatModel(
 		maxOutputTokens: opts.maxOutputTokens,
 		reasoning: opts.reasoning ?? true,
 		...(opts.thinkingMode ? { thinkingMode: opts.thinkingMode } : {}),
+		...(opts.reasoningEfforts ? { reasoningEfforts: opts.reasoningEfforts } : {}),
 		pricing: opts.pricing,
 	};
 }
@@ -148,6 +161,8 @@ function anthropicModel(
 		reasoning?: boolean;
 		thinkingMode?: "adaptive" | "extended";
 		thinkingBlockBinding?: boolean;
+		/** The levels this row takes, when that is a proper subset; see `anthropicCompatModel`. */
+		reasoningEfforts?: readonly Exclude<ThinkingLevel, "off">[];
 		pricing: ModelPricing;
 	},
 ): Model {

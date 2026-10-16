@@ -35,7 +35,8 @@ export interface OpenAIRawChunk {
 			/** The same trace under the name Ollama and OpenRouter use. */
 			reasoning?: string | null;
 			tool_calls?: Array<{
-				index: number;
+				/** The array slot. Some shims (Ollama's) omit it entirely. */
+				index?: number;
 				id?: string | null;
 				type?: string | null;
 				function?: { name?: string | null; arguments?: string | null };
@@ -212,6 +213,13 @@ const FINISH_REASON_MAP: Record<string, "stop" | "toolUse" | "length" | "refusal
 	function_call: "toolUse",
 	length: "length",
 	max_tokens: "length",
+	// Mistral's own spellings, on the rows that ride this wire. `model_length`
+	// is its out-of-room terminal value and `tool_call` is what it answers when
+	// the turn ended in a call. Unmapped, each is reported as "Unrecognized
+	// finish reason" — an error on a turn that ended exactly as the provider
+	// says it did.
+	model_length: "length",
+	tool_call: "toolUse",
 	// A filtered response is a refusal, the same turn the Anthropic wire names
 	// with its own stop reason. "stop" would file the model's refusal as a
 	// successful turn that happened to say nothing.
@@ -335,7 +343,10 @@ export async function* mapOpenAIStream(
 
 		if (delta?.tool_calls) {
 			for (const fragment of delta.tool_calls) {
-				const slot = fragment.index;
+				// A missing index is slot 0 rather than its own key: `undefined`
+				// as a map key makes the first fragment's synthesized id read
+				// `call_undefined`, a string no provider could ever have written.
+				const slot = fragment.index ?? 0;
 				let state = openCalls.get(slot);
 				if (!state) {
 					state = {
@@ -345,6 +356,15 @@ export async function* mapOpenAIStream(
 					};
 					openCalls.set(slot, state);
 					yield builder.toolCallStart(state.index, state.id, state.name);
+				} else if (fragment.id && state.id.startsWith("call_")) {
+					// The id can arrive on a later fragment than the one that
+					// opened the call. The placeholder was already emitted and the
+					// block it created is what the finish reads, so the wire's own
+					// id replaces it in both places — otherwise this transcript
+					// replays an id the provider never wrote.
+					state.id = fragment.id;
+					const block = builder.message.content[state.index];
+					if (block?.type === "toolCall") block.id = fragment.id;
 				} else if (fragment.function?.name && !state.name) {
 					state.name = fragment.function.name;
 				}

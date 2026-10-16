@@ -180,7 +180,7 @@ export type ApiId =
  * has to validate a level — the settings schema is one — derives its set from
  * here rather than restating it, so the two cannot drift apart.
  */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 /** Minimal structural type for a JSON Schema object (tool parameters). */
@@ -197,6 +197,13 @@ export interface ModelPricing {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/**
+	 * The write rate for tokens written under a one-hour TTL, where the provider
+	 * charges a different rate for that bucket — Anthropic charges twice the input
+	 * rate for it against 1.25x for the five-minute default. Absent means the same
+	 * rate as `cacheWrite`, which is what every other provider bills.
+	 */
+	cacheWrite1h?: number;
 }
 
 export interface Model<Api extends ApiId = ApiId> {
