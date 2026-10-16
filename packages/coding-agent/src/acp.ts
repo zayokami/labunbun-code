@@ -68,7 +68,15 @@ import {
 	type ToolResultContent,
 	withModelFallback,
 } from "@labunbun/ai";
-import { createAllTools } from "@labunbun/tools";
+import {
+	BackgroundShellManager,
+	ChildProcessExecOperations,
+	createAllTools,
+	defaultOperations,
+	detectRuntime,
+	detectShell,
+	type Operations,
+} from "@labunbun/tools";
 import { permissionOptions, ruleSpecifierFor } from "@labunbun/tui";
 import * as acp from "@zed-industries/agent-client-protocol";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
@@ -101,6 +109,7 @@ import {
 } from "./settings.ts";
 import { createSkillTool } from "./skill-tool.ts";
 import { loadSkillsWithNotes, skillDiscoveryBlock, skillDiscoveryBudgetChars } from "./skills.ts";
+import { createSpawnConfiner } from "./spawn-confinement.ts";
 import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
@@ -935,7 +944,19 @@ class AcpAgent implements acp.Agent {
 					}
 				: undefined;
 
+		// One shared executor, the REPL's own rule: the confiner below and the
+		// Bash tool must resolve shells, backends, and proxies identically, so
+		// it is built here and handed to both. The shell is resolved before the
+		// runtime — the Windows probe runs this shell — and the one runtime
+		// serves the executor and the background manager, so nothing re-probes
+		// the machine.
+		const shell = detectShell();
+		const runtime = detectRuntime(process.platform, shell);
+		const ops: Operations = defaultOperations(new ChildProcessExecOperations(runtime, shell));
+		const backgroundShells = new BackgroundShellManager(runtime, ops);
 		const tools = createAllTools(cwd, {
+			operations: ops,
+			backgroundShells,
 			readOnlyRoots: [toolOutputRoot(cwd)],
 			spillDir: toolSpillDir(cwd),
 			home,
@@ -988,7 +1009,21 @@ class AcpAgent implements acp.Agent {
 		if (downgradeReason) process.stderr.write(`Warning: ${downgradeReason}\n`);
 		const effectiveNetwork = networkAxisFrom(settings);
 
-		const hooksRuntime = snapshotHooks(settings.hooks);
+		// The spawns outside the Bash tool — hook commands — run under the same
+		// axes. The holder exists because the SessionStart hook below runs, and
+		// reaches the confiner, before the session does; the getters read it per
+		// spawn, not captured, because `session/set_mode` can move the sandbox
+		// axis mid-session (see `setSessionMode`).
+		const liveRef: { current?: AgentSession } = {};
+		const spawnConfine = createSpawnConfiner({
+			cwd,
+			ops,
+			sandbox: () => liveRef.current?.sandbox ?? effectiveSandbox,
+			network: () => liveRef.current?.network ?? effectiveNetwork,
+			home,
+			writableRoots: settings.permissions.additionalDirectories,
+		});
+		const hooksRuntime = snapshotHooks(settings.hooks, spawnConfine);
 		const hookContext: string[] = [];
 		const sessionStart = await hooksRuntime.run("SessionStart", { session_id: sessionId, cwd });
 		hookContext.push(...sessionStart.addedContext);
@@ -1111,6 +1146,9 @@ class AcpAgent implements acp.Agent {
 				hooks: sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd }),
 			},
 		});
+		// From here the confiner's getters answer with this session's axes,
+		// including whatever `session/set_mode` moves afterwards.
+		liveRef.current = session;
 		// The transcript a resume handed back, into the session that will carry
 		// it — the same seeding `headless.ts` does for `--resume`. A session that
 		// was just started has none.

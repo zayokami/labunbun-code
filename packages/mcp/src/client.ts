@@ -276,11 +276,34 @@ async function listEveryPage<TPage extends { nextCursor?: string }>(
 	}
 }
 
+/**
+ * The stdio spawn a host's confiner sees: the configured command, and the
+ * fields the transport would open it with.
+ */
+export interface McpStdioSpawn {
+	command: string;
+	args: string[];
+	env?: Record<string, string>;
+	cwd?: string;
+}
+
+/**
+ * The host's hook over a stdio spawn. It receives what the config asked for
+ * and returns what is actually opened — for the REPL and headless hosts that
+ * is the session's sandbox wrapped around the command, the same wrapping the
+ * Bash tool's own commands get. A rejection fails this server's connect with
+ * the message, which is the fail-closed side for a server the host meant to
+ * confine.
+ */
+export type McpSpawnConfiner = (spawn: McpStdioSpawn) => Promise<McpStdioSpawn>;
+
 export interface ConnectMcpOptions {
 	/** Connect + discovery budget. Defaults to CONNECT_TIMEOUT_MS. */
 	timeoutMs?: number;
 	/** Budget for one `tools/call`. Defaults to CALL_TIMEOUT_MS. */
 	callTimeoutMs?: number;
+	/** Runs over the stdio spawn before the transport opens it. The HTTP branch never consults it — there is no process there to wrap. */
+	confine?: McpSpawnConfiner;
 }
 
 /** Budget for one request against an already-connected server. */
@@ -591,6 +614,23 @@ async function listToolsFrom(
 	);
 }
 
+/**
+ * The stdio transport for one config, through the host's confiner when one is
+ * wired. The confiner's answer is what opens — for the REPL that is the
+ * sandbox wrapper around the command, plus the policy's proxy variables as an
+ * env increment the transport merges over its own whitelist. A rejection here
+ * fails this server's connect (the caller catches), not the session.
+ */
+async function stdioTransport(
+	params: { command: string; args: string[]; env?: Record<string, string>; cwd?: string },
+	confine: McpSpawnConfiner | undefined,
+): Promise<StdioClientTransport> {
+	const spawn: McpStdioSpawn = confine
+		? await confine({ command: params.command, args: params.args, env: params.env, cwd: params.cwd })
+		: { command: params.command, args: params.args, env: params.env, cwd: params.cwd };
+	return new StdioClientTransport({ command: spawn.command, args: spawn.args, env: spawn.env, cwd: spawn.cwd });
+}
+
 /** Connect to one MCP server and adapt its tools. Never throws. */
 export async function connectMcpServer(
 	serverName: string,
@@ -618,12 +658,10 @@ export async function connectMcpServer(
 				? new StreamableHTTPClientTransport(new URL(parsed.data.url), {
 						requestInit: { headers: parsed.data.headers },
 					})
-				: new StdioClientTransport({
-						command: (parsed.data as { command: string }).command,
-						args: (parsed.data as { args: string[] }).args,
-						env: (parsed.data as { env?: Record<string, string> }).env,
-						cwd: (parsed.data as { cwd?: string }).cwd,
-					});
+				: await stdioTransport(
+						parsed.data as { command: string; args: string[]; env?: Record<string, string>; cwd?: string },
+						options?.confine,
+					);
 
 		const client = new Client({ name: "labunbun", version: "0.1.0" });
 		opened = client;

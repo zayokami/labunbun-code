@@ -92,6 +92,7 @@ import {
 	type Operations,
 	ReadFileState,
 	type SandboxBackend,
+	type SpawnConfiner,
 	TaskStore,
 } from "@labunbun/tools";
 import {
@@ -285,6 +286,7 @@ import {
 	skillsAsCommands,
 	withheldProjectSkills,
 } from "./skills.ts";
+import { createSpawnConfiner } from "./spawn-confinement.ts";
 import { markStartup } from "./startup-trace.ts";
 import {
 	formatRetryEnding,
@@ -883,8 +885,32 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		handle?.setContextInfo(contextInfoFor(target));
 	}
 
+	/**
+	 * The live session. Declared this early — above the hooks runtime and the
+	 * MCP connects below — because the confiner both spawn through reads the
+	 * session's sandbox and network axes, and `connectAllMcpServers` reaches
+	 * that read *synchronously*: an async call runs to its first await while
+	 * this frame is still executing, so a declaration below the call was a
+	 * temporal dead zone at the exact moment a stdio server asked to be
+	 * wrapped. Null until the session is built; the getters fall back to the
+	 * startup axes in the meantime.
+	 */
+	let sessionRef: AgentSession | null = null;
+	// The sandbox hook every non-Bash spawn goes through — hook commands and
+	// MCP stdio servers. Same resolver, same roots, same live axes as the "!"
+	// shell passthrough and the Bash tool, so none of the four paths can
+	// disagree about what this session confines.
+	const spawnConfine = createSpawnConfiner({
+		cwd,
+		ops,
+		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
+		network: () => sessionRef?.network ?? effectiveNetwork,
+		home,
+		writableRoots: settings.permissions.additionalDirectories,
+	});
+
 	// ---- user hooks (snapshotted at startup against mid-session injection) ----
-	const hooksRuntime = snapshotHooks(settings.hooks);
+	const hooksRuntime = snapshotHooks(settings.hooks, spawnConfine);
 	markStartup("hooks snapshotted");
 	/**
 	 * Session-scoped mutable state lives behind holders. An in-app /resume or a
@@ -941,7 +967,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// live session at that point, through the same path a mid-session
 	// `tools/list_changed` takes.
 	const mcpConnections: McpConnection[] = [];
-	const mcpConnectStarted = connectAllMcpServers(mcpConfig, approvedMcpServers);
+	// The confiner rides along in the options: each stdio server is wrapped at
+	// its spawn under the same policy the Bash tool builds.
+	const mcpConnectStarted = connectAllMcpServers(mcpConfig, approvedMcpServers, { confine: spawnConfine });
 	// Set at the `allTools` snapshot below: the session is then born with the
 	// connections already in its list, and no refresh is owed for them.
 	let mcpToolsSeededAtBirth = false;
@@ -955,10 +983,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	/**
 	 * A server that changed its tool list mid-session, wired to the live session.
 	 * The handler and its reasoning live in `mcp-tool-refresh.ts`, with the test
-	 * that holds them; `sessionRef` below is read through the arrow at the call,
-	 * never captured, so a `/resume` swap lands the rebuilt list on the live
-	 * conversation — the arrow defers evaluation past the declaration below, and
-	 * this wiring already relies on that ordering.
+	 * that holds them; `sessionRef` is read through the arrow at the call, never
+	 * captured, so a `/resume` swap lands the rebuilt list on the live
+	 * conversation — the arrow defers evaluation to the call, and this wiring
+	 * already relies on that ordering.
 	 */
 	const onMcpToolsChanged = createMcpToolRefreshHandler({
 		getSession: () => sessionRef,
@@ -1000,8 +1028,6 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		.catch(() => {});
 
 	// ---- subagents, skills, plan mode ----
-	/** The live session. Declared before the tools that read it through a getter. */
-	let sessionRef: AgentSession | null = null;
 	// The "!" shell passthrough, built after the session for the same reason the
 	// tools are: its sandbox and network axes are read through `sessionRef` per
 	// run, so a `/mode` or Shift+Tab lands on the next "!" the way it lands on
@@ -1911,6 +1937,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				cwd,
 				sandboxBackend: ops.sandboxBackend,
 				appContainerReason: ops.appContainerReason,
+				spawnConfine,
 				home,
 				costTracker,
 				cache: {
@@ -2479,6 +2506,15 @@ interface AppCommandContext {
 	 * not select it is owed the reason, not the build's.
 	 */
 	appContainerReason?: string;
+	/**
+	 * The session's spawn confiner, for the spawns `/mcp approve` starts after
+	 * startup: a server approved mid-session must be wrapped by the same policy
+	 * the startup connects were. Optional for the same reason as
+	 * `sandboxBackend` — a hand-built context has no session behind it, and an
+	 * absent confiner connects the server unconfined, which is what this path
+	 * did before the field existed.
+	 */
+	spawnConfine?: SpawnConfiner;
 	/** Home directory for user-owned state (MCP approvals). Defaults to the real one. */
 	home?: string;
 	costTracker: CostTracker;
@@ -3457,7 +3493,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					return true;
 				}
 				persistMcpApproval(ctx.cwd, serverName, ctx.home);
-				void connectMcpServer(serverName, config).then((connection) => {
+				// Under the session's confiner like the startup connects: approval
+				// decides *whether* the server runs, not what holds it.
+				void connectMcpServer(serverName, config, { confine: ctx.spawnConfine }).then((connection) => {
 					ctx.mcpConnections.push(connection);
 					// This connection appeared after the startup attach loop ran its
 					// one pass, so it is wired here or a later tool-list change on

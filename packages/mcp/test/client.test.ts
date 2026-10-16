@@ -848,4 +848,104 @@ describe("connectAllMcpServers approval gating", () => {
 		});
 		expect(connections[0].error).toBeUndefined();
 	}, 20_000);
+
+	test("the confiner rides the options through to every stdio spawn", async () => {
+		const seen: string[] = [];
+		const connections = await connectAllMcpServers(
+			{ fixture: { command: process.execPath, args: [FIXTURE_SERVER] } },
+			undefined,
+			{
+				confine: async (spawn) => {
+					seen.push(spawn.command);
+					return spawn;
+				},
+			},
+		);
+		expect(connections[0].error).toBeUndefined();
+		expect(seen).toEqual([process.execPath]);
+	}, 20_000);
+});
+
+/**
+ * The host's confiner over the stdio spawn.
+ *
+ * The REPL and headless hosts wrap every stdio server in the session's sandbox
+ * (`spawn-confinement.ts`), but the wiring is a callback crossing a package
+ * boundary, which is the kind of seam that reads right and is never called.
+ * These tests pin the three facts the seam consists of: the confiner sees the
+ * configured spawn, its answer is what opens, and its refusal is this server's
+ * failure — fail-closed, not a spawn that quietly proceeds unwrapped. The HTTP
+ * branch is the negative control: there is no process, so it must never ask.
+ */
+describe("the confine hook over the stdio spawn", () => {
+	test("sees the configured command and environment, and connects unchanged", async () => {
+		const seen: { command: string; args: string[] | undefined; env: Record<string, string> | undefined }[] = [];
+		const connection = await connectMcpServer(
+			"fixture",
+			{ command: process.execPath, args: [FIXTURE_SERVER], env: { FIXTURE_FLAG: "1" } },
+			{
+				confine: async (spawn) => {
+					seen.push({ command: spawn.command, args: spawn.args, env: spawn.env });
+					return spawn;
+				},
+			},
+		);
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		// Exactly once, with the config's own values — not a default environment
+		// or a re-derived command line.
+		expect(seen).toHaveLength(1);
+		expect(seen[0].command).toBe(process.execPath);
+		expect(seen[0].args).toEqual([FIXTURE_SERVER]);
+		expect(seen[0].env).toEqual({ FIXTURE_FLAG: "1" });
+		expect(connection.tools.length).toBeGreaterThan(0);
+		await disconnectAllMcpServers([connection]);
+	}, 20_000);
+
+	test("the returned spawn is what opens: a rewritten command is the one that runs", async () => {
+		// The rewrite points the spawn at nothing. If the transport still opened
+		// the configured fixture, the connect would succeed and this would fail —
+		// which is the direction that matters: the hook consulted and *ignored*
+		// must not read as the hook never being asked.
+		const connection = await connectMcpServer(
+			"fixture",
+			{ command: process.execPath, args: [FIXTURE_SERVER] },
+			{ confine: async () => ({ command: "labunbun-no-such-program-xyz", args: [] }) },
+		);
+		expect(connection.error).toBeTruthy();
+		expect(connection.tools).toHaveLength(0);
+	}, 20_000);
+
+	test("a rejection fails this server's connect, with the message", async () => {
+		const connection = await connectMcpServer(
+			"fixture",
+			{ command: process.execPath, args: [FIXTURE_SERVER] },
+			{
+				confine: async () => {
+					throw new Error("refused by the session policy");
+				},
+			},
+		);
+		expect(connection.error).toContain("refused by the session policy");
+		expect(connection.tools).toHaveLength(0);
+	}, 20_000);
+
+	test("an http server never consults the confiner", async () => {
+		let asked = 0;
+		const connection = await connectMcpServer(
+			"remote",
+			{ url: "http://127.0.0.1:1/mcp" },
+			{
+				confine: async () => {
+					asked += 1;
+					throw new Error("must not be asked");
+				},
+			},
+		);
+		// The connect fails on the unreachable port, and with `asked` at zero the
+		// failure is the transport's rather than the hook's — a confiner consulted
+		// here would have thrown its own message into the error instead.
+		expect(connection.error).toBeTruthy();
+		expect(connection.error).not.toContain("must not be asked");
+		expect(asked).toBe(0);
+	}, 20_000);
 });

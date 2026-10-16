@@ -36,9 +36,14 @@ export interface DoctorCheck {
  * is `ok` because the OS denies a *sandboxed* command every route, these paths
  * are outside even that.
  *
- * The `!` prompt prefix used to be a fourth entry. It now goes through the
- * permission engine and is handed the workspace policy like the Bash tool, so
- * it left this list and joined the positive control in `doctor.test.ts`.
+ * This list held three entries; two left it. The `!` prompt prefix went first
+ * (it now goes through the permission engine and is handed the workspace policy
+ * like the Bash tool). Hooks and MCP stdio servers went second, through
+ * `spawn-confinement.ts`: their spawns are re-parented under the same wrapper
+ * the Bash tool uses, and the policy's proxy increment rides the environment.
+ * What remains is the HTTP MCP transport, and it remains because there is no
+ * spawn to confine — its traffic is this process's own, and this process is not
+ * sandboxed.
  *
  * The list is exported rather than inlined into the sentence because a sentence
  * is the cheapest thing in the repo to leave stale: nothing fails when a path
@@ -46,7 +51,7 @@ export interface DoctorCheck {
  * fails the moment it stops being unwired, so the sentence cannot quietly
  * outlive the code it describes.
  */
-export const COMMAND_PATHS_WITHOUT_SANDBOX = ["hooks", "MCP stdio servers", "MCP HTTP servers"] as const;
+export const COMMAND_PATHS_WITHOUT_SANDBOX = ["MCP HTTP servers"] as const;
 
 /**
  * `home` and `liveThemeName` are the two things this cannot read off `settings`:
@@ -245,8 +250,9 @@ export async function runDoctorChecks(
 		// Only the `ok` row needs the correction, and it needs it because it is the
 		// one that over-claims. "A shell command reaches nothing" is a statement
 		// about a command that went through the Bash tool and was handed a policy;
-		// the three paths below never are, so on this machine they are the ones that
-		// can still reach the network. The two `warn` rows are already hedged by the
+		// the path below is never handed one — there is no spawn to confine, its
+		// traffic is this process's own — so on this machine it is the one that can
+		// still reach the network. The two `warn` rows are already hedged by the
 		// "a program that ignores HTTP_PROXY… is not subject to it" clause they
 		// carry, and a longer sentence does not make them more true.
 		const uncovered = `, and ${COMMAND_PATHS_WITHOUT_SANDBOX.join(", ")} are started without one, so they are outside all of it`;

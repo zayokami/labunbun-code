@@ -2,6 +2,7 @@ export const MCP_PACKAGE_VERSION = "0.1.0";
 
 export {
 	approveMcpServer,
+	type ConnectMcpOptions,
 	connectAllMcpServers,
 	connectMcpServer,
 	disconnectAllMcpServers,
@@ -22,6 +23,8 @@ export {
 	type McpResourceSummary,
 	type McpServerConfig,
 	McpServerConfigSchema,
+	type McpSpawnConfiner,
+	type McpStdioSpawn,
 	parseMcpServersRecord,
 	readResource,
 } from "./client.ts";

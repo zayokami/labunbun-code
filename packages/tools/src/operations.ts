@@ -92,6 +92,25 @@ export interface ExecResult {
 	sandboxBackend?: SandboxBackend;
 }
 
+/**
+ * A spawn a host performs itself, shaped by the policy.
+ *
+ * The same fields a `child_process` spawn takes, because the callers that
+ * send these through {@link ExecOperations.confineSpawn} — the MCP stdio
+ * transport, the hook runner — own their spawn and only borrow the wrapping
+ * `exec` would have done.
+ */
+export interface SpawnSpec {
+	command: string;
+	args: string[];
+	/** What the policy adds to the environment, not the environment itself. */
+	env?: Record<string, string>;
+	cwd?: string;
+}
+
+/** @see {@link ExecOperations.confineSpawn} */
+export type SpawnConfiner = (spawn: SpawnSpec) => Promise<SpawnSpec>;
+
 /** A live process, handed to the caller at the moment its wait expired. */
 export interface ExecHandoff {
 	child: ChildProcess;
@@ -144,6 +163,25 @@ export interface ExecOperations {
 	 * `networkEnvFor` hands out variables for.
 	 */
 	networkPortsFor?(policy: SandboxPolicy): Promise<readonly number[] | undefined>;
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * The wrapping `exec` would put around a command line, delivered as a spawn
+	 * spec for a caller that owns its own spawn — the MCP stdio transport, the
+	 * hook runner. Same resolver, same proxy, same order as `exec`; the callers
+	 * that cannot take a wrapper back get the plain spec with the proxy
+	 * variables still added, which is what an unconfined `exec` hands its child
+	 * too. `env` carries only what the policy adds — the caller merges it onto
+	 * its own environment, which is a whitelist for one caller and `process.env`
+	 * for the other.
+	 */
+	confineSpawn?(options: {
+		policy: SandboxPolicy;
+		command: string;
+		args?: readonly string[];
+		env?: Record<string, string>;
+		cwd?: string;
+	}): Promise<SpawnSpec>;
 
 	// Long-form design notes: docs/dev/tools.md
 	/** What confines commands run through here, when this implementation knows. */
@@ -468,6 +506,53 @@ export class ChildProcessExecOperations implements ExecOperations {
 	async networkPortsFor(policy: SandboxPolicy): Promise<readonly number[] | undefined> {
 		const proxy = await this.#proxyFor(policy);
 		return proxy === undefined ? undefined : portsOf(proxy);
+	}
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * The wrapping `exec` gives a command line, delivered as a spawn spec.
+	 *
+	 * The proxy starts before the resolution for the same reason `exec`
+	 * documents: the macOS profile has to name the enforcing listener's ports
+	 * before the argv is built, and `#proxyFor` decides from the policy alone,
+	 * so sharing the order here shares the listener — a server and a shell
+	 * under one policy reach the same proxy. The container backends are not
+	 * attached: a plain `child_process` spawn has no attribute channel, so
+	 * those come back as the plain spec with the proxy variables still added,
+	 * which is also what an unconfined `exec` injects.
+	 */
+	async confineSpawn(options: {
+		policy: SandboxPolicy;
+		command: string;
+		args?: readonly string[];
+		env?: Record<string, string>;
+		cwd?: string;
+	}): Promise<SpawnSpec> {
+		const proxy = await this.#proxyFor(options.policy);
+		const resolution = resolveSandboxExecution({
+			policy: options.policy,
+			command: [options.command, ...(options.args ?? [])],
+			platform: this.#runtime.platform,
+			hasNativeBackend: this.#runtime.hasNativeBackend,
+			hasAppContainer: this.#runtime.hasAppContainer,
+			appContainerReason: this.#runtime.appContainerReason,
+			executableRoots: this.#runtime.executableRoots,
+			networkPorts: proxy === undefined ? undefined : portsOf(proxy),
+		});
+		// The policy's variables go last, as they do in `exec`'s child
+		// environment: what confines this spawn outranks what the caller's
+		// configuration happened to name.
+		const proxyEnv = proxy?.env;
+		const env = options.env === undefined && proxyEnv === undefined ? undefined : { ...options.env, ...proxyEnv };
+		if (resolution.kind === "native") {
+			return {
+				command: resolution.execution.argv[0],
+				args: resolution.execution.argv.slice(1),
+				env,
+				cwd: options.cwd,
+			};
+		}
+		return { command: options.command, args: [...(options.args ?? [])], env, cwd: options.cwd };
 	}
 
 	// Long-form design notes: docs/dev/tools.md

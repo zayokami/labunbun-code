@@ -107,7 +107,7 @@ The value `enabled` is the default. It starts no proxy. It restricts nothing. A 
 
 > **WARNING**: A program that does not read `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is not restricted by the proxy.
 
-> **NOTE**: Three paths do not get the proxy. They are hooks, MCP stdio servers, and MCP HTTP servers. These paths also do not get the OS sandbox. The `!` prompt prefix used to be a fourth path. It now runs through the permission engine under the same workspace policy as the Bash tool.
+> **NOTE**: MCP HTTP servers do not get the proxy. They also do not get the OS sandbox. Their traffic is the session process's own. Hooks and MCP stdio servers get both on macOS and Linux. On Windows they get the proxy variables only, because the container backend cannot wrap them yet. The `!` prompt prefix used to be one of these paths. It now runs through the permission engine under the same workspace policy as the Bash tool.
 
 Only the user tier can set `networkAccess` and `networkDomains`. A repository must not set them. A repository that turns the network off makes `bun install` fail for every user who clones it.
 

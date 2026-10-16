@@ -1853,6 +1853,169 @@ describe("the network axis reaches the spawn", () => {
 });
 
 /**
+ * The confiner is `exec`'s wrapping decision, without the spawn.
+ *
+ * MCP stdio servers and hook commands open their own children — through the SDK
+ * transport, through `child_process.spawn` — so they never pass through
+ * `exec`, and the wrapping `exec` computes had no way to reach them. The
+ * confiner is that same computation delivered as a spawn spec. What each test
+ * below pins is one branch of `resolveSandboxExecution` arriving at the caller,
+ * plus the one property `exec` cannot check for it: the environment it returns
+ * is the policy's increment, not a full environment wearing the policy's name.
+ */
+describe("the confiner hands the non-Bash spawns exec's own answer", () => {
+	/** A machine this one is not: macOS, with `sandbox-exec` believed to be present. */
+	const FAKE_DARWIN: SandboxRuntime = { platform: "darwin", hasNativeBackend: true };
+
+	test("a confined filesystem on linux comes back as a bwrap argv with the proxy increment", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const policy = buildSandboxPolicy({
+				sandbox: "workspace-write",
+				workspace: cwd,
+				network: "restricted",
+				networkRules: [{ pattern: "registry.npmjs.org", permission: "allow" }],
+			});
+			const spec = await exec.confineSpawn({ policy, command: "node", args: ["-e", "1"] });
+			expect(spec.command).toBe("bwrap");
+			expect(spec.args).toContain("--unshare-net");
+			// The tail is the caller's spawn untouched — the confiner wraps, it does
+			// not rewrite — and the `--` above it is the argv shape it always had.
+			expect(spec.args.slice(-4)).toEqual(["--", "node", "-e", "1"]);
+			// The increment names the proxy this process is actually holding, the
+			// same reading the `exec` tests above pinned.
+			expect(spec.env?.HTTP_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+			expect(exec.networkProxyRunning).toBe(true);
+			// And nothing else: a full environment under this key would hand every
+			// non-Bash spawn this process's own environment and call it the policy.
+			expect(spec.env?.PATH).toBeUndefined();
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("a confined filesystem on macOS names the proxy's loopback port in the profile", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_DARWIN);
+		try {
+			const policy = buildSandboxPolicy({
+				sandbox: "workspace-write",
+				workspace: cwd,
+				network: "restricted",
+				networkRules: [{ pattern: "registry.npmjs.org", permission: "allow" }],
+			});
+			const spec = await exec.confineSpawn({ policy, command: "node", args: ["-e", "1"] });
+			expect(spec.command).toBe("/usr/bin/sandbox-exec");
+			expect(spec.args[0]).toBe("-p");
+			// One proxy, two readings again: the port the environment names is the
+			// port the profile permits. Built from the same running listener, so a
+			// mismatch here is the confiner reading the proxy twice, differently.
+			const port = Number(new URL(spec.env?.HTTP_PROXY ?? "").port);
+			expect(port).toBeGreaterThan(0);
+			expect(spec.args[1]).toContain(`(allow network-outbound (remote ip "localhost:${port}"))`);
+			expect(spec.args.slice(-4)).toEqual(["--", "node", "-e", "1"]);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("a caller's environment is kept, and the policy's variables still win", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const policy = netPolicy(cwd, "restricted", [{ pattern: "registry.npmjs.org", permission: "allow" }]);
+			const spec = await exec.confineSpawn({
+				policy,
+				command: "node",
+				args: ["-e", "1"],
+				env: { HTTP_PROXY: "http://192.0.2.1:9/", MCP_SERVER_FLAG: "1" },
+			});
+			expect(spec.env?.MCP_SERVER_FLAG).toBe("1");
+			// The merge order is the whole assertion: a caller naming a proxy is a
+			// way around the policy, and the policy is the thing that has to hold.
+			expect(spec.env?.HTTP_PROXY).not.toContain("192.0.2.1");
+			expect(spec.env?.HTTP_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("an unrestricted filesystem is never wrapped, and the proxy still rides the environment", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			// `danger-full-access` with a restricted network: the short-circuit
+			// documented two describes up leaves the argv alone, but the proxy is
+			// the whole boundary, so the spawn is still pointed at it.
+			const spec = await exec.confineSpawn({
+				policy: netPolicy(cwd, "restricted", [{ pattern: "registry.npmjs.org", permission: "allow" }]),
+				command: "node",
+				args: ["-e", "1"],
+			});
+			expect(spec.command).toBe("node");
+			expect(spec.args).toEqual(["-e", "1"]);
+			expect(spec.env?.HTTP_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("the control: with nothing restricted the spec comes back exactly as it was", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		const spec = await exec.confineSpawn({
+			policy: netPolicy(cwd, "enabled", []),
+			command: "node",
+			args: ["-e", "1"],
+		});
+		expect(spec.command).toBe("node");
+		expect(spec.args).toEqual(["-e", "1"]);
+		// Not `{}` — `undefined`, the same absence `exec` documents for an
+		// unconfined child: the caller keeps the environment it always had.
+		expect(spec.env).toBeUndefined();
+		expect(exec.networkProxyRunning).toBe(false);
+	});
+
+	test("a machine with no native backend gets the plain spec and the proxy increment", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations({ platform: "linux", hasNativeBackend: false });
+		try {
+			const policy = buildSandboxPolicy({
+				sandbox: "workspace-write",
+				workspace: cwd,
+				network: "restricted",
+				networkRules: [{ pattern: "registry.npmjs.org", permission: "allow" }],
+			});
+			const spec = await exec.confineSpawn({ policy, command: "node", args: ["-e", "1"] });
+			// The simulated backend is not an argv, so the spawn is not re-parented —
+			// and the proxy variables still arrive, which is the half of the policy a
+			// bare spawn can actually carry.
+			expect(spec.command).toBe("node");
+			expect(spec.env?.HTTP_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("the Windows container branch is not an argv, so the spec stays the caller's", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations({ platform: "win32", hasNativeBackend: false, hasAppContainer: true });
+		const spec = await exec.confineSpawn({
+			policy: buildSandboxPolicy({ sandbox: "workspace-write", workspace: cwd }),
+			command: "node",
+			args: ["-e", "1"],
+		});
+		// The container needs `CreateProcessW` and its attribute list; a plain
+		// `child_process` spawn cannot express it, so the spawn is handed back
+		// unchanged — and the doctor's list says so from the other side.
+		expect(spec.command).toBe("node");
+		expect(spec.args).toEqual(["-e", "1"]);
+		expect(spec.env).toBeUndefined();
+	});
+});
+
+/**
  * One proxy, two readings — and on macOS they have to be the same numbers.
  *
  * `exec` reads the proxy it started twice: once as the environment a child is

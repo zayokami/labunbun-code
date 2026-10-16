@@ -417,12 +417,13 @@ describe("the Network row", () => {
 	 *
 	 * "The OS sandbox denies a command every route off the machine … so a shell
 	 * command reaches nothing" is a true statement about a command the Bash tool
-	 * handed a policy, and a false statement about the repo in general: hooks
-	 * and both MCP transports are started without one, so on the very machine
-	 * where the row says `ok`, those are the paths that can still reach out.
-	 * The row now says so. (The `!` prompt prefix was a fourth entry until it
-	 * was wired through the permission engine and handed the workspace policy,
-	 * like the Bash tool — it moved to the control below.)
+	 * handed a policy, and a false statement about the repo in general: the HTTP
+	 * MCP transport is not handed one — there is no spawn to confine, its
+	 * traffic is this process's own — so on the very machine where the row says
+	 * `ok`, that is the path that can still reach out. The row says so. (The `!`
+	 * prompt prefix and then hooks and MCP stdio servers each left this list
+	 * when they were handed the workspace policy; all three moved to the control
+	 * below.)
 	 *
 	 * The second table is the part that matters, because a sentence is the
 	 * cheapest thing in the repo to leave stale — nothing fails when a path
@@ -447,7 +448,7 @@ describe("the Network row", () => {
 		expect(row?.detail).toContain("outside all of it");
 	});
 
-	test("the list is exactly these three, and not merely these", () => {
+	test("the list is exactly this, and not merely this", () => {
 		// The two guards around this list are one-directional on their own, and the
 		// gap between them is the interesting one. The table below reads each call
 		// site and fails when a listed path becomes *covered*; the row and the
@@ -457,12 +458,10 @@ describe("the Network row", () => {
 		// unwired — leaves every other guard green while `/doctor` and the README
 		// both under-report. This is the assertion that closes it: an independent
 		// literal, which has to be edited deliberately.
-		expect([...COMMAND_PATHS_WITHOUT_SANDBOX]).toEqual(["hooks", "MCP stdio servers", "MCP HTTP servers"]);
+		expect([...COMMAND_PATHS_WITHOUT_SANDBOX]).toEqual(["MCP HTTP servers"]);
 	});
 
 	test.each([
-		["hooks", join(SRC, "hooks.ts"), "spawn(shell, args, {"],
-		["MCP stdio servers", join(SRC, "..", "..", "mcp", "src", "client.ts"), "new StdioClientTransport({"],
 		["MCP HTTP servers", join(SRC, "..", "..", "mcp", "src", "client.ts"), "new StreamableHTTPClientTransport("],
 	])("%s is still started without a sandbox policy", (_label, file, anchor) => {
 		const window = callSite(readFileSync(file, "utf8"), anchor);
@@ -471,17 +470,25 @@ describe("the Network row", () => {
 	});
 
 	test.each([
-		["the Bash tool", join(SRC, "..", "..", "tools", "src", "bash.ts"), "ops.exec({"],
-		["the `!` prompt prefix", join(SRC, "shell-passthrough.ts"), "opts.ops.exec({"],
-	])("%s is covered, and must stay so", (_label, file, anchor) => {
+		["the Bash tool", join(SRC, "..", "..", "tools", "src", "bash.ts"), "ops.exec({", "sandbox:"],
+		["the `!` prompt prefix", join(SRC, "shell-passthrough.ts"), "opts.ops.exec({", "sandbox:"],
+		["hooks", join(SRC, "hooks.ts"), "const prepared = confine", "await confine("],
+		[
+			"MCP stdio servers",
+			join(SRC, "..", "..", "mcp", "src", "client.ts"),
+			"async function stdioTransport(",
+			"await confine(",
+		],
+	])("%s is covered, and must stay so", (_label, file, anchor, needle) => {
 		// The control. Without it the table above could be green because the
 		// window is empty, or because the anchor moved, and both would read as
 		// "still unwired" — which is the one answer in this file that must never
-		// be produced by accident. The `!` prefix moved here from the table
-		// above when it was wired through the engine and the workspace policy;
-		// same positive form, so it cannot quietly go back to being unwired.
+		// be produced by accident. The `!` prefix, then hooks and the stdio
+		// transport, each moved here from the table above when they were handed
+		// the workspace policy; same positive form, so one cannot quietly go
+		// back to being unwired.
 		const window = callSite(readFileSync(file, "utf8"), anchor);
-		expect(window).toContain("sandbox:");
+		expect(window).toContain(needle);
 	});
 
 	test("the README names the same paths, and does not claim otherwise", () => {
@@ -500,5 +507,9 @@ describe("the Network row", () => {
 			expect(readme).toContain(path);
 		}
 		expect(readme).not.toContain("really enforced on all three platforms");
+		// The sentence this note replaced — "Three paths do not get the proxy" —
+		// must not come back either: two of those paths are covered now, and a
+		// reader deciding whether to trust `restricted` is owed the current shape.
+		expect(readme).not.toContain("Three paths do not get the proxy");
 	});
 });

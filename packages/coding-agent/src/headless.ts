@@ -37,7 +37,15 @@ import {
 	type McpServerConfig,
 	parseMcpServersRecord,
 } from "@labunbun/mcp";
-import { createAllTools } from "@labunbun/tools";
+import {
+	BackgroundShellManager,
+	ChildProcessExecOperations,
+	createAllTools,
+	defaultOperations,
+	detectRuntime,
+	detectShell,
+	type Operations,
+} from "@labunbun/tools";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createToolLedger, formatResumeSummary, readToolCheckpoints } from "./checkpoint-log.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
@@ -83,6 +91,7 @@ import {
 	skillsAsCommands,
 	withheldProjectSkills,
 } from "./skills.ts";
+import { createSpawnConfiner } from "./spawn-confinement.ts";
 import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
 import { SubagentRegistry } from "./subagent-registry.ts";
 import { createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
@@ -275,10 +284,21 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 				}
 			: undefined;
 
+	// One shared executor, the REPL's own rule: the confiner further down and
+	// the Bash tool must resolve shells, backends, and proxies identically, so
+	// it is built here and handed to both. The shell is resolved before the
+	// runtime — the Windows probe runs this shell — and the one runtime serves
+	// the executor and the background manager, so nothing re-probes the machine.
+	const shell = detectShell();
+	const runtime = detectRuntime(process.platform, shell);
+	const ops: Operations = defaultOperations(new ChildProcessExecOperations(runtime, shell));
+	const backgroundShells = new BackgroundShellManager(runtime, ops);
 	// Spilling applies here too: a `-p` run reads a repository like any other
 	// session, and a build log that does not fit is no more reproducible for
 	// being unattended.
 	const tools = createAllTools(cwd, {
+		operations: ops,
+		backgroundShells,
 		readOnlyRoots: [toolOutputRoot(cwd)],
 		// Under the root Read is already allowed into, so every pointer a tool
 		// result carries is a path Read can open.
@@ -382,8 +402,23 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// `networkAccess` mean anything in a `-p` run.
 	const effectiveNetwork = networkAxisFrom(settings);
 
+	// The spawns outside the Bash tool — hook commands and MCP stdio servers —
+	// run under the same axes. Constant getters, unlike the REPL's: a `-p` run
+	// resolves its mode once and nothing moves it afterwards. With the headless
+	// default (`danger-full-access`) the resolution is unconfined and every
+	// spawn below is byte-for-byte what it was before the confiner existed; the
+	// case this adds is a managed machine that took the axes down.
+	const spawnConfine = createSpawnConfiner({
+		cwd,
+		ops,
+		sandbox: () => effectiveSandbox,
+		network: () => effectiveNetwork,
+		home,
+		writableRoots: settings.permissions.additionalDirectories,
+	});
+
 	// ---- user hooks (snapshotted at startup against mid-session injection) ----
-	const hooksRuntime = snapshotHooks(settings.hooks);
+	const hooksRuntime = snapshotHooks(settings.hooks, spawnConfine);
 	const sessionId = store?.sessionId ?? undefined;
 	const hookContext: string[] = [];
 
@@ -503,7 +538,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 				`${withheldMcpServers.join(", ")} — approve in an interactive session (/mcp approve <name>).`,
 		);
 	}
-	const mcpConnections = await connectAllMcpServers(runnableMcpServers);
+	const mcpConnections = await connectAllMcpServers(runnableMcpServers, undefined, { confine: spawnConfine });
 	// No `onToolsChanged` is attached on purpose: a `-p` run is one shot and ends
 	// before a tool-list change could reach anyone, so there is no live session
 	// to move a new list into. A server that announces a change mid-run still

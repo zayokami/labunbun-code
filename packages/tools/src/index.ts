@@ -19,6 +19,8 @@ export type {
 	FileStat,
 	FileSystemOperations,
 	Operations,
+	SpawnConfiner,
+	SpawnSpec,
 } from "./operations.ts";
 export { ChildProcessExecOperations, defaultOperations, detectShell, NodeFileSystemOperations } from "./operations.ts";
 export {

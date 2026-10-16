@@ -11,10 +11,16 @@
  * Non-zero exit or `decision:"block"` blocks (for PreToolUse) / flags failure.
  *
  * The config is snapshotted at startup so a compromised session cannot inject
- * hooks mid-run.
+ * hooks mid-run. The snapshot also carries the host's confiner
+ * (`snapshotHooks(raw, confine)`): a hook command is a spawn the user's
+ * settings asked for, and on darwin/linux it runs under the same sandbox the
+ * Bash tool builds, so it cannot write where the session cannot. Absent (the
+ * tests, the doctor's probes) hooks spawn bare — exactly what they did before
+ * the parameter existed.
  */
 import { spawn } from "node:child_process";
 import type { CompactionTrigger, LoopHooks } from "@labunbun/agent";
+import type { SpawnConfiner } from "@labunbun/tools";
 import { z } from "zod";
 
 export const HOOK_EVENTS = [
@@ -145,7 +151,7 @@ interface HookEntry {
 }
 
 /** Snapshot + flatten raw settings into an immutable execution list. */
-export function snapshotHooks(rawHooks: unknown): HooksRuntime {
+export function snapshotHooks(rawHooks: unknown, confine?: SpawnConfiner): HooksRuntime {
 	let config: HooksConfig = {};
 	const parsed = HooksConfigSchema.safeParse(rawHooks);
 	if (parsed.success) {
@@ -163,14 +169,17 @@ export function snapshotHooks(rawHooks: unknown): HooksRuntime {
 			}
 		}
 	}
-	return new HooksRuntime(entries);
+	return new HooksRuntime(entries, confine);
 }
 
 export class HooksRuntime {
 	readonly #entries: HookEntry[];
+	/** Consulted over every command hook's spawn; see `spawn-confinement.ts`. */
+	readonly #confine: SpawnConfiner | undefined;
 
-	constructor(entries: HookEntry[]) {
+	constructor(entries: HookEntry[], confine?: SpawnConfiner) {
 		this.#entries = entries;
+		this.#confine = confine;
 	}
 
 	get isEmpty(): boolean {
@@ -195,7 +204,7 @@ export class HooksRuntime {
 		);
 		for (const entry of relevant) {
 			try {
-				const result = await runCommandHook(entry.hook, { event, ...payload });
+				const result = await runCommandHook(entry.hook, { event, ...payload }, this.#confine);
 				outcome.addedContext.push(...result.addedContext);
 				if (result.blocked) {
 					outcome.blocked = true;
@@ -286,9 +295,13 @@ interface CommandHookResult {
 	addedContext: string[];
 }
 
-async function runCommandHook(hook: CommandHook, payload: HookPayload): Promise<CommandHookResult> {
+async function runCommandHook(
+	hook: CommandHook,
+	payload: HookPayload,
+	confine: SpawnConfiner | undefined,
+): Promise<CommandHookResult> {
 	const timeoutMs = hook.timeout ?? 60_000;
-	const result = await execWithTimeout(hook.command, JSON.stringify(payload), timeoutMs);
+	const result = await execWithTimeout(hook.command, JSON.stringify(payload), timeoutMs, confine);
 
 	const out: CommandHookResult = { blocked: false, suppressOutput: false, addedContext: [] };
 
@@ -339,19 +352,38 @@ async function runCommandHook(hook: CommandHook, payload: HookPayload): Promise<
  */
 const TIMEOUT_KILL_GRACE_MS = 2_000;
 
-function execWithTimeout(
+async function execWithTimeout(
 	command: string,
 	stdinData: string,
 	timeoutMs: number,
+	confine: SpawnConfiner | undefined,
 ): Promise<{
 	stdout: string;
 	stderr: string;
 	exitCode: number;
 }> {
+	const shell = process.platform === "win32" ? "cmd.exe" : "/bin/bash";
+	const args = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+	// The host's confiner runs before the spawn, the same order `operations.exec`
+	// keeps: a proxy it starts has to be up before the argv that permits it can
+	// be built. The spec carries `env: undefined` because what the confiner
+	// returns is the policy's *increment* — the fold over `process.env` happens
+	// here, on the far side, so the confiner is never handed a full environment
+	// to pass back. A rejection (a host that refuses to spawn unconfined)
+	// propagates and fails this hook run; `HooksRuntime.run` catches it into the
+	// outcome the call sites already report.
+	const prepared = confine
+		? await confine({ command: shell, args, env: undefined, cwd: process.cwd() })
+		: { command: shell, args, env: undefined, cwd: process.cwd() };
 	return new Promise((resolve) => {
-		const shell = process.platform === "win32" ? "cmd.exe" : "/bin/bash";
-		const args = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
-		const child = spawn(shell, args, { cwd: process.cwd(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+		const child = spawn(prepared.command, prepared.args, {
+			cwd: prepared.cwd ?? process.cwd(),
+			// No increment means no `env` option: the child inherits this
+			// process's environment, which is what it always did.
+			env: prepared.env === undefined ? undefined : { ...process.env, ...prepared.env },
+			windowsHide: true,
+			stdio: ["pipe", "pipe", "pipe"],
+		});
 
 		let stdout = "";
 		let stderr = "";

@@ -80,6 +80,75 @@ describe("snapshotHooks", () => {
 	});
 });
 
+/**
+ * The confiner over the hook's spawn.
+ *
+ * The REPL, headless and ACP hosts all snapshot hooks with a confiner
+ * (`spawn-confinement.ts`), which is a callback crossing into this module — the
+ * seam that reads right and is never called. What these two tests pin: the
+ * confiner is handed the exact shell spawn `execWithTimeout` would have opened,
+ * the spec carries the policy increment and *not* this process's environment
+ * (the caller folds that, so the confiner is never handed one to leak back),
+ * and what it returns is what runs. The second test is the fail-closed half: a
+ * refusal fails the hook run rather than letting an unwrapped spawn through.
+ */
+describe("the command hook spawns through the host's confiner", () => {
+	test("the confiner is handed the shell spawn, and its answer is what runs", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-hook-"));
+		const capturePath = join(dir, "captured.txt");
+		const envPath = join(dir, "env.txt");
+		const scriptPath = join(dir, "confined-hook.mjs");
+		writeFileSync(
+			scriptPath,
+			`import { appendFileSync, writeFileSync } from "node:fs";\n` +
+				`let data = "";\n` +
+				`process.stdin.setEncoding("utf8");\n` +
+				`process.stdin.on("data", (chunk) => (data += chunk));\n` +
+				`process.stdin.on("end", () => {\n` +
+				`\tappendFileSync(${JSON.stringify(capturePath)}, data);\n` +
+				`\twriteFileSync(${JSON.stringify(envPath)}, String(process.env.HOOK_MARKER ?? "(none)"));\n` +
+				`});\n`,
+		);
+		let seen: { command: string; args: string[]; env: Record<string, string> | undefined } | undefined;
+		const runtime = snapshotHooks(
+			{ PreToolUse: [{ hooks: [{ command: "the-hook-the-config-named" }] }] },
+			async (spawn) => {
+				seen = { command: spawn.command, args: [...spawn.args], env: spawn.env };
+				// The rewrite stands in for the sandbox wrapper: whatever this returns
+				// is what opens, and here that is the same hook run directly.
+				return { command: process.execPath, args: [scriptPath], env: { HOOK_MARKER: "confined" } };
+			},
+		);
+		const outcome = await runtime.run("PreToolUse", { tool_name: "Bash", tool_input: { command: "rm -rf /" } });
+		expect(outcome.errors).toEqual([]);
+		// What the confiner saw: the shell `execWithTimeout` would have spawned,
+		// with the configured command as its last argument…
+		expect(seen?.command).toBe(process.platform === "win32" ? "cmd.exe" : "/bin/bash");
+		expect(seen?.args.at(-1)).toBe("the-hook-the-config-named");
+		// …and no environment: the spec carries the increment, never a base.
+		expect(seen?.env).toBeUndefined();
+		// What it returned is what ran: the payload reached the rewritten script…
+		const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+		expect(captured).toMatchObject({ event: "PreToolUse", tool_name: "Bash" });
+		// …with the increment merged over this process's own environment.
+		expect(readFileSync(envPath, "utf8")).toBe("confined");
+	});
+
+	test("a rejection fails the hook run instead of spawning unwrapped", async () => {
+		const runtime = snapshotHooks({ PreToolUse: [{ hooks: [{ command: "unused-hook" }] }] }, async () => {
+			throw new Error("refused by the session policy");
+		});
+		const outcome = await runtime.run("PreToolUse", { tool_name: "Bash", tool_input: {} });
+		// `run()` reports a failed hook on `errors`, which the call sites print —
+		// the same shape a hook that could not spawn already had. The point is
+		// that the refusal reached the caller at all: an ignored rejection would
+		// have spawned the configured command unconfined, and that spawn's
+		// non-zero exit would have surfaced as `blocked` with no error text.
+		expect(outcome.errors.join("\n")).toContain("refused by the session policy");
+		expect(outcome.blocked).toBe(false);
+	});
+});
+
 describe("PreToolUse blocking", () => {
 	test("blocking JSON output blocks the tool call", async () => {
 		// Script-file hook avoids shell-quoting pitfalls entirely (cmd.exe
