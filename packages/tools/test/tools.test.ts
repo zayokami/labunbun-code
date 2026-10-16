@@ -891,6 +891,8 @@ describe("tool registry shape", () => {
 			"KillBash",
 			"Digest",
 			"InspectSqlite",
+			"InspectArtifact",
+			"InspectBinary",
 		]);
 	});
 

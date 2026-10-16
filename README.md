@@ -28,6 +28,8 @@ LaBunbun Code reads files, changes files, and runs commands. It sends your reque
 | `LS` | List the content of a directory. |
 | `Digest` | Print the SHA-256 hash of the content of each named file. |
 | `InspectSqlite` | Report the structure and sample rows of a SQLite database file. |
+| `InspectArtifact` | Report the entries of a zip-family archive or an Electron ASAR without unpacking it. |
+| `InspectBinary` | Report the format and structure of an executable or object file, and its Go or Rust dependency metadata. |
 | `WebFetch` | Get one page from the network. |
 | `WebSearch` | Search the network. |
 | `TaskCreate` | Make a task. |
