@@ -26,6 +26,8 @@ LaBunbun Code reads files, changes files, and runs commands. It sends your reque
 | `Grep` | Search file content with a regular expression. |
 | `Glob` | Find files with a name pattern. |
 | `LS` | List the content of a directory. |
+| `Digest` | Print the SHA-256 hash of the content of each named file. |
+| `InspectSqlite` | Report the structure and sample rows of a SQLite database file. |
 | `WebFetch` | Get one page from the network. |
 | `WebSearch` | Search the network. |
 | `TaskCreate` | Make a task. |

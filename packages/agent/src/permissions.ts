@@ -495,6 +495,8 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 	"BashOutput",
 	"WebFetch",
 	"WebSearch",
+	"Digest",
+	"InspectSqlite",
 	"TaskList",
 	"TaskGet",
 	"Skill",

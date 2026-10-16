@@ -8,9 +8,11 @@ export {
 	createKillBashTool,
 } from "./bash.ts";
 export { caseInsensitivePaths } from "./containment.ts";
+export { createDigestTool } from "./digest.ts";
 export { createEditTool } from "./edit.ts";
 export { createGlobTool, type FileWalkerOps, walkProjectFiles } from "./glob.ts";
 export { createGrepTool } from "./grep.ts";
+export { createInspectSqliteTool } from "./inspect-sqlite.ts";
 export { createLsTool } from "./ls.ts";
 export type {
 	DirentInfo,
@@ -75,9 +77,11 @@ export { createWriteTool } from "./write.ts";
 import type { AnyTool } from "@labunbun/agent";
 import { BackgroundShellManager } from "./background.ts";
 import { createBashOutputTool, createBashTool, createKillBashTool } from "./bash.ts";
+import { createDigestTool } from "./digest.ts";
 import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
 import { createGrepTool } from "./grep.ts";
+import { createInspectSqliteTool } from "./inspect-sqlite.ts";
 import { createLsTool } from "./ls.ts";
 import { ChildProcessExecOperations, defaultOperations, detectShell, type Operations } from "./operations.ts";
 import { createReadTool } from "./read.ts";
@@ -111,7 +115,9 @@ export interface CreateAllToolsOptions {
 /**
  * The default coding tool set. Order is frozen here so the wire-tool list
  * stays prompt-cache stable: core file/shell tools first, then task and web
- * tools.
+ * tools, with the standalone read-only probes (Digest, InspectSqlite) last —
+ * a new tool is appended, never inserted, so no existing tool's schema slot
+ * moves.
  */
 export function createAllTools(cwd: string, options: CreateAllToolsOptions = {}): AnyTool[] {
 	// The shell is resolved before the runtime, because the Windows probe runs
@@ -160,5 +166,5 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 	];
 	const taskTools = options.taskStore ? createTaskTools(options.taskStore) : [];
 	const web = options.webTools === false ? [] : [createWebFetchTool(), createWebSearchTool()];
-	return [...coreTools, ...taskTools, ...web];
+	return [...coreTools, ...taskTools, ...web, createDigestTool(cwd), createInspectSqliteTool(cwd)];
 }

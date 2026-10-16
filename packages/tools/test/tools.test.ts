@@ -877,9 +877,21 @@ describe("shell resolution", () => {
 });
 
 describe("tool registry shape", () => {
-	test("default set: core tools, background shell pair, and web tools", () => {
+	test("default set: core tools, background shell pair, and the read-only probes", () => {
 		const names = createAllTools(process.cwd(), { webTools: false }).map((t) => t.name);
-		expect(names).toEqual(["Bash", "Edit", "Glob", "Grep", "LS", "Read", "Write", "BashOutput", "KillBash"]);
+		expect(names).toEqual([
+			"Bash",
+			"Edit",
+			"Glob",
+			"Grep",
+			"LS",
+			"Read",
+			"Write",
+			"BashOutput",
+			"KillBash",
+			"Digest",
+			"InspectSqlite",
+		]);
 	});
 
 	test("every tool contributes wire-safe JSON schema", () => {
