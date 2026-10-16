@@ -50,6 +50,7 @@ import {
 	DEFAULT_MODE_CHOICE,
 	evaluatePermissions,
 	MODE_CHOICES,
+	type NetworkSandboxPolicy,
 	type PermissionContext,
 	type PermissionMode,
 	type PermissionResult,
@@ -124,6 +125,8 @@ export interface AcpOptions {
 	modelRef?: string;
 	permissionMode?: PermissionMode;
 	sandbox?: SandboxMode;
+	/** The `--network` flag: the access half of the network axis. */
+	network?: NetworkSandboxPolicy;
 	maxTurns?: number;
 	/** The home whose settings, memory files and sign-in store are read. */
 	home?: string;
@@ -1007,7 +1010,7 @@ class AcpAgent implements acp.Agent {
 			loadedSettings,
 		);
 		if (downgradeReason) process.stderr.write(`Warning: ${downgradeReason}\n`);
-		const effectiveNetwork = networkAxisFrom(settings);
+		const effectiveNetwork = networkAxisFrom(settings, options.network);
 
 		// The spawns outside the Bash tool — hook commands — run under the same
 		// axes. The holder exists because the SessionStart hook below runs, and

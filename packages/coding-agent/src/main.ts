@@ -1,5 +1,12 @@
 #!/usr/bin/env bun
-import { PERMISSION_MODES, type PermissionMode, SANDBOX_MODES, type SandboxMode } from "@labunbun/agent";
+import {
+	NETWORK_SANDBOX_POLICIES,
+	type NetworkSandboxPolicy,
+	PERMISSION_MODES,
+	type PermissionMode,
+	SANDBOX_MODES,
+	type SandboxMode,
+} from "@labunbun/agent";
 import { chunkWritesForConPTY, isConPTYHost } from "@labunbun/tui";
 import { runAcp } from "./acp.ts";
 import { runChatGptLoginCli, runChatGptLogoutCli } from "./chatgpt-login.ts";
@@ -12,7 +19,8 @@ import { DEFAULT_HISTORY_LIMIT, MIGRATION_SOURCE_IDS, runMigration } from "./mig
 import type { RawSettingsInput } from "./settings.ts";
 
 /**
- * Check `--permission-mode` and `--sandbox` against the lists that define them.
+ * Check `--permission-mode`, `--sandbox` and `--network` against the lists
+ * that define them.
  *
  * Returns the typed values or a sentence naming the valid ones, so the caller
  * has one thing to do either way. Absent flags come back as `undefined`, which
@@ -20,9 +28,14 @@ import type { RawSettingsInput } from "./settings.ts";
  * than this function inventing one, so `--sandbox` alone and no flag at all
  * cannot disagree about what confined means.
  */
-export function validateModeFlags(args: { permissionMode: string | null; sandbox: string | null }): {
+export function validateModeFlags(args: {
+	permissionMode: string | null;
+	sandbox: string | null;
+	network: string | null;
+}): {
 	mode?: PermissionMode;
 	sandbox?: SandboxMode;
+	network?: NetworkSandboxPolicy;
 	error?: string;
 } {
 	const validModes = new Set<string>(PERMISSION_MODES);
@@ -33,6 +46,10 @@ export function validateModeFlags(args: { permissionMode: string | null; sandbox
 	if (args.sandbox && !validSandboxes.has(args.sandbox)) {
 		return { error: `Invalid sandbox: ${args.sandbox} (${SANDBOX_MODES.join(" | ")})` };
 	}
+	const validNetworks = new Set<string>(NETWORK_SANDBOX_POLICIES);
+	if (args.network && !validNetworks.has(args.network)) {
+		return { error: `Invalid network: ${args.network} (${NETWORK_SANDBOX_POLICIES.join(" | ")})` };
+	}
 	// An untyped flag comes back as `undefined` and not as the `null` the
 	// argument parser produced. The two behave the same under `??`, so nothing
 	// downstream was reading the difference — which is exactly why the return
@@ -42,6 +59,7 @@ export function validateModeFlags(args: { permissionMode: string | null; sandbox
 	return {
 		mode: args.permissionMode ? (args.permissionMode as PermissionMode) : undefined,
 		sandbox: args.sandbox ? (args.sandbox as SandboxMode) : undefined,
+		network: args.network ? (args.network as NetworkSandboxPolicy) : undefined,
 	};
 }
 
@@ -76,6 +94,8 @@ interface CliArgs {
 	model: string | null;
 	permissionMode: string | null;
 	sandbox: string | null;
+	/** `--network <policy>`: the access half of the network axis. */
+	network: string | null;
 	maxTurns: number | null;
 	noSession: boolean;
 	resume: string | null;
@@ -112,6 +132,7 @@ export function parseArgs(argv: string[]): CliArgs {
 		model: null,
 		permissionMode: null,
 		sandbox: null,
+		network: null,
 		maxTurns: null,
 		noSession: false,
 		resume: null,
@@ -169,6 +190,9 @@ export function parseArgs(argv: string[]): CliArgs {
 				break;
 			case "--sandbox":
 				args.sandbox = rest[++i] ?? null;
+				break;
+			case "--network":
+				args.network = rest[++i] ?? null;
 				break;
 			case "--max-turns":
 				args.maxTurns = Number(rest[++i]) || null;
@@ -256,6 +280,9 @@ Options:
       --permission-mode <m>    ${PERMISSION_MODES.join(" | ")}  (default ask)
       --sandbox <s>            ${SANDBOX_MODES.join(" | ")}
                                The other axis: what a run may touch at all.
+      --network <n>            ${NETWORK_SANDBOX_POLICIES.join(" | ")}
+                               The other axis: what a run may reach. Sets the
+                               access; the domain rules stay in settings.
       --max-turns <n>          Cap agent turns in headless mode
       --no-session             Don't persist this session to disk (headless mode only)
       --resume <id>            Resume a saved session
@@ -430,6 +457,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			modelRef: args.model ?? undefined,
 			permissionMode: flags.mode,
 			sandbox: flags.sandbox,
+			network: flags.network,
 			maxTurns: args.maxTurns ?? undefined,
 			flagSettings,
 			home: options.home,
@@ -466,6 +494,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			modelRef: args.model ?? undefined,
 			permissionMode: flags.mode,
 			sandbox: flags.sandbox,
+			network: flags.network,
 			maxTurns: args.maxTurns ?? undefined,
 			noSession: args.noSession,
 			resumeSessionId: args.resume ?? undefined,
@@ -489,6 +518,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		modelRef: args.model ?? undefined,
 		permissionMode: flags.mode,
 		sandbox: flags.sandbox,
+		network: flags.network,
 		resumeSessionId: args.resume ?? undefined,
 		continueLast: args.continueLast,
 		gamepad: args.gamepad ?? undefined,

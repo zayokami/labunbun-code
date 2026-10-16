@@ -602,7 +602,7 @@ describe("where a resumed run's axes come from", () => {
 		).toEqual({ mode: "agent", sandbox: "danger-full-access", network: policy.network });
 	});
 
-	test("the network axis has no flag: the snapshot, then settings", () => {
+	test("without a network flag: the snapshot, then settings", () => {
 		expect(
 			resolveStartupAxes({
 				policy: { ...policy, network: { access: "enabled", domains: [] } },
@@ -610,6 +610,29 @@ describe("where a resumed run's axes come from", () => {
 				fallback,
 			}),
 		).toEqual({ mode: "plan", sandbox: "danger-full-access", network: { access: "enabled", domains: [] } });
+	});
+
+	test("a network flag moves the access half and keeps the domain table", () => {
+		// The flag beats the snapshot's *access* and nothing else: the domains a
+		// session recorded survive, because a command line cannot spell a rule
+		// list, and `--network enabled` that silently republished no rules would
+		// be a different policy than the session had.
+		expect(resolveStartupAxes({ flagNetwork: "enabled", policy, settingsNetwork, fallback })).toEqual({
+			mode: "plan",
+			sandbox: "danger-full-access",
+			network: { access: "enabled", domains: policy.network.domains },
+		});
+		// With no snapshot, the settings' table is the one kept — the same shape
+		// `networkAxisFrom(settings, flag)` builds for `-p` and ACP.
+		const pinned = {
+			access: "restricted" as const,
+			domains: [{ pattern: "registry.npmjs.org", permission: "allow" as const }],
+		};
+		expect(resolveStartupAxes({ flagNetwork: "enabled", settingsNetwork: pinned, fallback })).toEqual({
+			mode: "ask",
+			sandbox: "workspace-write",
+			network: { access: "enabled", domains: pinned.domains },
+		});
 	});
 });
 

@@ -476,6 +476,7 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 | `--model <provider/id>` | Use this model for the run. |
 | `--permission-mode <mode>` | Set the permission mode. The values are `ask`, `plan`, `agent`. |
 | `--sandbox <mode>` | Set the sandbox. The values are `workspace-write`, `danger-full-access`. |
+| `--network <policy>` | Set the network access. The values are `restricted`, `enabled`. The flag sets the access only. The domain rules stay in settings. |
 | `--max-turns <n>` | Stop after this many turns. This option works in headless mode only. |
 | `--no-session` | Do not store the session. This option works in headless mode only. It does not work with `--resume` or `-c`. |
 | `--resume <id>` | Open this session in the terminal. A headless run continues the session with the prompt of the run. |

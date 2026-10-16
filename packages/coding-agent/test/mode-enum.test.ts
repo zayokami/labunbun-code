@@ -25,7 +25,14 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { cycleModeChoice, describeModeChoice, MODE_CHOICES, PERMISSION_MODES, SANDBOX_MODES } from "@labunbun/agent";
+import {
+	cycleModeChoice,
+	describeModeChoice,
+	MODE_CHOICES,
+	NETWORK_SANDBOX_POLICIES,
+	PERMISSION_MODES,
+	SANDBOX_MODES,
+} from "@labunbun/agent";
 import { validateModeFlags } from "../src/main.ts";
 import { PermissionModeSchema, SandboxModeSchema } from "../src/settings.ts";
 
@@ -56,7 +63,23 @@ describe("every value reaches every consumer", () => {
 	});
 
 	test.each(PAIRS)("--permission-mode %s --sandbox %s passes CLI validation", (mode, sandbox) => {
-		expect(validateModeFlags({ permissionMode: mode, sandbox })).toEqual({ mode, sandbox });
+		expect(validateModeFlags({ permissionMode: mode, sandbox, network: null })).toEqual({
+			mode,
+			sandbox,
+			network: undefined,
+		});
+	});
+
+	// The third flag walks its own list the same way, and for the same reason:
+	// a value added to `NETWORK_SANDBOX_POLICIES` is a value every consumer —
+	// the settings schema, the CLI validator, the picker — gets for free or
+	// silently drops, and this row is what tells the two apart.
+	test.each([...NETWORK_SANDBOX_POLICIES])("--network %s passes CLI validation", (network) => {
+		expect(validateModeFlags({ permissionMode: null, sandbox: null, network })).toEqual({
+			mode: undefined,
+			sandbox: undefined,
+			network,
+		});
 	});
 
 	/**
@@ -66,9 +89,10 @@ describe("every value reaches every consumer", () => {
 	 * treated the same way rather than read as a mode named the empty string.
 	 */
 	test("an untyped flag stays undecided instead of picking a value", () => {
-		expect(validateModeFlags({ permissionMode: null, sandbox: null })).toEqual({
+		expect(validateModeFlags({ permissionMode: null, sandbox: null, network: null })).toEqual({
 			mode: undefined,
 			sandbox: undefined,
+			network: undefined,
 		});
 	});
 
@@ -101,9 +125,10 @@ describe("every value reaches every consumer", () => {
 	 * A call that runs early but whose result is only read in one place would
 	 * satisfy the ordering above and still let the other path through unchecked.
 	 */
-	test("the validated pair is handed to both the headless and the interactive run", () => {
+	test("the validated flags are handed to every run path", () => {
 		expect(mainSource).toContain("permissionMode: flags.mode");
 		expect(mainSource).toContain("sandbox: flags.sandbox");
+		expect(mainSource).toContain("network: flags.network");
 	});
 });
 
@@ -156,12 +181,14 @@ describe("a value this build does not have is refused", () => {
 	});
 
 	test.each([
-		["a mode that is not one", "nope", "danger-full-access"],
-		["a sandbox that is not one", "agent", "seatbelt"],
-	])("the CLI refuses %s", (_label, permissionMode, sandbox) => {
-		const result = validateModeFlags({ permissionMode, sandbox });
+		["a mode that is not one", "nope", "danger-full-access", null],
+		["a sandbox that is not one", "agent", "seatbelt", null],
+		["a network that is not one", "agent", "danger-full-access", "wide-open"],
+	])("the CLI refuses %s", (_label, permissionMode, sandbox, network) => {
+		const result = validateModeFlags({ permissionMode, sandbox, network });
 		expect(result.mode).toBeUndefined();
 		expect(result.sandbox).toBeUndefined();
+		expect(result.network).toBeUndefined();
 		expect(result.error).toBeDefined();
 	});
 });

@@ -29,6 +29,7 @@ import {
 	NETWORK_DOMAIN_PERMISSIONS,
 	NETWORK_SANDBOX_POLICIES,
 	type NetworkAxis,
+	type NetworkSandboxPolicy,
 	PERMISSION_MODES,
 	type PermissionMode,
 	type PermissionRule,
@@ -162,12 +163,15 @@ export function resolveStartupAxes(input: {
 	choice?: Pick<ModeChoice, "mode" | "sandbox">;
 	flagMode?: PermissionMode;
 	flagSandbox?: SandboxMode;
+	/** The `--network` flag. Names the access half of the network axis only. */
+	flagNetwork?: NetworkSandboxPolicy;
 	policy?: Pick<PolicySnapshot, "mode" | "sandbox" | "network">;
 	settingsMode?: PermissionMode;
 	settingsSandbox?: SandboxMode;
 	settingsNetwork: NetworkAxis;
 	fallback: Pick<ModeChoice, "mode" | "sandbox">;
 }): { mode: PermissionMode; sandbox: SandboxMode; network: NetworkAxis } {
+	const network = input.policy?.network ?? input.settingsNetwork;
 	return {
 		mode: input.choice?.mode ?? input.flagMode ?? input.policy?.mode ?? input.settingsMode ?? input.fallback.mode,
 		sandbox:
@@ -176,9 +180,13 @@ export function resolveStartupAxes(input: {
 			input.policy?.sandbox ??
 			input.settingsSandbox ??
 			input.fallback.sandbox,
-		// No flag names this axis: it is a settings key, and a session that
-		// recorded one outranks it for the same reason the other two do.
-		network: input.policy?.network ?? input.settingsNetwork,
+		// A network flag moves the access half of the axis and keeps the domain
+		// table, which keeps its own precedence — snapshot over settings — for the
+		// same reason the other two axes do. A flag cannot spell a rule list, and
+		// `--network restricted` must narrow to the proxy rather than forget the
+		// allowlist. A picker row does not name this axis at all; the table has no
+		// network column.
+		network: input.flagNetwork === undefined ? network : { access: input.flagNetwork, domains: network.domains },
 	};
 }
 

@@ -45,7 +45,7 @@ export function createWriteTool(
 				// It is **not** only a read-only-root check: it refuses every path in
 				// `policy.protected`, and `buildSandboxPolicy` puts `<workspace>/.git`
 				// there for every writable root unconditionally
-				// (`sandbox-policy.ts:307-313`) whether or not a scan found it. So
+				// (`sandbox-policy.ts:157-180`) whether or not a scan found it. So
 				// this tool's `.git/config` refusal is over-determined, and
 				// `sandbox-simulated.test.ts` asserts the policy half of that on its
 				// own, with no guard in front of it.

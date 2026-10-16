@@ -9,6 +9,7 @@ import {
 	NETWORK_SANDBOX_POLICIES,
 	type NetworkAxis,
 	type NetworkDomainRule,
+	type NetworkSandboxPolicy,
 	PERMISSION_MODES,
 	type PermissionMode,
 	type PermissionRule,
@@ -710,10 +711,18 @@ export function resolveMode(
 }
 
 // Long-form design notes: docs/dev/migration-framework.md
-/** Read the network axis out of a settings object. */
-export function networkAxisFrom(settings: Settings): NetworkAxis {
+/**
+ * Read the network axis out of a settings object.
+ *
+ * `accessOverride` is the `--network` flag, when one was typed. A flag names
+ * the access half of the axis and nothing else: the domain table keeps its
+ * settings source, because a command line cannot spell a rule list, and a
+ * `--network restricted` that silently emptied the allowlist would be a
+ * narrower policy than the one the user asked for.
+ */
+export function networkAxisFrom(settings: Settings, accessOverride?: NetworkSandboxPolicy): NetworkAxis {
 	return {
-		access: settings.networkAccess ?? "enabled",
+		access: accessOverride ?? settings.networkAccess ?? "enabled",
 		domains: (settings.networkDomains ?? []).map(
 			(rule): NetworkDomainRule =>
 				typeof rule === "string"

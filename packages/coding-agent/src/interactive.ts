@@ -24,6 +24,7 @@ import {
 	findModeChoice,
 	formatRetryNotice,
 	MODE_CHOICES,
+	type NetworkSandboxPolicy,
 	PERMISSION_MODES,
 	type PermissionMode,
 	type PermissionRule,
@@ -330,6 +331,12 @@ export interface InteractiveOptions {
 	 * confinement off has to be something asked for by name.
 	 */
 	sandbox?: SandboxMode;
+	/**
+	 * The `--network` flag: the access half of the network axis. Absent means
+	 * the session's own snapshot, then settings. The domain table always comes
+	 * from those two — a flag cannot spell a rule list.
+	 */
+	network?: NetworkSandboxPolicy;
 	/**
 	 * A `MODE_CHOICES` id. Sets both axes at once, and wins over the two
 	 * separate options when they disagree, because a picker entry is one thing
@@ -668,6 +675,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		choice,
 		flagMode: options.permissionMode,
 		flagSandbox: options.sandbox,
+		flagNetwork: options.network,
 		policy: loadedPolicy,
 		settingsMode: settings.permissionMode,
 		settingsSandbox: settings.sandbox,

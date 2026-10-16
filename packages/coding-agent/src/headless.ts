@@ -8,7 +8,7 @@
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentEvent, PermissionMode, SandboxMode } from "@labunbun/agent";
+import type { AgentEvent, NetworkSandboxPolicy, PermissionMode, SandboxMode } from "@labunbun/agent";
 import {
 	AgentSession,
 	collectReadOnlyToolNames,
@@ -114,6 +114,8 @@ export interface HeadlessOptions {
 	modelRef?: string;
 	permissionMode?: PermissionMode;
 	sandbox?: SandboxMode;
+	/** The `--network` flag: the access half of the network axis. */
+	network?: NetworkSandboxPolicy;
 	maxTurns?: number;
 	noSession?: boolean;
 	/**
@@ -398,9 +400,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// The network axis is read from settings even though the other two are not:
 	// there is no headless default to preserve, because before this axis existed
 	// every command reached whatever the host could reach. So the settings value
-	// is the only thing that can turn it down, and reading it here is what makes
-	// `networkAccess` mean anything in a `-p` run.
-	const effectiveNetwork = networkAxisFrom(settings);
+	// — or the `--network` flag, which names the access half — is what moves it,
+	// and reading it here is what makes `networkAccess` mean anything in a `-p`
+	// run.
+	const effectiveNetwork = networkAxisFrom(settings, options.network);
 
 	// The spawns outside the Bash tool — hook commands and MCP stdio servers —
 	// run under the same axes. Constant getters, unlike the REPL's: a `-p` run
