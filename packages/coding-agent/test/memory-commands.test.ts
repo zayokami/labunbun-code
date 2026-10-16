@@ -1,9 +1,36 @@
-import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import type { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { builtInCommands, completeCommands, findCommand } from "../src/commands.ts";
-import { expandIncludes, loadMemoryFiles } from "../src/memory.ts";
+import {
+	type AppCommandContext,
+	handleAppCommand,
+	lastProjectMemoryFile,
+	openInEditor,
+	shortenHome,
+} from "../src/interactive.ts";
+import {
+	expandIncludes,
+	loadMemoryFiles,
+	userMemoryPath,
+	userRulesDir,
+	withheldProjectMemoryFiles,
+} from "../src/memory.ts";
+import { approveProjectDefinitions } from "../src/project-trust.ts";
+
+const roots: string[] = [];
+afterEach(() => {
+	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function tempDir(prefix: string): string {
+	const dir = mkdtempSync(join(tmpdir(), prefix));
+	roots.push(dir);
+	return dir;
+}
 
 describe("expandIncludes", () => {
 	test("expands @path references recursively", () => {
@@ -68,7 +95,7 @@ describe("expandIncludes", () => {
 
 describe("loadMemoryFiles", () => {
 	test("nearest LABUNBUN.md wins per level; rules dir included", () => {
-		const root = mkdtempSync(join(tmpdir(), "lbb-memroot-"));
+		const root = tempDir("lbb-memroot-");
 		const project = join(root, "project");
 		const sub = join(project, "sub");
 		mkdirSync(sub, { recursive: true });
@@ -78,6 +105,10 @@ describe("loadMemoryFiles", () => {
 		writeFileSync(join(project, "LABUNBUN.md"), "PROJECT LEVEL");
 		writeFileSync(join(project, ".labunbun", "rules", "style.md"), "STYLE RULE");
 		writeFileSync(join(sub, "child.txt"), "not memory");
+		// The project walk is behind the trust gate; without this the two project
+		// files below would be withheld and the test would be asserting the gate,
+		// not the walk. The user tier needs no approval.
+		approveProjectDefinitions(sub, ["memory"], join(root, "fakehome"));
 
 		const result = loadMemoryFiles(sub, join(root, "fakehome"));
 		const combined = result.files.join("|");
@@ -176,5 +207,276 @@ describe("command registry", () => {
 		if (explain?.type === "prompt") {
 			expect(explain.getPrompt("src/index.ts")).toContain("src/index.ts");
 		}
+	});
+});
+
+describe("the memory trust gate", () => {
+	test("a project file is withheld until the directory is trusted, and the user tier still loads", () => {
+		const home = tempDir("lbb-memgate-home-");
+		const cwd = tempDir("lbb-memgate-cwd-");
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		writeFileSync(join(home, ".labunbun", "MEMORY.md"), "USER-MEMORY-MARKER\n");
+		writeFileSync(join(cwd, "LABUNBUN.md"), "PROJECT-MEMORY-MARKER\n");
+
+		const untrusted = loadMemoryFiles(cwd, home);
+		// The two halves have to be read together: the project bytes are absent,
+		// and the user's own file — the one the gate never covers — is present.
+		// An empty load is also what a broken reader looks like.
+		expect(untrusted.content).not.toContain("PROJECT-MEMORY-MARKER");
+		expect(untrusted.content).toContain("USER-MEMORY-MARKER");
+		expect(untrusted.files).not.toContain(join(cwd, "LABUNBUN.md"));
+		// What an approval would load is still named — by path, contents unread.
+		expect(withheldProjectMemoryFiles(cwd, home)).toContain(join(cwd, "LABUNBUN.md"));
+
+		approveProjectDefinitions(cwd, ["memory"], home);
+
+		const approved = loadMemoryFiles(cwd, home);
+		expect(approved.content).toContain("PROJECT-MEMORY-MARKER");
+		expect(approved.files).toContain(join(cwd, "LABUNBUN.md"));
+		expect(withheldProjectMemoryFiles(cwd, home)).toEqual([]);
+	});
+
+	test("the user's own files are never listed as withheld — they are in the prompt", () => {
+		const home = tempDir("lbb-memgate2-home-");
+		// cwd under home, so the un-gated walk (what the withheld list reads) would
+		// revisit the user tier. Those files load from step 1 from any cwd; a file
+		// that is in the prompt must not be reported as held back.
+		const cwd = join(home, "project");
+		mkdirSync(cwd, { recursive: true });
+		mkdirSync(join(home, ".labunbun", "rules"), { recursive: true });
+		writeFileSync(join(home, ".labunbun", "rules", "global.md"), "GLOBAL RULE\n");
+
+		expect(withheldProjectMemoryFiles(cwd, home)).not.toContain(join(home, ".labunbun", "rules", "global.md"));
+	});
+});
+
+describe("the user-tier path helpers", () => {
+	test("spell the user memory file and rules directory exactly as the loader reads them", () => {
+		// Exported for `/memory`, which has to name the same file `loadMemoryFiles`
+		// reads — two independently spelled paths is how the command and the loader
+		// drift apart.
+		const home = join("somewhere", "home");
+		expect(userMemoryPath(home)).toBe(join(home, ".labunbun", "MEMORY.md"));
+		expect(userRulesDir(home)).toBe(join(home, ".labunbun", "rules"));
+	});
+});
+
+describe("lastProjectMemoryFile", () => {
+	const home = join("somewhere", "home");
+	const userFile = userMemoryPath(home);
+	const userRule = join(userRulesDir(home), "global.md");
+	const rootFile = join("somewhere", "repo", "AGENTS.md");
+	const nearFile = join("somewhere", "repo", "pkg", "LABUNBUN.md");
+
+	test("skips the user tier and answers with the nearest project file, which is last", () => {
+		expect(lastProjectMemoryFile([userFile, userRule, rootFile, nearFile], home)).toBe(nearFile);
+	});
+
+	test("nothing but the user tier, or nothing at all, answers nothing", () => {
+		expect(lastProjectMemoryFile([userFile, userRule], home)).toBeUndefined();
+		expect(lastProjectMemoryFile([], home)).toBeUndefined();
+	});
+});
+
+/** The spawn stub's record of what would have been launched. */
+interface SpawnCall {
+	command: string;
+	args: string[];
+}
+
+function recordingSpawn(calls: SpawnCall[]): typeof spawn {
+	return ((command: string, args: string[]) => {
+		calls.push({ command, args });
+		return { on: () => {}, unref: () => {} };
+	}) as unknown as typeof spawn;
+}
+
+describe("openInEditor", () => {
+	test("a missing file is created with its header, and the editor is given the path", () => {
+		const dir = tempDir("lbb-open-");
+		const target = join(dir, "nested", "MEMORY.md");
+		const calls: SpawnCall[] = [];
+
+		// `EDITOR` with an argument, the shape the shell convention allows: the
+		// string splits, and the file is appended after the editor's own flags.
+		expect(
+			openInEditor(target, {
+				fileHeader: "# Memory",
+				spawnFn: recordingSpawn(calls),
+				env: { EDITOR: "myedit --wait" },
+			}),
+		).toBe(true);
+		expect(readFileSync(target, "utf8")).toBe("# Memory\n");
+		expect(calls).toEqual([{ command: "myedit", args: ["--wait", target] }]);
+	});
+
+	test("with no editor variable, nothing is created and nothing is spawned", () => {
+		const dir = tempDir("lbb-open2-");
+		const target = join(dir, "MEMORY.md");
+		const calls: SpawnCall[] = [];
+
+		// The whole point of resolving the editor first: a machine that cannot open
+		// anything must not leave a file behind, or a typo in the variable would.
+		expect(openInEditor(target, { fileHeader: "# Memory", spawnFn: recordingSpawn(calls), env: {} })).toBe(false);
+		expect(existsSync(target)).toBe(false);
+		expect(calls).toEqual([]);
+	});
+
+	test("$VISUAL wins over $EDITOR", () => {
+		const dir = tempDir("lbb-open3-");
+		const target = join(dir, "MEMORY.md");
+		writeFileSync(target, "existing\n", "utf8");
+		const calls: SpawnCall[] = [];
+
+		expect(openInEditor(target, { spawnFn: recordingSpawn(calls), env: { VISUAL: "visual-ed", EDITOR: "ed" } })).toBe(
+			true,
+		);
+		expect(calls[0]?.command).toBe("visual-ed");
+		// An existing file is opened as it is — the header is for creating, not for
+		// rewriting what the user has.
+		expect(readFileSync(target, "utf8")).toBe("existing\n");
+	});
+
+	test("createDir makes the rules directory itself, and the editor opens the directory", () => {
+		const dir = tempDir("lbb-open4-");
+		const target = join(dir, ".labunbun", "rules");
+		const calls: SpawnCall[] = [];
+
+		expect(openInEditor(target, { createDir: true, spawnFn: recordingSpawn(calls), env: { EDITOR: "myedit" } })).toBe(
+			true,
+		);
+		expect(statSync(target).isDirectory()).toBe(true);
+		expect(calls).toEqual([{ command: "myedit", args: [target] }]);
+	});
+});
+
+/** A context with only the fields `/memory` reads, and an editor that records calls. */
+interface OpenedCall {
+	target: string;
+	options?: { fileHeader?: string; createDir?: boolean };
+}
+
+function memoryCtx(
+	home: string,
+	opened: OpenedCall[],
+	editorFound = true,
+): { ctx: AppCommandContext; lines: () => string } {
+	const store = createStore<UiState>({ ...initialUiState() });
+	const ctx = {
+		getSession: () => null,
+		handle: { store },
+		home,
+		openEditor: (target: string, options?: { fileHeader?: string; createDir?: boolean }) => {
+			opened.push({ target, options });
+			return editorFound;
+		},
+	} as unknown as AppCommandContext;
+	return {
+		ctx,
+		lines: () =>
+			store
+				.get()
+				.entries.filter((entry) => entry.kind === "info")
+				.map((entry) => (entry as { text: string }).text)
+				.join("\n"),
+	};
+}
+
+describe("/memory", () => {
+	test("opens the user's memory file, and says it was created on first use", () => {
+		const home = tempDir("lbb-memcmd-home-");
+		const opened: OpenedCall[] = [];
+		const h = memoryCtx(home, opened);
+
+		expect(handleAppCommand("/memory", h.ctx)).toBe(true);
+
+		// The command's half of the contract: which file, and that it asked for the
+		// header. Whether the file lands is `openInEditor`'s test.
+		expect(opened).toEqual([{ target: userMemoryPath(home), options: { fileHeader: "# Memory" } }]);
+		expect(h.lines()).toContain(`Opening ${shortenHome(userMemoryPath(home), home)} in your editor. Created it.`);
+		// Memory is read once at startup, so every success says how edits arrive.
+		expect(h.lines()).toContain("Memory is read at startup — restart to apply edits.");
+	});
+
+	test("rules asks for the directory itself, which may not exist yet", () => {
+		const home = tempDir("lbb-memcmd2-home-");
+		const opened: OpenedCall[] = [];
+		const h = memoryCtx(home, opened);
+
+		expect(handleAppCommand("/memory rules", h.ctx)).toBe(true);
+
+		expect(opened).toEqual([{ target: userRulesDir(home), options: { createDir: true } }]);
+	});
+
+	test("project opens the nearest project file this session loaded, and creates nothing", () => {
+		const home = tempDir("lbb-memcmd3-home-");
+		const opened: OpenedCall[] = [];
+		const h = memoryCtx(home, opened);
+		const projectFile = join("somewhere", "repo", "pkg", "LABUNBUN.md");
+		h.ctx.memoryFiles = [userMemoryPath(home), join("somewhere", "repo", "AGENTS.md"), projectFile];
+
+		expect(handleAppCommand("/memory project", h.ctx)).toBe(true);
+
+		expect(opened).toEqual([{ target: projectFile, options: {} }]);
+		// Project memory is edited where it exists: planting a LABUNBUN.md in a
+		// checkout is /init's job, not a side effect of reading what is loaded.
+		expect(h.lines()).not.toContain("Created it.");
+	});
+
+	test("project with nothing loaded names the gate when that is what stands in the way", () => {
+		const home = tempDir("lbb-memcmd4-home-");
+		const opened: OpenedCall[] = [];
+		const h = memoryCtx(home, opened);
+		h.ctx.memoryFiles = [userMemoryPath(home)];
+		h.ctx.withheldMemory = [join("somewhere", "repo", "LABUNBUN.md")];
+
+		expect(handleAppCommand("/memory project", h.ctx)).toBe(true);
+
+		expect(opened).toEqual([]);
+		expect(h.lines()).toContain("held back by the trust gate");
+		expect(h.lines()).toContain("/agents approve");
+	});
+
+	test("project with nothing loaded and nothing withheld says nothing was found", () => {
+		const home = tempDir("lbb-memcmd5-home-");
+		const opened: OpenedCall[] = [];
+		const h = memoryCtx(home, opened);
+		h.ctx.memoryFiles = [];
+		h.ctx.withheldMemory = [];
+
+		expect(handleAppCommand("/memory project", h.ctx)).toBe(true);
+
+		expect(opened).toEqual([]);
+		expect(h.lines()).toContain("No project memory file found");
+		expect(h.lines()).toContain("/init");
+	});
+
+	test("with no editor, nothing opens and the loaded files are listed instead", () => {
+		const home = tempDir("lbb-memcmd6-home-");
+		const opened: OpenedCall[] = [];
+		const h = memoryCtx(home, opened, false);
+		const projectFile = join("somewhere", "repo", "AGENTS.md");
+		h.ctx.memoryFiles = [userMemoryPath(home), projectFile];
+
+		expect(handleAppCommand("/memory", h.ctx)).toBe(true);
+
+		// The attempt happened — there was simply nothing to launch — and the
+		// answer falls back to what the command can always say: the path, the
+		// variable to set, and which files are actually in the prompt.
+		expect(opened).toHaveLength(1);
+		expect(h.lines()).toContain("set $VISUAL or $EDITOR");
+		expect(h.lines()).toContain(shortenHome(userMemoryPath(home), home));
+		expect(h.lines()).toContain(projectFile);
+	});
+
+	test("an unknown argument is a usage error and opens nothing", () => {
+		const home = tempDir("lbb-memcmd7-home-");
+		const opened: OpenedCall[] = [];
+		const h = memoryCtx(home, opened);
+
+		expect(handleAppCommand("/memory sideways", h.ctx)).toBe(true);
+
+		expect(opened).toEqual([]);
+		expect(h.lines()).toContain("Usage: /memory [rules|project]");
 	});
 });

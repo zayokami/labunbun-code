@@ -164,6 +164,27 @@ describe("project-tier skills", () => {
 	});
 });
 
+describe("the kinds the gate covers", () => {
+	test("each records on its own, and the ledger writes them in one fixed order", () => {
+		const { home, cwd } = fixture();
+
+		// Memory and styles are decisions of the same shape as agents and skills —
+		// recorded by name, so trust for one tier never covers another, which is
+		// what keeps a kind added later from riding on an earlier decision.
+		approveProjectDefinitions(cwd, ["memory", "styles"], home);
+		expect(loadTrustedDefinitionKinds(cwd, home)).toEqual(new Set(["memory", "styles"]));
+		expect(isProjectTierTrusted(cwd, "agents", home)).toBe(false);
+
+		// A second approval in a different order writes the same bytes: the kinds
+		// are filtered through the fixed list rather than appended in call order.
+		approveProjectDefinitions(cwd, ["skills", "agents"], home);
+		expect(loadTrustedDefinitionKinds(cwd, home)).toEqual(new Set(["agents", "skills", "memory", "styles"]));
+		expect(JSON.parse(readFileSync(ledgerPath(home, cwd), "utf8"))).toEqual({
+			trustedDefinitionKinds: ["agents", "skills", "memory", "styles"],
+		});
+	});
+});
+
 /** A repository root and a nested directory under it; `.git` as file covers worktrees. */
 function repoFixture(gitKind: "dir" | "file" = "dir"): { root: string; sub: string } {
 	const root = mkdtempSync(join(tmpdir(), "lbb-repo-"));

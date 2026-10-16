@@ -163,6 +163,11 @@ export function startOAuthCallbackServer(options: {
 				);
 			}, options.timeoutMs);
 			timer.unref?.();
+			// An abort event does not replay for listeners added after it, so a
+			// signal already aborted while the port was binding (Esc pressed in
+			// that window) is handled rather than subscribed to — without this,
+			// the wait sits until the timeout rejects a sign-in the user cancelled.
+			if (options.signal?.aborted) onAbort();
 			options.signal?.addEventListener("abort", onAbort, { once: true });
 			resolveBound({
 				port: address.port,

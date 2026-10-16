@@ -117,6 +117,9 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 		const f = fixture();
 		plant(join(f.cwd, "LABUNBUN.md"), "PROJECT-MEMORY-MARKER\n");
 		plant(join(f.home, ".labunbun", "MEMORY.md"), "USER-MEMORY-MARKER\n");
+		// The project file is behind the trust gate; the user's own file is not.
+		// Same call the REPL's `/agents approve` makes, recorded in the temp home.
+		approveProjectDefinitions(f.cwd, ["memory"], f.home);
 
 		const seen = await runScene({ prompt: "hello", steps: [{ text: "done" }] }, f);
 
@@ -200,6 +203,9 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 			join(f.cwd, ".labunbun", "agents", "helper.md"),
 			"---\nname: helper\ndescription: helps\n---\nPROJECT-AGENT-BODY\n",
 		);
+		// Memory is the third kind behind the same gate: a checkout's LABUNBUN.md
+		// reaches a `-p` run's prompt only after the directory is trusted.
+		plant(join(f.cwd, "LABUNBUN.md"), "PROJECT-MEMORY-MARKER\n");
 
 		const seen = await runScene(
 			{
@@ -227,6 +233,9 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 		// skills is indistinguishable from one whose skills never existed.
 		expect(seen.stderr).toContain("this project's definitions are not loaded");
 		expect(seen.stderr).toContain("1 agent definition, 1 skill");
+		// The memory file is withheld with them, and is not in any request either.
+		expect(seen.systemPrompts.join("\n")).not.toContain("PROJECT-MEMORY-MARKER");
+		expect(seen.stderr).toContain("memory file");
 	}, 30_000);
 
 	test("an approved project's definitions are loaded, out of the same ledger", async () => {
@@ -240,8 +249,16 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 			"---\nname: helper\ndescription: helps\n---\nPROJECT-AGENT-BODY\n",
 		);
 		// The same call the REPL's `/agents approve` makes, in-process: this is the
-		// `-p` side of the one decision, and it has to read the one record.
-		approveProjectDefinitions(f.cwd, ["agents", "skills"], f.home);
+		// `-p` side of the one decision, and it has to read the one record. Memory
+		// rides along because the memory walk reaches above the temp directory: on
+		// an operator's machine with their own `~/.labunbun/rules`, those files are
+		// walk-tier here (the fixture home is not the real one, so they are not the
+		// user tier), and the withheld notice would fire for them — making the
+		// `not.toContain("not loaded")` guard below a statement about the operator's
+		// home directory instead of about this scene. Approving memory turns the
+		// whole walk on, which is what makes the scene hermetic the way production
+		// is (where home IS the real home and those files are subtracted).
+		approveProjectDefinitions(f.cwd, ["agents", "skills", "memory"], f.home);
 
 		const seen = await runScene(
 			{

@@ -49,6 +49,25 @@ export interface SystemPromptContext {
 	 */
 	now?: number;
 	/**
+	 * The language answers should be written in (`settings.language`), injected
+	 * verbatim — "Chinese", "zh-CN", whatever the user wrote.
+	 *
+	 * It replaces the generic "answer in the user's language" line rather than
+	 * joining it: two instructions about one thing is how a prompt ends up
+	 * arguing with itself, and the configured value is the more specific one.
+	 */
+	language?: string;
+	/**
+	 * The selected output style's body (`output-styles.ts`), set below as its own
+	 * section between memory and skills.
+	 *
+	 * The coding instructions above are not stripped while a style is in effect,
+	 * on purpose: a style governs voice and the harness's hard rules govern what
+	 * the agent does, and a mechanism that let a style file delete them would
+	 * turn a tone setting into a way to ship a prompt.
+	 */
+	outputStyle?: string;
+	/**
 	 * The skill discovery block (`skillDiscoveryBlock`): the name and
 	 * description of every skill, which is what the model matches a request
 	 * against before invoking one. Empty when nothing is loaded.
@@ -83,7 +102,7 @@ You MUST answer the user's question directly, without padding, and to the point.
 - Do not commit unless explicitly asked.
 
 # Communication
-- Answer in the user's language.
+- ${ctx.language ? `Answer in ${ctx.language}.` : "Answer in the user's language."}
 - Reference code as path:line.
 - Say in one line what you are about to do before your first tool call, and note briefly what you just found when a turn runs long.
 - Report outcomes faithfully: if a command failed, say so with its output.`);
@@ -109,6 +128,16 @@ You MUST answer the user's question directly, without padding, and to the point.
 	const memory = ctx.memory?.trim();
 	if (memory) {
 		sections.push(`# Project memory\n${memory}`);
+	}
+
+	// Output style, between memory and skills: it is the user's own instruction
+	// about how the session speaks, so it reads after the standing project
+	// instructions and before the skill list, which is machinery rather than
+	// instruction. Only the selected style's body arrives here (output-styles.ts
+	// resolves the name); an unselected or unknown name adds no bytes.
+	const outputStyle = ctx.outputStyle?.trim();
+	if (outputStyle) {
+		sections.push(`# Output style\n${outputStyle}`);
 	}
 
 	// Skill discovery, after memory: the block carries its own header and the

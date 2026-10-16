@@ -7,10 +7,29 @@
  *      present else AGENTS.md (nearest wins per level), plus .labunbun/rules/*.md
  *   3. `@path` includes expanded recursively with cycle guarding
  * Total cap 40k chars — truncated with a notice.
+ *
+ * The project walk is one tier behind the trust gate (`project-trust.ts`,
+ * kind "memory"): every memory file that reaches the prompt is read as if the
+ * user had written it, so a file a repository ships is loaded only after this
+ * directory has been trusted once. The gate covers the whole walk — ancestors
+ * included — because the decision is about this checkout, not one level of it.
+ * The user tier is not gated: it is the user's own, read from the same home
+ * whatever the cwd.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { isProjectTierTrusted } from "./project-trust.ts";
+
+/** The user's own memory file, `<home>/.labunbun/MEMORY.md`. */
+export function userMemoryPath(home: string): string {
+	return join(home, ".labunbun", "MEMORY.md");
+}
+
+/** The user's own rules directory, `<home>/.labunbun/rules`. */
+export function userRulesDir(home: string): string {
+	return join(home, ".labunbun", "rules");
+}
 
 const MAX_TOTAL_CHARS = 40_000;
 const MAX_INCLUDE_DEPTH = 5;
@@ -107,28 +126,36 @@ function collectLevel(dir: string): Array<{ path: string; content: string }> {
 	return out;
 }
 
-export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult {
-	const files: Array<{ path: string; content: string }> = [];
-
-	// 1. User-global memory, plus user-global rules. The cwd→root walk below
-	// only reaches `~/.labunbun/rules` when cwd happens to sit under the home
-	// directory, so user-scope rules need their own read to apply everywhere.
-	const userMemory = readIfExists(join(home, ".labunbun", "MEMORY.md"));
-	if (userMemory !== null) files.push({ path: join(home, ".labunbun", "MEMORY.md"), content: userMemory });
-	files.push(...collectRules(join(home, ".labunbun", "rules")));
-
-	// 2. Walk cwd → root; root-level files first so nearest wins by later append.
-	const start = resolve(cwd);
-	let current = start;
+/** cwd → filesystem root, root first, so nearest wins by later append. */
+function levelsFromCwd(cwd: string): string[] {
 	const levels: string[] = [];
+	let current = resolve(cwd);
 	while (true) {
 		levels.unshift(current);
 		const parent = dirname(current);
 		if (parent === current) break;
 		current = parent;
 	}
-	for (const dir of levels) {
-		files.push(...collectLevel(dir));
+	return levels;
+}
+
+export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult {
+	const files: Array<{ path: string; content: string }> = [];
+
+	// 1. User-global memory, plus user-global rules. The cwd→root walk below
+	// only reaches `~/.labunbun/rules` when cwd happens to sit under the home
+	// directory, so user-scope rules need their own read to apply everywhere.
+	const userMemory = readIfExists(userMemoryPath(home));
+	if (userMemory !== null) files.push({ path: userMemoryPath(home), content: userMemory });
+	files.push(...collectRules(userRulesDir(home)));
+
+	// 2. Walk cwd → root; root-level files first so nearest wins by later append.
+	// The walk is behind the trust gate as a whole (see the header): an untrusted
+	// checkout contributes nothing from any level, while the user tier above stays.
+	if (isProjectTierTrusted(cwd, "memory", home)) {
+		for (const dir of levelsFromCwd(cwd)) {
+			files.push(...collectLevel(dir));
+		}
 	}
 
 	// 3. Expand includes and join. Deduped by path: when cwd sits under the home
@@ -157,4 +184,26 @@ export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult
 		content = `${content.slice(0, MAX_TOTAL_CHARS)}\n\n[memory files truncated at ${MAX_TOTAL_CHARS} chars]`;
 	}
 	return { content, files: contributing, truncated };
+}
+
+/**
+ * The project-tier files the trust gate is holding back, for the startup notice
+ * and `/agents` to name — the un-gated reading of the very walk
+ * `loadMemoryFiles` skips.
+ *
+ * The user tier is subtracted because it still loads: when cwd sits under the
+ * home directory the walk would revisit `~/.labunbun/rules`, which step 1 reads
+ * from anywhere, and counting it as withheld would put a file that is in the
+ * prompt on the list of files that are not.
+ */
+export function withheldProjectMemoryFiles(cwd: string, home: string = homedir()): string[] {
+	if (isProjectTierTrusted(cwd, "memory", home)) return [];
+	const userTier = new Set<string>([
+		userMemoryPath(home),
+		...collectRules(userRulesDir(home)).map((file) => file.path),
+	]);
+	return levelsFromCwd(cwd)
+		.flatMap((dir) => collectLevel(dir))
+		.map((file) => file.path)
+		.filter((path) => !userTier.has(path));
 }

@@ -3,7 +3,8 @@
  * permission engine + dialog bridge → Ink REPL with app-level commands.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import {
@@ -215,7 +216,7 @@ import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
 import { createMcpToolRefreshHandler } from "./mcp-tool-refresh.ts";
-import { loadMemoryFiles } from "./memory.ts";
+import { loadMemoryFiles, userMemoryPath, userRulesDir, withheldProjectMemoryFiles } from "./memory.ts";
 import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
 import {
@@ -227,6 +228,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
+import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
 	readPolicySnapshot,
@@ -1139,12 +1141,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// spawn that can only happen long after startup.
 	const skillTool = createSkillTool(skills);
 	// What the trust gate is withholding for this directory. Project-tier agent
-	// definitions and skills load only after one approval (`project-trust.ts`), and
-	// these two lists are what the startup notice and `/agents` speak for. The
-	// loaders above enforce the gate themselves, so a `-p` run — which has no
-	// dialog to approve anything with — fails closed through the same rule.
+	// definitions, skills and memory load only after one approval
+	// (`project-trust.ts`), and these lists are what the startup notice and
+	// `/agents` speak for. The loaders above enforce the gate themselves, so a
+	// `-p` run — which has no dialog to approve anything with — fails closed
+	// through the same rule.
 	const withheldAgents = withheldProjectAgents(cwd, home);
 	const withheldSkills = withheldProjectSkills(cwd, home);
+	// The memory walk was already skipped by the gate above; this re-reads it
+	// un-gated only to name the withheld files (never their contents).
+	const withheldMemory = withheldProjectMemoryFiles(cwd, home);
 	const planCallbacks: PlanModeCallbacks = createPlanModeCallbacks(
 		() => sessionRef,
 		// The approval dialog is built here rather than handed the handle whole so
@@ -1204,6 +1210,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		platform: process.platform,
 		isTTY: true,
 		memory: memory.content,
+		language: settings.language,
+		// The style files are loaded through the same trust gate as the rest of
+		// the project tier; `settings.outputStyle` is what selects one, and an
+		// unset or unknown name contributes nothing (`output-styles.ts`).
+		outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
 		skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 	});
 
@@ -1965,6 +1976,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				agentDefinitions,
 				withheldAgents,
 				withheldSkills,
+				withheldMemory,
+				memoryFiles: memory.files,
 				subagents: subagentRegistry,
 				subagentControl,
 				pad,
@@ -2035,11 +2048,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// skill simply stops answering and nothing on screen says there was one. MCP has
 	// no equivalent line — a pending server is only visible under `/status` — which
 	// is a habit this starts rather than one it copies.
-	if (withheldAgents.length + withheldSkills.length > 0) {
+	if (withheldAgents.length + withheldSkills.length + withheldMemory.length > 0) {
 		pushInfo(
 			handle,
 			withheldDefinitionNotice(
-				{ agents: withheldAgents.length, skills: withheldSkills.length },
+				{ agents: withheldAgents.length, skills: withheldSkills.length, memory: withheldMemory.length },
 				"repl",
 				enclosingRepositoryRoot(cwd),
 			),
@@ -2413,6 +2426,90 @@ function appendMemoryNote(note: string): void {
 	}
 }
 
+/**
+ * Hand `target` to the user's editor — the half of `/memory` that opens
+ * something.
+ *
+ * `$VISUAL` then `$EDITOR`, the convention interactive tools read, taken only
+ * from the environment handed in (production passes its own, a test passes
+ * one). The spawn is detached with stdio ignored and never awaited, the same
+ * contract `callback-server.ts` uses for the sign-in browser and for the same
+ * reason: a full-screen editor cannot share the TTY the Ink REPL is drawing
+ * on, so it gets its own window and this process keeps its screen. The error
+ * handler is a no-op — a machine whose editor cannot start is not a reason for
+ * a command whose other half is the printed path to fail.
+ *
+ * A missing target is created only after an editor resolved: a command that
+ * could not open anything has no business writing to disk, or a typo in the
+ * editor variable would be enough to leave files behind. `fileHeader` creates
+ * a file (parents included) carrying that first line; `createDir` creates the
+ * directory itself, for `~/.labunbun/rules`, which has to exist before an
+ * editor can be pointed at it.
+ *
+ * The editor string is split on whitespace so `EDITOR="code -w"` works; an
+ * editor binary whose own path contains spaces cannot be told apart from that
+ * form here, which is the one shape this does not serve.
+ */
+export function openInEditor(
+	target: string,
+	options: {
+		fileHeader?: string;
+		createDir?: boolean;
+		spawnFn?: typeof spawn;
+		env?: Record<string, string | undefined>;
+	} = {},
+): boolean {
+	const env = options.env ?? process.env;
+	const editor = env.VISUAL || env.EDITOR;
+	if (!editor) return false;
+	const [command, ...editorArgs] = editor.split(/\s+/).filter(Boolean);
+	if (!command) return false;
+	try {
+		if (!existsSync(target)) {
+			if (options.fileHeader !== undefined) {
+				mkdirSync(dirname(target), { recursive: true });
+				writeFileSync(target, `${options.fileHeader}\n`, "utf8");
+			} else if (options.createDir) {
+				mkdirSync(target, { recursive: true });
+			}
+		}
+	} catch {
+		// The target could not be prepared, so the editor would only fail on it
+		// too — reported as "nothing was opened", which is then true.
+		return false;
+	}
+	try {
+		const child = (options.spawnFn ?? spawn)(command, [...editorArgs, target], { detached: true, stdio: "ignore" });
+		child.on("error", () => {
+			// No editor on PATH; the printed path is the fallback.
+		});
+		child.unref();
+	} catch {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * The project-tier memory file `/memory project` opens: the nearest one that is
+ * in the prompt.
+ *
+ * `loadMemoryFiles` orders its files nearest-last, so the answer is the last
+ * entry that is not the user tier — the user's own MEMORY.md and rules load
+ * from any cwd, and the bare `/memory` and `/memory rules` already name those.
+ * The comparison is exact, not a guess: both sides are the spellings
+ * `userMemoryPath` / `userRulesDir` produced.
+ */
+export function lastProjectMemoryFile(files: string[], home: string): string | undefined {
+	for (let index = files.length - 1; index >= 0; index--) {
+		const file = files[index];
+		if (file === userMemoryPath(home)) continue;
+		if (dirname(file) === userRulesDir(home)) continue;
+		return file;
+	}
+	return undefined;
+}
+
 interface CheckpointInfo {
 	entryId: string;
 	path: string;
@@ -2567,11 +2664,36 @@ interface AppCommandContext {
 	 *
 	 * `withheld*` are the project-tier lists the trust gate is holding back —
 	 * spliced empty by the approval that loads them, so a second `/agents approve`
-	 * has nothing to add and says so.
+	 * has nothing to add and says so. `withheldMemory` holds paths rather than
+	 * contents: the approval loads them, but nothing here ever carries what is in
+	 * a memory file that has not been trusted.
 	 */
 	agentDefinitions: AgentDefinition[];
 	withheldAgents: AgentDefinition[];
 	withheldSkills: Skill[];
+	/**
+	 * The memory files the gate is holding back (`withheldProjectMemoryFiles`).
+	 *
+	 * Optional because a context assembled by hand (a test) has no memory walk
+	 * behind it; `/agents` reads it as `?? []` and the approval records the kind
+	 * the same way.
+	 */
+	withheldMemory?: string[];
+	/**
+	 * The memory files this session actually loaded (`loadMemoryFiles().files`),
+	 * for `/memory`'s no-editor answer, which lists what is in the prompt.
+	 *
+	 * Optional for the same hand-built-context reason as `withheldMemory`.
+	 */
+	memoryFiles?: string[];
+	/**
+	 * How `/memory` hands a path to the user's editor. A field so a test can
+	 * watch the call instead of spawning a terminal editor. Optional for the
+	 * same reason; the production default is `openInEditor`, and the options
+	 * match its creation half — a header to write into a missing file, or a
+	 * directory to create.
+	 */
+	openEditor?(target: string, options?: { fileHeader?: string; createDir?: boolean }): boolean;
 	/**
 	 * The subagent lifecycle table the Task tool records into; `/subagents`
 	 * is the one screen that says what every spawned subagent is doing.
@@ -2812,6 +2934,7 @@ export function appCommandTable(): Array<[string, string]> {
 			"/mcp",
 			"List MCP servers, approve one, or read prompts and resources: /mcp [approve <name>|prompts <server>|prompt <server> <name> [key=value ...]|resources <server>|resource <server> <uri>]",
 		],
+		["/memory", "Open your memory files for editing: /memory [rules|project]"],
 		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
 		["/permissions", "Show the active permission mode and rules"],
@@ -2906,7 +3029,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/agents": {
 			const [, sub] = text.split(/\s+/);
 			if (sub === "approve") {
-				// One decision covers both tiers. A repository that ships skills ships
+				// One decision covers every tier. A repository that ships skills ships
 				// them for the same reason it ships agents, and the question the gate
 				// asks is "do I trust this checkout" — twice is once too many. What gets
 				// recorded is still per kind, so a tier added later is not trusted by a
@@ -2914,6 +3037,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const kinds: DefinitionKind[] = [];
 				if (ctx.withheldAgents.length > 0) kinds.push("agents");
 				if (ctx.withheldSkills.length > 0) kinds.push("skills");
+				// A hand-built context has no memory walk behind it; absent reads as
+				// nothing withheld, the same way the other optional seams do.
+				const pendingMemory = ctx.withheldMemory ?? [];
+				if (pendingMemory.length > 0) kinds.push("memory");
 				if (kinds.length === 0) {
 					pushInfo(ctx.handle, "Nothing pending: this project's definitions are already loaded.");
 					return true;
@@ -2928,12 +3055,21 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// rebuilding the mounted screen for a once-per-repository decision.
 				const adopted = ctx.withheldSkills.splice(0, ctx.withheldSkills.length);
 				ctx.commands.push(...skillsAsCommands(adopted));
+				// Memory is spliced like the others so a second approve has nothing
+				// pending, but it cannot join them in being "now loaded": it is read
+				// once at startup into the system prompt, and this session's prompt was
+				// built long ago. The confirmation says restart, because a "loaded" that
+				// the next message could contradict is the one lie this command must
+				// not tell. The tail is appended rather than the sentence rewritten so
+				// the no-memory byte-for-byte wording (and its test) stays put.
+				const memoryFiles = pendingMemory.splice(0, pendingMemory.length);
 				pushInfo(
 					ctx.handle,
 					`Approved this project's definitions — ${describeWithheld({
 						agents: agents.length,
 						skills: adopted.length,
-					})} now loaded.`,
+						memory: memoryFiles.length,
+					})}${memoryFiles.length > 0 ? "; memory loads on the next start, since it is read at startup" : " now loaded"}.`,
 				);
 				return true;
 			}
@@ -2952,6 +3088,15 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const names = ctx.withheldSkills.map((skill) => skill.name).join(", ");
 				lines.push(
 					`  ${ctx.withheldSkills.length} project skill${ctx.withheldSkills.length === 1 ? "" : "s"} not loaded: ${names} — /agents approve loads both`,
+				);
+			}
+			// Same rule for memory, and the paths are spelled out rather than
+			// counted: each one is a file the user can go read before deciding.
+			const withheldMemory = ctx.withheldMemory ?? [];
+			if (withheldMemory.length > 0) {
+				const names = withheldMemory.map((file) => shortenHome(file, ctx.home)).join(", ");
+				lines.push(
+					`  ${withheldMemory.length} project memory file${withheldMemory.length === 1 ? "" : "s"} not loaded: ${names} — /agents approve, then restart`,
 				);
 			}
 			pushInfo(ctx.handle, `Agent definitions:\n${lines.join("\n")}`);
@@ -3656,6 +3801,71 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				lines.push("Read one's prompts or resources: /mcp prompts <server>, /mcp resources <server>");
 			}
 			pushInfo(ctx.handle, `MCP servers:\n${lines.join("\n")}`);
+			return true;
+		}
+		case "/memory": {
+			const [, arg] = text.split(/\s+/);
+			if (arg !== undefined && arg !== "rules" && arg !== "project") {
+				pushInfo(ctx.handle, "Usage: /memory [rules|project]");
+				return true;
+			}
+			// A hand-built context may not name a home; these are the user's own
+			// files, which live under the real home when none was named — the same
+			// default the other user-owned seams (MCP approvals) take.
+			const home = ctx.home ?? homedir();
+			// The editor seam: production spawns the user's editor (`openInEditor`),
+			// a hand-built context substitutes one that watches the call.
+			const openEditor = ctx.openEditor ?? openInEditor;
+			let target: string;
+			let options: { fileHeader?: string; createDir?: boolean };
+			if (arg === "rules") {
+				// A directory: created if missing, because an editor pointed at a
+				// path that does not exist has nothing to show.
+				target = userRulesDir(home);
+				options = { createDir: true };
+			} else if (arg === "project") {
+				const project = lastProjectMemoryFile(ctx.memoryFiles ?? [], home);
+				if (!project) {
+					const withheld = ctx.withheldMemory?.length ?? 0;
+					pushInfo(
+						ctx.handle,
+						withheld > 0
+							? `No project memory is loaded — ${withheld} project memory file${withheld === 1 ? " is" : "s are"} held back by the trust gate. /agents approve, then restart.`
+							: "No project memory file found above this directory (LABUNBUN.md, AGENTS.md, or .labunbun/rules). /init can scaffold one.",
+					);
+					return true;
+				}
+				// Opened as-is: a project file is only ever edited where it exists.
+				// Planting a LABUNBUN.md in a checkout that never had one is /init's
+				// job, not a side effect of a command run to read what is loaded.
+				target = project;
+				options = {};
+			} else {
+				target = userMemoryPath(home);
+				options = { fileHeader: "# Memory" };
+			}
+			const created = arg !== "project" && !existsSync(target);
+			const opened = openEditor(target, options);
+			const shown = shortenHome(target, home);
+			if (opened) {
+				// Memory cannot be live-loaded — it is read once at startup into the
+				// system prompt — so every success says so, the way the migration
+				// command says settings load on the next launch.
+				pushInfo(
+					ctx.handle,
+					`Opening ${shown} in your editor.${created ? " Created it." : ""} Memory is read at startup — restart to apply edits.`,
+				);
+			} else {
+				const loaded = ctx.memoryFiles ?? [];
+				const listing =
+					loaded.length > 0
+						? `\nLoaded memory files:\n${loaded.map((file) => `  ${shortenHome(file, home)}`).join("\n")}`
+						: "\nNo memory files are loaded.";
+				pushInfo(
+					ctx.handle,
+					`Nothing was opened for ${shown} — set $VISUAL or $EDITOR to an editor this session can launch.${listing}`,
+				);
+			}
 			return true;
 		}
 		case "/permissions-mode":

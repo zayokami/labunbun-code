@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
 import { type AgentMessage, assistantMessage, userMessage } from "@labunbun/ai";
+import { approveProjectDefinitions } from "../src/project-trust.ts";
 import { buildSystemPrompt, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "../src/system-prompt.ts";
 
 const roots: string[] = [];
@@ -147,6 +148,10 @@ describe("memory reaches the model", () => {
 	test("on the first request and on the ones after it", async () => {
 		const cwd = tempDir("lbb-mem-cwd-");
 		writeProjectMemory(cwd);
+		// The project tier is behind the trust gate; the run's home is this same
+		// temp directory (see `conversation`), so the approval is recorded in the
+		// tree the child reads.
+		approveProjectDefinitions(cwd, ["memory"], cwd);
 
 		const requests = await conversation({ cwd, envHome: cwd, prompts: ["first question", "second question"] });
 
@@ -164,6 +169,9 @@ describe("memory reaches the model", () => {
 		store.appendMessage(userMessage("an old question"));
 		store.appendMessage(assistantMessage({ content: [{ type: "text", text: "an old answer" }], stopReason: "stop" }));
 		writeProjectMemory(cwd);
+		// Same approval as above: the resume path reads memory through the same
+		// gated loader, so a session cannot "lose" rules by being resumed.
+		approveProjectDefinitions(cwd, ["memory"], cwd);
 
 		const requests = await conversation({
 			cwd,

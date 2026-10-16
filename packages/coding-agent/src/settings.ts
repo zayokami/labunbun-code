@@ -152,6 +152,22 @@ export const SettingsSchema = z.object({
 	 * does not resolve falls back to the default and is reported by `/doctor`.
 	 */
 	theme: z.string().optional(),
+	/**
+	 * The language answers should be written in, injected into the system prompt
+	 * verbatim (`system-prompt.ts`). Free-form rather than an enum for the same
+	 * reason as `theme`: a fixed list would have to decide between rejecting
+	 * "Chinese" and rejecting "zh-CN", and this app has no list of languages it
+	 * could claim to have enumerated.
+	 */
+	language: z.string().min(1).optional(),
+	/**
+	 * The output style this session should speak in: the name of a file in the
+	 * user's — or, once trusted, this project's — `.labunbun/output-styles/`
+	 * (`output-styles.ts`), whose body is injected as the `# Output style`
+	 * section. Free-form because the names come from disk; a name that resolves
+	 * to nothing injects nothing, which is the kind of typo `/doctor` can report.
+	 */
+	outputStyle: z.string().optional(),
 	vimMode: z.boolean().optional(),
 	/**
 	 * Emacs key bindings in the prompt. Separate from `vimMode` rather than a
@@ -445,6 +461,13 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	beetle: "denied",
 	allowManagedPermissionRulesOnly: "denied",
 	disableBypassPermissionsMode: "denied",
+	// A repository choosing the language the user is answered in, or the style
+	// the session speaks in, is deciding how this checkout's assistant talks to
+	// them. The style files themselves may be project-tier (behind the trust
+	// gate), but the *selection* cannot be: a style the user never named, active
+	// the moment a session starts, is a prompt section they did not see.
+	language: "denied",
+	outputStyle: "denied",
 	// Cosmetic, no reach beyond the user's own terminal.
 	theme: "repo",
 	vimMode: "repo",

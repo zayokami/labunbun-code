@@ -301,6 +301,28 @@ describe("startGeminiCallbackServer", () => {
 			server.close();
 		}
 	});
+
+	test("a signal aborted before the listener was up rejects as cancelled, not as a timeout", async () => {
+		// An abort event does not replay for listeners added after it, so a signal
+		// already aborted while the port was binding has to be answered rather
+		// than subscribed to. Without that precheck this wait sits until the
+		// deadline and reports "No browser finished the sign-in" — a timeout for
+		// a sign-in the user cancelled.
+		const controller = new AbortController();
+		controller.abort();
+
+		const server = await startGeminiCallbackServer({
+			port: 0,
+			state: "s-1",
+			signal: controller.signal,
+			timeoutMs: 100,
+		});
+		try {
+			await expect(server.wait).rejects.toThrow("The sign-in was cancelled.");
+		} finally {
+			server.close();
+		}
+	});
 });
 
 describe("geminiLoginFlow", () => {

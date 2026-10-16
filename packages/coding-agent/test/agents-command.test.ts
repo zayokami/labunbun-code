@@ -21,6 +21,7 @@ import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { expandPromptCommand, findCommand } from "../src/commands.ts";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
+import { withheldProjectMemoryFiles } from "../src/memory.ts";
 import { loadTrustedDefinitionKinds } from "../src/project-trust.ts";
 import { loadSkills, skillsAsCommands, withheldProjectSkills } from "../src/skills.ts";
 import { loadAgentDefinitions, withheldProjectAgents } from "../src/subagents.ts";
@@ -95,10 +96,12 @@ describe("/agents", () => {
 		plant(join(h.home, ".labunbun", "agents", "researcher.md"), "---\ndescription: Deep research\n---\nUser body.\n");
 		plant(join(h.cwd, ".labunbun", "agents", "deployer.md"), "---\ndescription: Deploys the app\n---\nProject body.\n");
 		plant(join(h.cwd, ".labunbun", "skills", "deploy", "SKILL.md"), "---\nname: deploy\n---\nDeploy body.\n");
+		plant(join(h.cwd, "LABUNBUN.md"), "# House rules\n");
 		// Re-read through the readers a mounted app would have used at startup.
 		h.ctx.agentDefinitions = loadAgentDefinitions(h.cwd, h.home);
 		h.ctx.withheldAgents = withheldProjectAgents(h.cwd, h.home);
 		h.ctx.withheldSkills = withheldProjectSkills(h.cwd, h.home);
+		h.ctx.withheldMemory = withheldProjectMemoryFiles(h.cwd, h.home);
 
 		expect(handleAppCommand("/agents", h.ctx)).toBe(true);
 
@@ -109,6 +112,10 @@ describe("/agents", () => {
 		// showed only what loaded would make a repository's agent look absent.
 		expect(text).toContain("deployer [project, not loaded — /agents approve]");
 		expect(text).toContain("1 project skill not loaded: deploy — /agents approve loads both");
+		// Memory is the third pending tier, named by path so it can be read before
+		// the decision — and with the restart, which the other two do not need.
+		// The planted LABUNBUN.md is the nearest file, so it closes the list.
+		expect(text).toContain(`LABUNBUN.md — /agents approve, then restart`);
 	});
 
 	test("approve loads both tiers, and they answer from the next line typed", () => {
@@ -133,6 +140,30 @@ describe("/agents", () => {
 		expect(h.ctx.withheldAgents).toEqual([]);
 		expect(h.ctx.withheldSkills).toEqual([]);
 		expect(h.lines()).toContain("1 agent definition, 1 skill now loaded");
+	});
+
+	test("approve records memory with the rest, and the confirmation asks for a restart", () => {
+		const h = harness();
+		plant(join(h.cwd, "LABUNBUN.md"), "# House rules\n");
+		// The memory walk extends above the fixture, so the count is computed the
+		// way the app computes it; the planted file guarantees it is non-zero.
+		h.ctx.withheldMemory = withheldProjectMemoryFiles(h.cwd, h.home);
+		const withheld = h.ctx.withheldMemory.length;
+		expect(withheld).toBeGreaterThan(0);
+
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+
+		// Recorded under its own kind: the other tiers are not trusted by this.
+		expect(loadTrustedDefinitionKinds(h.cwd, h.home)).toEqual(new Set(["memory"]));
+		expect(h.ctx.withheldMemory).toEqual([]);
+		// "now loaded" would be false for memory within this session — it is read
+		// once at startup into the system prompt — so the line says restart, the
+		// one thing still owed, instead of a "loaded" the next message contradicts.
+		expect(h.lines()).toContain(`${withheld} memory file${withheld === 1 ? "" : "s"}; memory loads on the next start`);
+		// Nothing is left pending for a second approve: the decision is recorded,
+		// and the restart is not something a second approval can buy.
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+		expect(h.lines()).toContain("Nothing pending");
 	});
 
 	test("approve with nothing pending says so and writes nothing", () => {

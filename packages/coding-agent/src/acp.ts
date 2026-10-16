@@ -97,6 +97,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
+import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
 import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
@@ -1115,6 +1116,8 @@ class AcpAgent implements acp.Agent {
 				platform: process.platform,
 				isTTY: process.stdout.isTTY ?? false,
 				memory: memory.content,
+				language: settings.language,
+				outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
 				skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 			}),
 			tools: allTools,

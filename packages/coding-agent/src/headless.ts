@@ -54,7 +54,7 @@ import { type CompactionTuning, createCompactionWiring, resolveCompactionSummari
 import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
-import { loadMemoryFiles } from "./memory.ts";
+import { loadMemoryFiles, withheldProjectMemoryFiles } from "./memory.ts";
 import { writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import {
@@ -65,6 +65,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
+import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
 import { enclosingRepositoryRoot, withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	damagedSessionNotice,
@@ -499,10 +500,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// until someone reads the transcript and wonders why the model ignored them.
 	const withheldAgents = withheldProjectAgents(cwd, home);
 	const withheldSkills = withheldProjectSkills(cwd, home);
-	if (withheldAgents.length + withheldSkills.length > 0) {
+	const withheldMemory = withheldProjectMemoryFiles(cwd, home);
+	if (withheldAgents.length + withheldSkills.length + withheldMemory.length > 0) {
 		console.error(
 			withheldDefinitionNotice(
-				{ agents: withheldAgents.length, skills: withheldSkills.length },
+				{ agents: withheldAgents.length, skills: withheldSkills.length, memory: withheldMemory.length },
 				"headless",
 				enclosingRepositoryRoot(cwd),
 			),
@@ -657,6 +659,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			platform: process.platform,
 			isTTY: process.stdout.isTTY ?? false,
 			memory: memory.content,
+			language: settings.language,
+			outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
 			skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 		}),
 		tools: allTools,

@@ -53,6 +53,8 @@ describe("the project tier's key policy", () => {
 			"beetle",
 			"allowManagedPermissionRulesOnly",
 			"disableBypassPermissionsMode",
+			"language",
+			"outputStyle",
 		]) {
 			expect(PROJECT_TIER_KEY_POLICY, key).toMatchObject({ [key]: "denied" });
 		}

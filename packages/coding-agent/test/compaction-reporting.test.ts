@@ -112,7 +112,18 @@ async function run(steps: unknown[], commands: string[], settleWith: string, opt
 						while (!state.entries.some((e) => e.kind === "info" && e.text.includes(wanted)) && Date.now() < deadline) {
 							await new Promise((resolve) => setTimeout(resolve, 5));
 						}
-						for (const entry of state.entries) if (entry.kind === "info") infos.push(entry.text);
+						// Startup notices that speak about the machine rather than this
+						// command stay out: the definitions notice counts the files a trust
+						// gate withholds, and its walk crosses everything above the fixture's
+						// cwd — on Windows the temp home sits under the real one, so a
+						// machine with its own memory files leaks counts in. It is asserted
+						// where it belongs (agents-command.test.ts, headless-context.test.ts);
+						// this file is about compaction's own lines.
+						for (const entry of state.entries) {
+							if (entry.kind !== "info") continue;
+							if (entry.text.startsWith("This project's definitions are not loaded")) continue;
+							infos.push(entry.text);
+						}
 						// What the run leaves in its session file, read the way a restart
 						// reads it: the newest session under this home, walked from its
 						// active leaf. Null means no list is on that chain at all.

@@ -212,3 +212,51 @@ describe("the prompt tells the model what the harness will do to it", () => {
 		expect(body, "the file re-injection that survives a compaction is gone").toContain("#reinjectFiles");
 	});
 });
+
+describe("the language setting", () => {
+	test("unset, the line is the generic one every session shipped with", () => {
+		const prompt = buildSystemPrompt([], BASE);
+		expect(prompt).toContain("- Answer in the user's language.");
+		expect(prompt).not.toContain("Answer in Chinese.");
+	});
+
+	test("set, it replaces the generic line rather than joining it", () => {
+		// The value is free-form (`settings.language`), injected as written — the
+		// prompt is not a language registry.
+		const prompt = buildSystemPrompt([], { ...BASE, language: "Chinese" });
+		expect(prompt).toContain("- Answer in Chinese.");
+		// Two instructions about one thing is how a prompt ends up arguing with
+		// itself; the configured value is the more specific one, so the generic
+		// line is gone, not merely preceded.
+		expect(prompt).not.toContain("the user's language");
+	});
+});
+
+describe("the output-style setting", () => {
+	test("unset, no style section is sent at all", () => {
+		expect(buildSystemPrompt([], BASE)).not.toContain("# Output style");
+		// Whitespace is what an empty or unreadable style resolves to; a heading
+		// over nothing is a section the model is told to read and finds empty.
+		expect(buildSystemPrompt([], { ...BASE, outputStyle: "  \n" })).toBe(buildSystemPrompt([], BASE));
+	});
+
+	test("set, it is its own section between memory and the skill list", () => {
+		const prompt = buildSystemPrompt([], {
+			...BASE,
+			memory: "MEMORY-MARKER",
+			outputStyle: "STYLE-MARKER",
+			skills: "SKILLS-MARKER",
+		});
+		expect(prompt).toContain("# Output style\nSTYLE-MARKER");
+		expect(prompt.indexOf("# Project memory")).toBeLessThan(prompt.indexOf("# Output style"));
+		expect(prompt.indexOf("# Output style")).toBeLessThan(prompt.indexOf("SKILLS-MARKER"));
+	});
+
+	test("a style is a section, not a replacement — the coding instructions stay", () => {
+		// Stripping them is the tempting reading of "style", and it would turn a
+		// tone setting into a way for a style file to ship a prompt.
+		const prompt = buildSystemPrompt([], { ...BASE, outputStyle: "STYLE-MARKER" });
+		expect(prompt).toContain("Stop when the work asked for is done");
+		expect(prompt).toContain("# Communication");
+	});
+});

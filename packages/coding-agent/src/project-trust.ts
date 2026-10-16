@@ -6,7 +6,13 @@
  * system prompt of every subagent spawned from it, and a skill becomes a slash
  * command whose expansion is sent to the model. Cloning a repository and opening
  * it was therefore enough to change what the model is told to be, with no user
- * action and nothing on screen to point at.
+ * action and nothing on screen to point at. The same move wears two more names:
+ * a `LABUNBUN.md`/`AGENTS.md` the walk picks up (`memory.ts`) goes into the
+ * system prompt as standing instructions, and `.labunbun/output-styles` files
+ * (`output-styles.ts`) replace the `# Output style` section once the user's own
+ * settings name one. All four kinds load only after this directory has been
+ * trusted once, each recorded separately, so a kind added later is not trusted
+ * by a decision taken before it existed.
  *
  * Project-tier definitions now load only after this directory has been trusted
  * once, and the decision is remembered outside the working tree —
@@ -32,11 +38,11 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
 
-/** The two project tiers one trust decision covers, named as their directories are. */
-export type DefinitionKind = "agents" | "skills";
+/** The project tiers one trust decision covers, named as their directories are. */
+export type DefinitionKind = "agents" | "skills" | "memory" | "styles";
 
 /** Fixed order, so repeated approvals write the same bytes. */
-const KINDS: DefinitionKind[] = ["agents", "skills"];
+const KINDS: DefinitionKind[] = ["agents", "skills", "memory", "styles"];
 
 function trustStorePath(cwd: string, home: string): string {
 	return join(home, ".labunbun", "projects", sanitizeCwd(cwd), "trusted-definitions.json");
@@ -68,9 +74,17 @@ export function loadTrustedDefinitionKinds(cwd: string, home: string = homedir()
  * Three lines print these numbers (the REPL's startup notice, its confirmation
  * after an approval, and a `-p` run's stderr) and the pluralisation is the part
  * that drifts quietly between them.
+ *
+ * The memory count is a real tier now but prints only when non-zero: the
+ * agents/skills zeros are pinned (`project-trust.test.ts`), while a session
+ * with no memory files in front of it should not read a clause about memory at
+ * all — and its confirmation says "restart", which an absent tier has no
+ * business doing.
  */
-export function describeWithheld(kinds: { agents: number; skills: number }): string {
-	return `${kinds.agents} agent definition${kinds.agents === 1 ? "" : "s"}, ${kinds.skills} skill${kinds.skills === 1 ? "" : "s"}`;
+export function describeWithheld(kinds: { agents: number; skills: number; memory?: number }): string {
+	const counts = `${kinds.agents} agent definition${kinds.agents === 1 ? "" : "s"}, ${kinds.skills} skill${kinds.skills === 1 ? "" : "s"}`;
+	if (kinds.memory === undefined || kinds.memory === 0) return counts;
+	return `${counts}, ${kinds.memory} memory file${kinds.memory === 1 ? "" : "s"}`;
 }
 
 /**
@@ -88,7 +102,7 @@ export function describeWithheld(kinds: { agents: number; skills: number }): str
  * directory, and when it is set the notice gains the scope sentence below.
  */
 export function withheldDefinitionNotice(
-	kinds: { agents: number; skills: number },
+	kinds: { agents: number; skills: number; memory?: number },
 	audience: "repl" | "headless",
 	subdirectoryOfGitRoot?: string,
 ): string {
