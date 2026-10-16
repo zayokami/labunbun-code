@@ -74,7 +74,10 @@ async function scene(options: {
 	const cwd = tempDir("lbb-lifecycle-cwd-");
 	const home = tempDir("lbb-lifecycle-home-");
 	const target = join(cwd, "written.txt");
-	const interactiveOptions = { cwd, home, theme: "dark" };
+	// `ask` pinned rather than left to the default: these scenes are the dialog
+	// and the re-decision that races it, and under the current default (`agent`)
+	// the Write would need no dialog at all — nothing to hold, nothing to answer.
+	const interactiveOptions = { cwd, home, theme: "dark", permissionMode: "ask" };
 	const script = `
 		import { mock } from "bun:test";
 		import * as ai from "@labunbun/ai";

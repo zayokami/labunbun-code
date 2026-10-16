@@ -37,7 +37,7 @@ function tempDir(prefix: string): string {
 /** A scripted transport, a REPL that records instead of painting, and one scene. */
 function sceneScript(
 	scene: { steps: string; run: string; pointedAt?: string },
-	options: { cwd: string; home: string },
+	options: { cwd: string; home: string; permissionMode?: string },
 ): string {
 	return `
 		import { mock } from "bun:test";
@@ -124,7 +124,14 @@ function sceneScript(
 			}
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
-		await runInteractive(${JSON.stringify({ cwd: options.cwd, home: options.home, theme: "dark" })});
+		// A scene may pin the startup mode the way --permission-mode does; when it
+		// does not, the option is absent from the object and the default rules.
+		await runInteractive(${JSON.stringify({
+			cwd: options.cwd,
+			home: options.home,
+			theme: "dark",
+			permissionMode: options.permissionMode,
+		})});
 		console.log(JSON.stringify({ requests, asks, target, switched, promptResult, inserted, infos: infos() }));
 	`;
 }
@@ -132,7 +139,7 @@ function sceneScript(
 /** Run a scene in its own process, with its own home: nothing touches the real one. */
 async function runScene(
 	scene: { steps: string; run: string; pointedAt?: string },
-	options: { cwd: string; home: string },
+	options: { cwd: string; home: string; permissionMode?: string },
 ): Promise<Record<string, unknown>> {
 	const proc = Bun.spawn([process.execPath, "--eval", sceneScript(scene, options)], {
 		cwd: join(import.meta.dir, ".."),
@@ -269,7 +276,10 @@ describe("a subagent spawned after /mode agent", () => {
 		// user denies it, and the subagent records "Write: error"; under agent it
 		// is allowed outright and the record says "Write: ok". Plan mode is not
 		// the mode to reach for here — it denies the Task call itself, and then
-		// there is no subagent to observe.
+		// there is no subagent to observe. The startup mode is pinned to `ask`
+		// rather than left to the default: under the current default (`agent`)
+		// the first edit would be allowed outright too, and the two records this
+		// test contrasts would be the same one twice.
 		//
 		// `/mode agent` also puts the sandbox on that axis, so what is under test
 		// is inheritance of the *pair*, not just of the mode name.
@@ -286,7 +296,7 @@ describe("a subagent spawned after /mode agent", () => {
 						promptResult = await session.prompt("second");
 					`,
 			},
-			{ cwd, home },
+			{ cwd, home, permissionMode: "ask" },
 		);
 
 		expect(outcome.promptResult).toBe("completed");

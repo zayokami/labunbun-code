@@ -5,7 +5,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SANDBOX_FOR_MODE, needsNetworkProxy, networkConfinementReason } from "@labunbun/agent";
+import { DEFAULT_MODE_CHOICE, DEFAULT_SANDBOX_FOR_MODE, needsNetworkProxy, networkConfinementReason } from "@labunbun/agent";
 import { apiKeyEnvNames, listModels } from "@labunbun/ai";
 import {
 	detectNativeBackend,
@@ -227,7 +227,7 @@ export async function runDoctorChecks(
 		// mode currently pairs to `workspace-write`, so this is not a place where
 		// three answers collapse into one by accident — it is the same resolution the
 		// app runs, stated once.
-		const sandbox = settings.sandbox ?? DEFAULT_SANDBOX_FOR_MODE[settings.permissionMode ?? "ask"];
+		const sandbox = settings.sandbox ?? DEFAULT_SANDBOX_FOR_MODE[settings.permissionMode ?? DEFAULT_MODE_CHOICE.mode];
 		const confinement = networkConfinement(backend, sandbox, axis.access, platform);
 		// `ok` is reserved for the cases where the kernel, not the program, is what
 		// holds the boundary: under `os-namespace` the OS denies every route, so the

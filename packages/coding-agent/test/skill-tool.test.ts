@@ -172,9 +172,9 @@ describe("invoking a skill through the tool", () => {
 /**
  * One REPL run that delegates through Task, reporting the tool names on every
  * request the transport saw — the parent's, the subagent's and the parent's
- * again. The dialogs are recorded rather than asserted away: the default mode
- * is `ask`, so the Task call has to be approved, and a scene that silently
- * never raised one would be reporting on a run that went nowhere.
+ * again. The dialogs are pinned to none rather than recorded loose: the
+ * default mode is `agent`, so the Task call runs without a prompt, and this
+ * assertion is where a default that slid back to asking would show up.
  */
 interface Scene {
 	requests: Array<{ tools: string[]; systemPrompt: string; messages: string }>;
@@ -271,7 +271,7 @@ describe("the tool tables the REPL builds", () => {
 	test("Skill is in the session's list and in the list a subagent is spawned with", async () => {
 		const { requests, dialogs } = await replScene();
 
-		expect(dialogs).toEqual(["Task"]);
+		expect(dialogs).toEqual([]);
 		expect(requests.length).toBeGreaterThanOrEqual(3);
 		// The session's own list, and the control that the scene ran at all: the
 		// parent request carries the tools the app merged at startup.

@@ -77,7 +77,7 @@ describe("/status", () => {
 		// printed only the mode could not distinguish `Agent` from
 		// `Agent 无沙箱` — the two rows differ only in confinement, and that is the
 		// one fact on this card a user cannot infer from the rest of it.
-		expect(card?.permissions).toBe("Ask");
+		expect(card?.permissions).toBe("Agent");
 		// The tail of the id, not the head: ids start with a timestamp, so the
 		// first eight characters are the same for every session this month.
 		expect(card?.session).toBe("23456789");

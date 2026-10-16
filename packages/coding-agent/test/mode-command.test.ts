@@ -182,7 +182,12 @@ describe("/mode without an argument", () => {
 		expect(rowNames(h.pick)).toEqual(MODE_CHOICES.map((c) => c.label));
 		expect(h.pick.title).toBe("Mode");
 		expect(markedRow(h.pick)).toBe(`* ${DEFAULT_MODE_CHOICE.label}`);
-		expect(h.pick.initialIndex).toBe(0);
+		// The cursor opens on the row in force, and with nothing configured that
+		// row is the default — derived, so the pair and the row cannot disagree.
+		const defaultRow = MODE_CHOICES.findIndex(
+			(c) => c.mode === DEFAULT_MODE_CHOICE.mode && c.sandbox === DEFAULT_MODE_CHOICE.sandbox,
+		);
+		expect(h.pick.initialIndex).toBe(defaultRow);
 		// A row with no explanation is a choice the user has to look up elsewhere,
 		// and the list is the only place the difference is written down.
 		expect(h.pick.items.every((item) => (item.description ?? "").length > 0)).toBe(true);

@@ -311,6 +311,7 @@ describe("a dialog and an abort", () => {
 		// — raised, never answered — and the turn waits behind it forever, because
 		// the abort listener is attached after the signal already fired.
 		const outcome = await scene({
+			permissionMode: "ask", // the dialog path the abort has to race
 			hookHoldMs: 600,
 			abortWhenHookUp: true,
 			steps: [
@@ -338,7 +339,7 @@ describe("a dialog and an abort", () => {
  * tool by name, and the rules', which send everything unmatched to the
  * permission dialog. Both got it wrong in the same direction — plan mode refused
  * the question outright because its name list had drifted from the tools' own
- * `isReadOnly`, and the default mode raised a permission prompt ahead of it, so
+ * `isReadOnly`, and ask mode raised a permission prompt ahead of it, so
  * the user had to clear the same question twice. A session showed what the first
  * cost: the model, told to plan a task whose goal had never been stated, tried
  * to ask which task and was told the question was not allowed, so it planned a
@@ -365,8 +366,12 @@ describe("a question the model asks", () => {
 		expect(outcome.dialogs).toEqual([]);
 	}, 20_000);
 
-	test("in the default mode it is asked once, not gated first", async () => {
-		const outcome = await scene({ answerWhenAsked: true, steps: [ASK, { text: "done" }] });
+	test("in ask mode it is asked once, not gated first", async () => {
+		// `ask` pinned rather than taken from the default: the regression was
+		// found in ask mode, and under the current default (`agent`) no name
+		// list could gate anything anyway, so the default would make this test
+		// true for a reason that cannot fail.
+		const outcome = await scene({ permissionMode: "ask", answerWhenAsked: true, steps: [ASK, { text: "done" }] });
 
 		expect(outcome.dialogs).toEqual([]);
 		expect(outcome.asked).toBe(1);

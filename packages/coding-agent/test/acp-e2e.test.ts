@@ -361,7 +361,7 @@ describe("the ACP server, end to end", () => {
 			const sessionId = created.result?.sessionId;
 			expect(typeof sessionId).toBe("string");
 			const modes = created.result?.modes as { currentModeId?: string; availableModes?: unknown[] } | undefined;
-			expect(modes?.currentModeId).toBe("ask");
+			expect(modes?.currentModeId).toBe("agent");
 			expect(modes?.availableModes).toHaveLength(3);
 
 			const promptId = await client.startPrompt(sessionId as string, "say hi");
@@ -431,7 +431,10 @@ describe("the ACP server, end to end", () => {
 			{ tool: { name: "Write", input: { file_path: out, content: "written by the stub" } } },
 			{ text: "done" },
 		]);
-		await withAcp(f, ["acp"], async (client) => {
+		// `ask` is pinned rather than taken from the default: the dialog frame is
+		// this test's subject, and under the default (`agent`) the write runs with
+		// no question on the wire at all.
+		await withAcp(f, ["acp", "--permission-mode", "ask"], async (client) => {
 			const sessionId = await openSession(client, f.dir);
 			const promptId = await client.startPrompt(sessionId, "write the file");
 
@@ -476,7 +479,7 @@ describe("the ACP server, end to end", () => {
 			{ tool: { name: "Write", input: { file_path: out, content: "should never land" } } },
 			{ text: "understood" },
 		]);
-		await withAcp(f, ["acp"], async (client) => {
+		await withAcp(f, ["acp", "--permission-mode", "ask"], async (client) => {
 			const sessionId = await openSession(client, f.dir);
 			const promptId = await client.startPrompt(sessionId, "write the file");
 			const ask = await client.waitFor(
@@ -498,7 +501,7 @@ describe("the ACP server, end to end", () => {
 
 	test("session/cancel answers the interrupted prompt with stopReason cancelled", async () => {
 		const f = fixture((out) => [{ tool: { name: "Write", input: { file_path: out, content: "should never land" } } }]);
-		await withAcp(f, ["acp"], async (client) => {
+		await withAcp(f, ["acp", "--permission-mode", "ask"], async (client) => {
 			const sessionId = await openSession(client, f.dir);
 			const promptId = await client.startPrompt(sessionId, "write the file");
 			// Cancel while the user is being asked: the question is what parks the
@@ -532,7 +535,7 @@ describe("the ACP server, end to end", () => {
 			});
 			expect(response.error).toBeUndefined();
 			const modes = response.result?.modes as { currentModeId?: string; availableModes?: unknown[] } | undefined;
-			expect(modes?.currentModeId).toBe("ask");
+			expect(modes?.currentModeId).toBe("agent");
 			expect(modes?.availableModes).toHaveLength(3);
 			// `models` is UNSTABLE in the protocol, so it is not filled in.
 			expect(response.result?.models).toBeUndefined();

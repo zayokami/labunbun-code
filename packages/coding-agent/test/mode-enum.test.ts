@@ -340,9 +340,9 @@ describe("cycling the mode, and naming where it landed", () => {
 	 *
 	 * The last row is the widest grant on offer. A cycle that stopped there would
 	 * make one more press of the key do nothing exactly where being wrong costs
-	 * the most, so the step off the end lands on `Ask` — the safest row, not the
-	 * first row by accident: row 0 and the default are the same row today, and
-	 * this is what stops that coincidence from being the reason.
+	 * the most, so the step off the end lands on `Ask` — the safest row, and
+	 * provably not a default-row coincidence: the default is the `agent` row,
+	 * and the wrap still lands on row 0.
 	 */
 	test("the step off the end lands on Ask, not on nothing", () => {
 		const widest = MODE_CHOICES[MODE_CHOICES.length - 1];

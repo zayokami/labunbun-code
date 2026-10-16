@@ -1171,8 +1171,8 @@ describe("permission axes", () => {
 		expect(faux.calls("john")[3] ?? "").toContain("Permission required for Bash");
 		expect(faux.calls("john")[3] ?? "").toContain("no dialog");
 
-		// …and the bus is the exception the band cannot live without: in ask
-		// mode — the default mode — a member still reaches other members,
+		// …and the bus is the exception the band cannot live without: even in
+		// ask mode a member still reaches other members,
 		// because a wake-up touches nothing and every action it provokes is
 		// evaluated in the woken member's own session.
 		expect(faux.calls("george")[0] ?? "").toContain("From: John (lead)");

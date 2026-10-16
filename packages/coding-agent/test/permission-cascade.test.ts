@@ -177,7 +177,9 @@ async function cascade(alwaysAllow: boolean): Promise<Cascade> {
 			}
 		}
 		const { runInteractive } = await import("./src/interactive.ts");
-		await runInteractive(${JSON.stringify({ cwd, home, theme: "dark" })});
+		// 'ask' pinned: the cascade is the dialog queue, and under the current
+		// default ('agent') neither Read raises one — an empty queue proves nothing.
+		await runInteractive(${JSON.stringify({ cwd, home, theme: "dark", permissionMode: "ask" })});
 		console.log(JSON.stringify({ dialogs, prompt, results }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {

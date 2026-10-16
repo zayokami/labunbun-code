@@ -650,6 +650,10 @@ describe("a grant that outlives the process", () => {
 		const first = await scenario({
 			cwd,
 			home,
+			// `ask` pinned: the grant dialogs are the subject, and under the current
+			// default (`agent`) a Read raises none — there would be nothing to grant
+			// and no rule to come back out of the file.
+			options: { permissionMode: "ask" },
 			steps: [
 				{ toolCalls: [{ name: "Read", arguments: { file_path: one } }] },
 				{ text: "read it" },
@@ -734,6 +738,9 @@ describe("surviving the two rewrites", () => {
 		const first = await scenario({
 			cwd,
 			home,
+			// `ask` pinned, as in the golden test: the always-allow must go through
+			// a dialog for there to be a rule for the compaction to re-root.
+			options: { permissionMode: "ask" },
 			steps: [
 				{ toolCalls: [{ name: "Read", arguments: { file_path: one } }] },
 				{ text: "read it" },
@@ -786,6 +793,9 @@ describe("surviving the two rewrites", () => {
 		const result = await scenario({
 			cwd,
 			home,
+			// `ask` pinned, as above: the rule the /model rewrite must leave alone
+			// only exists if a dialog granted it.
+			options: { permissionMode: "ask" },
 			steps: [
 				{ toolCalls: [{ name: "Read", arguments: { file_path: one } }] },
 				{ text: "read it" },
@@ -1147,7 +1157,7 @@ describe("a stored rule without a behavior", () => {
 
 		// The unreadable snapshot is skipped whole — the axes are the settings and
 		// the default row, not the snapshot's plan...
-		expect(resumed.axes?.mode).toBe("ask");
+		expect(resumed.axes?.mode).toBe("agent");
 		// ...and nothing came out of it either: no rule was invented for the field
 		// the reader could not read.
 		const rules = resumed.infos.find((text) => text.includes("Rules ("));

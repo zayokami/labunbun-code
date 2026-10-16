@@ -173,7 +173,7 @@ function planAlmaAutoApprove(raw: RawAlma, claimModePair: ClaimModePair): void {
 		`app_settings.settings_data → security.autoApproveToolRequests (${value})`,
 		value
 			? 'mapped to "agent": Alma\'s one approval switch means never ask. The sandbox stays confined to the workspace, and that half is not a translation — Alma has no sandbox setting anywhere in its schema or its runtime, so widening to an unconfined session would be this importer granting a permission Alma never offered'
-			: 'mapped to "ask": Alma\'s switch was off, which is the same posture this build starts in for a tool it has not been told about',
+			: 'mapped to "ask": Alma\'s switch was off, so its calls are put to you first — the posture the ask mode is named for',
 	);
 }
 

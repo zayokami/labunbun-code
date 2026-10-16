@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import {
+	DEFAULT_MODE_CHOICE,
 	NETWORK_SANDBOX_POLICIES,
 	type NetworkSandboxPolicy,
 	PERMISSION_MODES,
@@ -277,7 +278,7 @@ Usage:
 Options:
   -p, --print <prompt>         Run headless mode
       --model <provider/id>    Model to use (default anthropic/claude-sonnet-5)
-      --permission-mode <m>    ${PERMISSION_MODES.join(" | ")}  (default ask)
+      --permission-mode <m>    ${PERMISSION_MODES.join(" | ")}  (default ${DEFAULT_MODE_CHOICE.mode})
       --sandbox <s>            ${SANDBOX_MODES.join(" | ")}
                                The other axis: what a run may touch at all.
       --network <n>            ${NETWORK_SANDBOX_POLICIES.join(" | ")}

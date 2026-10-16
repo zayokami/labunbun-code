@@ -56,9 +56,10 @@ export type SandboxMode = (typeof SANDBOX_MODES)[number];
  *
  * `id` is what the user typed and what `/mode <id>` takes, so it is not the same
  * string as either axis value — `agentNoSandbox` names a pairing, not a mode.
- * Order is load-bearing twice over: it is the picker's row order and the
- * default's row, so the first entry is the default (`mode-command.test.ts`
- * pins the marker on row 0 rather than trusting this comment).
+ * Order is the picker's row order, from the row that asks the most to the row
+ * that asks nothing — it is not the default's row: the default is `agent`,
+ * named by id in `DEFAULT_MODE_CHOICE` below (`mode-command.test.ts` pins the
+ * marker on the default's row rather than trusting this comment).
  */
 export interface ModeChoice {
 	id: string;
@@ -99,8 +100,15 @@ export const MODE_CHOICES: readonly ModeChoice[] = [
 	},
 ];
 
-/** The choice a session starts in, and the one `resolveMode` falls back to. */
-export const DEFAULT_MODE_CHOICE: ModeChoice = MODE_CHOICES[0];
+/**
+ * The choice a session starts in, and the one `resolveMode` falls back to.
+ *
+ * The `agent` row, looked up by id rather than taken off the head of the list:
+ * the list's order is the picker's, and a session that opens by asking after
+ * every call is not what this build starts in. The fallback keeps the
+ * expression total if the id ever stops matching.
+ */
+export const DEFAULT_MODE_CHOICE: ModeChoice = findModeChoice("agent") ?? MODE_CHOICES[0];
 
 /** Look a choice up by the id a user typed. */
 export function findModeChoice(id: string): ModeChoice | undefined {
