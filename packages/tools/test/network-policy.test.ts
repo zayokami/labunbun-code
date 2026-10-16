@@ -671,6 +671,39 @@ describe("describeNetworkPolicy", () => {
 		expect(claims("filesystem-axis-off")).toContain("sandbox axis is off");
 	});
 
+	/**
+	 * The macOS sentence, which is deliberately not the Linux one.
+	 *
+	 * On Linux a confined command reaches nothing, so the allowlist governs only
+	 * the web tools; on macOS the profile leaves the enforcing proxy's own
+	 * loopback ports standing, so the allowlist governs a shell too — through the
+	 * one route the kernel permits. Reusing either sentence on the other platform
+	 * is false in one direction or the other, which is why this case exists at
+	 * all rather than folding into `os-namespace`.
+	 */
+	test("the macOS case says the proxy is reachable and the allowlist governs a shell", () => {
+		const text = describeNetworkPolicy(
+			"restricted",
+			allow("example.com", "registry.npmjs.org"),
+			"proxy-ports",
+			"darwin",
+		);
+		expect(text).toContain("reaches the local proxy and nothing else");
+		expect(text).toContain("except the proxy's own loopback ports");
+		expect(text).toContain("for a command as much as for the web tools");
+		// Both directions of the neighboring sentence stay false here: the command
+		// does not reach nothing, and the proxy is not the whole boundary.
+		expect(text).not.toContain("reaches nothing at all");
+		expect(text).not.toContain("the proxy included");
+		expect(text).not.toContain("proxy is the whole network boundary");
+		// With nothing allowed the case collapses to the shared fail-closed line,
+		// which is still the right fact: the kernel permits the proxy's ports, and
+		// the proxy refuses everything, so a command reaches nothing after all.
+		const empty = describeNetworkPolicy("restricted", [], "proxy-ports", "darwin");
+		expect(empty).toContain("Nothing is reachable");
+		expect(empty).toContain("except the proxy's own loopback ports");
+	});
+
 	test("an unrestricted network with no rules says nothing is interposed", () => {
 		expect(describeNetworkPolicy("enabled", [], "os-namespace", "linux")).toContain("no proxy is interposed");
 	});
@@ -754,28 +787,43 @@ describe("describeNetworkPolicy", () => {
 	 * so.
 	 */
 	test("and that sentence is true of the argv a native backend is given", () => {
-		const argvFor = (network: "restricted" | "enabled", platform: "darwin" | "linux") => {
+		const argvFor = (network: "restricted" | "enabled", platform: "darwin" | "linux", networkPorts?: number[]) => {
 			const resolution = resolveSandboxExecution({
 				policy: buildSandboxPolicy({ sandbox: "workspace-write", workspace: "/w/repo", network }),
 				command: ["/bin/sh", "-lc", "true"],
 				platform,
 				hasNativeBackend: true,
 				exists: () => true,
+				networkPorts,
 			});
 			if (resolution.kind !== "native") throw new Error(`expected native, got ${resolution.kind}`);
 			return resolution.execution.argv.join(" ");
 		};
 
-		// Restricted: the shell has no route off the machine. Linux says so with a
-		// namespace, macOS by emitting no network rule at all over `(deny default)`.
+		// Restricted, no ports: the shell has no route off the machine. Linux says so
+		// with a namespace, macOS by emitting no network rule at all over
+		// `(deny default)` — the fail-closed shape for a caller with no running proxy
+		// to name, which is the one every test above that passes no ports exercises.
 		expect(argvFor("restricted", "linux")).toContain("--unshare-net");
 		const seatbelt = argvFor("restricted", "darwin");
 		expect(seatbelt).not.toContain("(allow network-outbound)");
-		// Neither backend lets the command reach the proxy on loopback, which is the
-		// whole reason the sentence above says what it says. A future loopback
-		// narrowing would put `127.0.0.1` in one of these and fail here.
-		expect(argvFor("restricted", "linux")).not.toContain("127.0.0.1");
 		expect(seatbelt).not.toContain("127.0.0.1");
+
+		// Restricted, ports named: the macOS narrowing, tied to the `proxy-ports`
+		// sentence — the "local proxy" it says a command reaches is exactly the
+		// listener behind these rules, and the "nothing else" is the absence of any
+		// other outbound rule. This is the argv of the branch that sentence claims.
+		const narrowed = argvFor("restricted", "darwin", [41234, 41235]);
+		expect(narrowed).toContain('(allow network-outbound (remote ip "localhost:41234"))');
+		expect(narrowed).toContain('(allow network-outbound (remote ip "localhost:41235"))');
+		// No blanket rule came along: the port rules are the whole of it.
+		expect(narrowed).not.toContain("(allow network-outbound)");
+		expect(narrowed).not.toContain("(allow network-inbound)");
+		// Linux does not consume the ports yet — `--unshare-net` takes the proxy with
+		// everything else — so passing them there must change nothing. When the
+		// loopback bridge lands, this is the row that fails and sends the reader
+		// back to the `os-namespace` sentence, which is the point of asserting it.
+		expect(argvFor("restricted", "linux", [41234])).not.toContain("41234");
 
 		// The control: `enabled` leaves the network open, which is the other half of
 		// what makes `network-left-open` the right answer for it.
@@ -790,9 +838,17 @@ describe("networkConfinement", () => {
 		// exists to permit, so `enabled` forces the network open inside the
 		// wrapper — and the proxy is then the whole boundary even on a Mac. The
 		// reverse order here would print "still reaches nothing" about a machine
-		// where the command's own socket is wide open.
+		// where the command's own socket is wide open. The platform parameter is
+		// explicit on the restricted rows because the answer now splits on it —
+		// the default would read whichever machine runs the suite, which is the
+		// drift the parameter exists to remove.
 		expect(networkConfinement("native", "workspace-write", "enabled")).toBe("network-left-open");
-		expect(networkConfinement("native", "workspace-write", "restricted")).toBe("os-namespace");
+		expect(networkConfinement("native", "workspace-write", "restricted", "linux")).toBe("os-namespace");
+		// macOS places the same wrapper, and the profile it generates keeps the
+		// enforcing proxy's own loopback ports — the one route the kernel leaves
+		// standing. The executor passes those ports on every restricted run
+		// (the same call starts the proxy), so the sentence may claim it.
+		expect(networkConfinement("native", "workspace-write", "restricted", "darwin")).toBe("proxy-ports");
 	});
 
 	test("danger-full-access beats a working backend too, which is the one no platform can see", () => {
@@ -813,8 +869,8 @@ describe("networkConfinement", () => {
 	});
 
 	test.each([
-		[undefined, "no-os-backend"],
-		["simulated", "no-os-backend"],
+		[undefined, "linux", "no-os-backend"],
+		["simulated", "linux", "no-os-backend"],
 		// The container backend lands with the weakest for a measured reason
 		// rather than a cautious one: the resolver's container branch is
 		// reachable only with an `enabled` axis, because the proxy that
@@ -824,18 +880,24 @@ describe("networkConfinement", () => {
 		// describe a kernel denial the command never got, which is the
 		// over-claim direction: a user told the OS denies every route while
 		// their proxy-routed command is wide open.
-		["appcontainer", "no-os-backend"],
-		["unavailable", "backend-missing"],
-		["native", "os-namespace"],
-	] as const)("backend %s with a confined filesystem", (backend, expected) => {
+		["appcontainer", "linux", "no-os-backend"],
+		["unavailable", "linux", "backend-missing"],
+		["native", "linux", "os-namespace"],
+		// The platform split on the native case, both directions named: the
+		// same placed wrapper reads `proxy-ports` on macOS, where the generated
+		// profile carries the proxy's own port rules, and stays `os-namespace`
+		// everywhere else — bubblewrap denies the proxy with everything else.
+		["native", "darwin", "proxy-ports"],
+		["appcontainer", "darwin", "no-os-backend"],
+	] as const)("backend %s on %s with a confined filesystem", (backend, platform, expected) => {
 		// The one case the old signature got wrong by construction: `linux` with no
 		// bubblewrap is `unavailable`, not `native`, and the sentence has to say so.
-		expect(networkConfinement(backend, "workspace-write", "restricted")).toBe(expected);
+		expect(networkConfinement(backend, "workspace-write", "restricted", platform)).toBe(expected);
 	});
 
 	test("an executor that reports no backend is read as the weakest", () => {
 		// Same rule as `describeSandboxBackend`: not knowing is not evidence.
-		expect(networkConfinement(undefined, "workspace-write", "restricted")).toBe("no-os-backend");
+		expect(networkConfinement(undefined, "workspace-write", "restricted", "linux")).toBe("no-os-backend");
 	});
 });
 

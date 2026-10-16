@@ -309,17 +309,28 @@ describe("the Network row", () => {
 		expect(row?.detail).toContain("HTTP_PROXY/HTTPS_PROXY/ALL_PROXY");
 	});
 
-	test("the ok row says the allowlist governs the web tools, not a command", async () => {
-		// The sentence `/permissions` prints for the native case, and the reason
-		// this row needs its own copy of it: `ok` here means the restriction is
-		// enforced more completely than a proxy manages — at the price of the
-		// allowlist having no effect on a shell. A green row with no mention of
-		// that reads as "your allowlist works", which is false of every entry.
+	test("the ok row says which kernel shape it is, and the two shapes differ", async () => {
+		// The sentence `/permissions` prints for each native case, and the reason
+		// each row needs its own copy: `ok` means the kernel, not the program, is
+		// what holds the boundary — and the two shapes pay different prices. On
+		// Linux the OS denies every route, so the allowlist has no effect on a
+		// shell; a green row with no mention of that reads as "your allowlist
+		// works", which is false of every entry. On macOS the profile deliberately
+		// leaves the proxy's own loopback ports standing, so the allowlist does
+		// govern a shell — through the one route the kernel permits — and a row
+		// that reused the Linux sentence would be false in the other direction,
+		// saying a command reaches nothing while its proxy traffic flows.
 		const { home, cwd } = makeDirs();
-		const row = await networkRow(restricted(), cwd, home, "darwin", true);
-		expect(row?.status).toBe("ok");
-		expect(row?.detail).toContain("denies a command every route off the machine, proxy included");
-		expect(row?.detail).toContain("the allowed list governs the web tools");
+		const linux = await networkRow(restricted(), cwd, home, "linux", true);
+		expect(linux?.status).toBe("ok");
+		expect(linux?.detail).toContain("denies a command every route off the machine, proxy included");
+		expect(linux?.detail).toContain("the allowed list governs the web tools");
+
+		const darwin = await networkRow(restricted(), cwd, home, "darwin", true);
+		expect(darwin?.status).toBe("ok");
+		expect(darwin?.detail).toContain("except the local proxy's own loopback ports");
+		expect(darwin?.detail).toContain("the allowed list governs both shell and web tools");
+		expect(darwin?.detail).not.toContain("proxy included");
 		// The inverse: the four proxy-only cases must not claim a kernel holds it.
 		for (const [platform, hasNative] of [
 			["linux", false],

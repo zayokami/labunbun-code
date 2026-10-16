@@ -309,10 +309,21 @@ export function needsNetworkProxy(network: "restricted" | "enabled", rules: read
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** What, if anything, holds the network boundary besides the proxy. Five answers, not a boolean. */
+/** What, if anything, holds the network boundary besides the proxy. Six answers, not a boolean. */
 export type NetworkConfinement =
 	/** An OS sandbox wraps the command and denies outbound traffic at the kernel. */
 	| "os-namespace"
+	/**
+	 * A macOS profile wraps the command and denies every route off the machine
+	 * except the enforcing proxy's own loopback ports. The proxy is the only way
+	 * out and the kernel is what makes it so — a program that ignores the proxy
+	 * environment still has nowhere to go — and, unlike `os-namespace`, the
+	 * allowlist keeps its effect on a shell: the one route left standing is the
+	 * one that consults it. A caller with no running proxy to name has no ports
+	 * either, and says `os-namespace` — the profile in that case carries no
+	 * port rules and is exactly that older shape.
+	 */
+	| "proxy-ports"
 	/**
 	 * Nothing kernel-side wraps the shell: no argv-level backend exists for this
 	 * platform, or — on Windows — the container that does exist does not take
@@ -327,8 +338,13 @@ export type NetworkConfinement =
 	| "filesystem-axis-off";
 
 // Long-form design notes: docs/dev/sandbox.md
-/** The four one-line reasons, one per case. Held apart so the shared tail stays identical. */
-const REASON_BY_CONFINEMENT: Record<Exclude<NetworkConfinement, "os-namespace">, string> = {
+/**
+ * The four one-line reasons, one per remaining case. Held apart so the shared
+ * tail stays identical. `os-namespace` and `proxy-ports` are absent because
+ * both build their caveat whole: what they must say is the opposite of what
+ * this table's tail says, in both directions.
+ */
+const REASON_BY_CONFINEMENT: Record<Exclude<NetworkConfinement, "os-namespace" | "proxy-ports">, string> = {
 	"no-os-backend": "This build ships no OS-level sandbox for this platform.",
 	"backend-missing": "The sandbox backend is not installed here, so nothing below the proxy is enforcing anything.",
 	"filesystem-axis-off":
@@ -358,7 +374,7 @@ const REASON_BY_CONFINEMENT: Record<Exclude<NetworkConfinement, "os-namespace">,
  * it runs on, which is the drift this parameter exists to remove.
  */
 export function networkConfinementReason(
-	confinement: Exclude<NetworkConfinement, "os-namespace">,
+	confinement: Exclude<NetworkConfinement, "os-namespace" | "proxy-ports">,
 	platform: string,
 	backend?: string,
 	appContainerReason?: string,
@@ -378,7 +394,11 @@ export function networkConfinementReason(
  * `networkConfinementReason`: the caveat is per-machine on Windows, and the
  * facts it needs are the same three `/permissions` already holds for
  * `describeSandboxBackend` above it. Passing a different answer than that
- * sentence got would print a screen that argues with itself.
+ * sentence got would print a screen that argues with itself. The two
+ * kernel-held confinements — `os-namespace` and `proxy-ports` — never reach
+ * that function: their caveats are built here whole, because this tail says
+ * "the proxy is the whole boundary", which is the exact opposite of what both
+ * of them are.
  */
 export function describeNetworkPolicy(
 	network: "restricted" | "enabled",
@@ -393,25 +413,35 @@ export function describeNetworkPolicy(
 	}
 	const count = rules.filter((rule) => rule.permission === "allow").length;
 
-	// `os-namespace` gets its own detail because the shared sentence is false there:
-	// a command reaches nothing, and the list names domains rather than ports.
+	// `proxy-ports` and `os-namespace` each get their own detail because the
+	// shared sentence is false for both, in opposite directions: on macOS the
+	// allowlist does govern a command's traffic — through the proxy, the one
+	// route the profile left standing — and on the namespace backends a command
+	// reaches nothing, allowlisted host or not. The list names domains rather
+	// than ports in every case; where that disclosure matters it is made.
 	// Long-form design notes: docs/dev/sandbox.md
 	const detail =
-		confinement === "os-namespace" && count > 0
-			? `A command run through the shell reaches nothing at all here, so the ${count} listed domain${count === 1 ? "" : "s"} are what the web tools may fetch rather than what a command may reach.`
-			: network === "restricted"
-				? count === 0
-					? "Nothing is reachable: the network is restricted and no domain is allowed."
-					: `Only the ${count} listed domain${count === 1 ? "" : "s"} may be reached, on any port — the list names domains, not ports.`
-				: `Traffic is routed through a local proxy that refuses the ${rules.length - count} denied pattern${rules.length - count === 1 ? "" : "s"}.`;
+		confinement === "proxy-ports" && count > 0
+			? `A command run through the shell reaches the local proxy and nothing else, so the ${count} listed domain${count === 1 ? "" : "s"} are reachable through it, on any port, for a command as much as for the web tools.`
+			: confinement === "os-namespace" && count > 0
+				? `A command run through the shell reaches nothing at all here, so the ${count} listed domain${count === 1 ? "" : "s"} are what the web tools may fetch rather than what a command may reach.`
+				: network === "restricted"
+					? count === 0
+						? "Nothing is reachable: the network is restricted and no domain is allowed."
+						: `Only the ${count} listed domain${count === 1 ? "" : "s"} may be reached, on any port — the list names domains, not ports.`
+					: `Traffic is routed through a local proxy that refuses the ${rules.length - count} denied pattern${rules.length - count === 1 ? "" : "s"}.`;
 
 	// Written per case, because "the OS holds the rest" and "nothing but the proxy
-	// holds it" are opposite facts. The `os-namespace` half names the proxy too.
+	// holds it" are opposite facts. Both kernel-held halves name the proxy too:
+	// what changes between them is which of the proxy's routes the kernel left
+	// standing — none, or the proxy's own ports.
 	// Long-form design notes: docs/dev/sandbox.md
 	const caveat =
 		confinement === "os-namespace"
 			? " The OS sandbox denies the command every route off the machine, the proxy included — so ignoring the proxy environment gains a program nothing, and a command that would have been allowed is refused too."
-			: ` ${networkConfinementReason(confinement, platform, backend, appContainerReason)} So the proxy is the whole network boundary: a program that opens a socket without consulting the proxy environment is not subject to it.`;
+			: confinement === "proxy-ports"
+				? " The OS sandbox denies the command every route off the machine except the proxy's own loopback ports — so ignoring the proxy environment gains a program nothing, and traffic that leaves by any other route is refused by the kernel."
+				: ` ${networkConfinementReason(confinement, platform, backend, appContainerReason)} So the proxy is the whole network boundary: a program that opens a socket without consulting the proxy environment is not subject to it.`;
 
 	return `Network: restricted. ${detail}${caveat} The web tools are covered by this too, since they fetch in this process where the proxy is not in the path.`;
 }

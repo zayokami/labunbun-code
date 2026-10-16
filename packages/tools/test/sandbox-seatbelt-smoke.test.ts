@@ -38,10 +38,12 @@
 
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
+import { portsOf, startNetworkProxy } from "../src/sandbox/proxy.ts";
 import { buildSeatbeltArgs } from "../src/sandbox/seatbelt.ts";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -171,13 +173,25 @@ interface Run {
 	stderr: string;
 }
 
-/** Run `command` under the profile `policy` generates, with the real interpreter. */
-function runUnder(policy: SandboxPolicy, command: string[]): Run {
-	const argv = buildSeatbeltArgs(policy, command);
+/**
+ * Run `command` under the profile `policy` generates, with the real interpreter.
+ *
+ * `networkPorts` is forwarded to the translator the way the executor forwards
+ * it — the ports a restricted profile is narrowed to — so a row can hand the
+ * profile its allowlist and then watch the kernel enforce it.
+ *
+ * The `timeout` is a backstop against the failure mode a smoke row cannot
+ * otherwise distinguish from a slow machine: a `spawnSync` that never returns
+ * would stall the CI job rather than fail it. Sixty seconds is far past
+ * anything a loopback probe does; a killed run lands as `status: null`, which
+ * every row here already asserts against.
+ */
+function runUnder(policy: SandboxPolicy, command: string[], networkPorts: readonly number[] = []): Run {
+	const argv = buildSeatbeltArgs(policy, command, networkPorts);
 	// `-p` takes the profile as argv[1] and every `-D` follows it; the command is
 	// after `--`. Reconstructing that here rather than re-deriving it means this
 	// test exercises the argv the executor would actually spawn.
-	const result = spawnSync(SANDBOX_EXEC, argv, { encoding: "utf8" });
+	const result = spawnSync(SANDBOX_EXEC, argv, { encoding: "utf8", timeout: 60_000 });
 	return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
@@ -193,10 +207,21 @@ smoke("the profile this build generates compiles, for every policy shape", () =>
 	// symptom is `sandbox-exec` exiting 65 with a parser backtrace, which no
 	// string comparison in the suite can see — and `seatbelt.ts` carries a real
 	// example of one (`ipc-posix-sysv*`, which is not a family).
+	//
+	// The third shape is the narrowed restricted network: rules interpolated per
+	// port, which the other two shapes never exercise, and which only a parser
+	// can vouch for.
 	const { workspace, git } = workspaceFixture();
-	for (const network of ["enabled", "restricted"] as const) {
-		const run = runUnder(policyFor(workspace, git, network), ["/usr/bin/true"]);
-		expect(run.status, `profile for network=${network} did not compile: ${run.stderr.slice(0, 400)}`).toBe(0);
+	for (const [network, ports] of [
+		["enabled", []],
+		["restricted", []],
+		["restricted", [41234, 41235]],
+	] as const) {
+		const run = runUnder(policyFor(workspace, git, network), ["/usr/bin/true"], ports);
+		expect(
+			run.status,
+			`profile for network=${network} ports=${ports.join(",")} did not compile: ${run.stderr.slice(0, 400)}`,
+		).toBe(0);
 	}
 });
 
@@ -282,4 +307,89 @@ smoke("CONTROL: the same write outside the profile succeeds", () => {
 	expect(bare.stdout, "the control write failed for an unrelated reason, so the sandboxed row proves nothing").toBe(
 		"WROTE",
 	);
+});
+
+/**
+ * The probe the two rows below run: connect to two loopback ports and report
+ * which answered. The ports arrive as argv, so one file serves both the row
+ * under the profile and the control without one.
+ */
+const PROBE_SOURCE = [
+	'const net = require("node:net");',
+	"const [proxyPort, controlPort] = process.argv.slice(2).map(Number);",
+	"function probe(port) {",
+	"	return new Promise((resolve) => {",
+	'		const socket = net.connect({ host: "127.0.0.1", port });',
+	'		socket.once("connect", () => { socket.destroy(); resolve("REACHED"); });',
+	'		socket.once("error", () => resolve("REFUSED"));',
+	"	});",
+	"}",
+	"Promise.all([probe(proxyPort), probe(controlPort)]).then(([proxy, control]) => {",
+	'	process.stdout.write("proxy=" + proxy + " control=" + control);',
+	"	process.exit(0);",
+	"});",
+].join("\n");
+
+smoke("a restricted profile with the proxy's ports reaches the proxy and nothing else", async () => {
+	// The row this batch is for, one layer below the wiring test: the same
+	// claim, but built through `buildSeatbeltArgs` directly rather than through
+	// `exec`, so the only thing left between the assertion and the kernel is
+	// the generated profile. Before the change, the restricted profile carried
+	// no `network-outbound` rule at all — a command could not reach even the
+	// proxy that enforces the axis, and every allowed domain failed alongside
+	// every denied one.
+	//
+	// The pair is the whole assertion, in one string: REACHED on the proxy's
+	// port is what the permission buys, and REFUSED on a listener that the
+	// control row below shows answering proves the permission did not widen to
+	// "loopback".
+	const { workspace, git } = workspaceFixture();
+	const probe = join(workspace, "probe.cjs");
+	const control = createServer();
+	await new Promise<void>((resolve) => control.listen(0, "127.0.0.1", resolve));
+	const controlPort = (control.address() as AddressInfo).port;
+	const proxy = await startNetworkProxy({ network: "restricted", rules: [] });
+	if (!proxy) throw new Error("expected a proxy");
+	try {
+		writeFileSync(probe, PROBE_SOURCE);
+		const { program } = interpreter();
+		const ports = portsOf(proxy);
+		const run = runUnder(
+			policyFor(workspace, git, "restricted"),
+			[program, probe, String(ports[0]), String(controlPort)],
+			ports,
+		);
+		expect(run.stdout, `probe did not finish (status ${run.status}), stderr: ${run.stderr.slice(0, 400)}`).toBe(
+			"proxy=REACHED control=REFUSED",
+		);
+	} finally {
+		await proxy.close();
+		control.close();
+	}
+});
+
+smoke("CONTROL: outside the profile the same probe reaches both listeners", async () => {
+	// Without this row `control=REFUSED` above would be indistinguishable from
+	// a listener that was never up: same script, same argv, no profile, both
+	// connects answer. It also proves the proxy's port was live rather than
+	// merely permitted.
+	const { workspace } = workspaceFixture();
+	const probe = join(workspace, "probe.cjs");
+	const control = createServer();
+	await new Promise<void>((resolve) => control.listen(0, "127.0.0.1", resolve));
+	const controlPort = (control.address() as AddressInfo).port;
+	const proxy = await startNetworkProxy({ network: "restricted", rules: [] });
+	if (!proxy) throw new Error("expected a proxy");
+	try {
+		writeFileSync(probe, PROBE_SOURCE);
+		const { program } = interpreter();
+		const ports = portsOf(proxy);
+		const bare = spawnSync(program, [probe, String(ports[0]), String(controlPort)], { encoding: "utf8" });
+		expect(bare.stdout, `the probe failed for an unrelated reason: ${bare.stderr ?? ""}`).toBe(
+			"proxy=REACHED control=REACHED",
+		);
+	} finally {
+		await proxy.close();
+		control.close();
+	}
 });

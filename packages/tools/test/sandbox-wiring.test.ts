@@ -19,7 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { connect } from "node:net";
+import { type AddressInfo, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1754,6 +1754,57 @@ describe("the network axis reaches the spawn", () => {
 });
 
 /**
+ * One proxy, two readings — and on macOS they have to be the same numbers.
+ *
+ * `exec` reads the proxy it started twice: once as the environment a child is
+ * handed, and once as the loopback ports a profile is built from. Nothing in
+ * the type system ties the two readings together, and on macOS the drift
+ * between them is the one failure the profile cannot recover from: the kernel
+ * would permit a port the environment does not name and deny the one it does,
+ * so every request fails while every string in the build still looks right.
+ * The comparison below is therefore between the two readers, not against a
+ * shape.
+ */
+describe("one proxy, two readings", () => {
+	test("the ports a restricted policy publishes are the ones its environment names", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const policy = netPolicy(cwd, "restricted", []);
+			const ports = await exec.networkPortsFor(policy);
+			const env = await exec.networkEnvFor(policy);
+			if (ports === undefined || env === undefined) {
+				throw new Error(`expected a restricted policy to hold a proxy, got ports=${ports} and env=${env}`);
+			}
+			// Two entries because there are two listeners (HTTP and SOCKS), and
+			// both have to appear — the macOS profile names one rule per port, so
+			// a reader that reported only one would leave half the proxy denied.
+			expect(ports).toHaveLength(2);
+			expect(new Set(ports).size).toBe(2);
+			expect(ports).toContain(Number(new URL(env.HTTP_PROXY ?? "").port));
+			expect(ports).toContain(Number(new URL(env.ALL_PROXY ?? "").port));
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("a policy that confines no network publishes nothing to permit", async () => {
+		// The fail-closed half. With no proxy there are no ports, and a profile
+		// built from this answer permits exactly nothing — the dead network the
+		// restricted axis always was, rather than an allowlist that happens to
+		// name no live port.
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			expect(await exec.networkPortsFor(netPolicy(cwd, "enabled", []))).toBeUndefined();
+			expect(exec.networkProxyRunning).toBe(false);
+		} finally {
+			await exec.close();
+		}
+	});
+});
+
+/**
  * The background spawn is a second process tree, and the network axis has no
  * second reading of its own: `networkRules` is enforced by the proxy and nothing
  * else.
@@ -2197,6 +2248,143 @@ describe("the proxy is keyed by the policy that built it", () => {
 			expect(exec.networkProxyRunning).toBe(false);
 		} finally {
 			await exec.close();
+		}
+	});
+});
+
+const describeMacExec = process.platform === "darwin" ? describe : describe.skip;
+if (process.platform !== "darwin") {
+	console.warn(
+		`[sandbox-wiring] macOS rows skipped: there is no sandbox-exec to enforce a profile on ${process.platform}`,
+	);
+}
+
+/**
+ * The macOS restricted network, against a real kernel — the row this batch
+ * exists for.
+ *
+ * Before it, a restricted axis under the native backend was a dead network on
+ * every platform: the profile carried no `network-outbound` rule at all, so a
+ * command could not reach even the proxy that enforces the axis, and every
+ * allowed domain failed alongside every denied one. The profile now permits
+ * exactly the proxy's own loopback ports, and the claim that consists of two
+ * facts needs two assertions: the port the child's environment names is
+ * reachable, and a port that is *known to be live* is not.
+ *
+ * The window rows above pin the resolver's argv by string; that catches a
+ * drifted rule and nothing else. What they cannot see — and what the SIGTRAP
+ * incident in `sandbox-seatbelt-smoke.test.ts` is the standing proof of — is a
+ * profile whose strings all read right and whose kernel behaviour differs. So
+ * this row drives a real `exec` and lets the kernel answer.
+ *
+ * The policy has to be `workspace-write`, not this file's usual `netPolicy`:
+ * an unrestricted filesystem short-circuits the resolver to `unconfined`
+ * before any backend is consulted, which would run the probe with no profile
+ * at all and pass both assertions for the wrong reason.
+ */
+describeMacExec("a restricted network reaches the proxy's port and nothing else", () => {
+	// The runtime under test is injected for the same reason `FAKE_LINUX`
+	// exists: it makes the darwin branch reachable from an assertion that names
+	// the branch, and on macOS it is also the truth.
+	const FAKE_DARWIN: SandboxRuntime = { platform: "darwin", hasNativeBackend: true };
+
+	function restrictedNetPolicy(cwd: string): SandboxPolicy {
+		return buildSandboxPolicy({
+			sandbox: "workspace-write",
+			workspace: cwd,
+			network: "restricted",
+			networkRules: [],
+		});
+	}
+
+	/**
+	 * The probe the confined command runs: connect to the port its environment
+	 * names and to a listener this process is holding, and report which
+	 * connects the kernel let through.
+	 *
+	 * It reads the proxy port from `HTTP_PROXY` rather than taking it as an
+	 * argument, deliberately: that is the alignment claim itself. `exec` names
+	 * the port in the child's environment and names ports to the resolver, and
+	 * a build where those drifted would have the profile permitting one
+	 * listener while the environment pointed at another — the probe would then
+	 * report REFUSED on the very port the environment promised.
+	 */
+	function probeSource(controlPort: number): string {
+		return [
+			'const net = require("node:net");',
+			`const controlPort = ${controlPort};`,
+			"function probe(port) {",
+			"	return new Promise((resolve) => {",
+			'		const socket = net.connect({ host: "127.0.0.1", port });',
+			'		socket.once("connect", () => { socket.destroy(); resolve("REACHED"); });',
+			'		socket.once("error", () => resolve("REFUSED"));',
+			"	});",
+			"}",
+			'const proxyPort = Number(new URL(process.env.HTTP_PROXY ?? "").port);',
+			"Promise.all([probe(proxyPort), probe(controlPort)]).then(([proxy, control]) => {",
+			'	process.stdout.write("proxy=" + proxy + " control=" + control);',
+			"	process.exit(0);",
+			"});",
+		].join("\n");
+	}
+
+	/** A live loopback listener on a port the profile has no reason to permit. */
+	async function controlListener(): Promise<{ port: number; close: () => void }> {
+		const server = createServer();
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const { port } = server.address() as AddressInfo;
+		return { port, close: () => server.close() };
+	}
+
+	test("the proxy the environment names is reachable, and the port next to it is not", async () => {
+		const cwd = workspace();
+		const control = await controlListener();
+		const probe = join(cwd, "probe.cjs");
+		writeFileSync(probe, probeSource(control.port));
+		const exec = new ChildProcessExecOperations(FAKE_DARWIN);
+		try {
+			const result = await exec.exec({
+				command: `"${process.execPath}" "${probe}"`,
+				cwd,
+				sandbox: restrictedNetPolicy(cwd),
+			});
+			expect(result.exitCode, `the probe did not run to completion: ${result.stderr.slice(0, 400)}`).toBe(0);
+			// The pair is the whole assertion. REACHED on the environment's port
+			// proves the profile permits the enforcing proxy — the change this
+			// batch is for — and REFUSED on a listener known to be up proves the
+			// permission did not widen to "loopback"; the control row below is
+			// what makes the second half mean something.
+			expect(result.stdout.trim()).toBe("proxy=REACHED control=REFUSED");
+		} finally {
+			await exec.close();
+			control.close();
+		}
+	});
+
+	test("CONTROL: outside the profile the same probe reaches both", async () => {
+		// Same script, no profile. The control listener answers, so the REFUSED
+		// above is the kernel's doing and not a listener that was never up —
+		// and `HTTP_PROXY` is pointed at that same control listener because
+		// what this row has to prove alive is the listener, not the proxy. An
+		// `enabled` policy on an unrestricted filesystem resolves to
+		// `unconfined`, so the command runs the way a bare shell would.
+		const cwd = workspace();
+		const control = await controlListener();
+		const probe = join(cwd, "probe.cjs");
+		writeFileSync(probe, probeSource(control.port));
+		const exec = new ChildProcessExecOperations(FAKE_DARWIN);
+		try {
+			const result = await exec.exec({
+				command: `"${process.execPath}" "${probe}"`,
+				cwd,
+				sandbox: netPolicy(cwd, "enabled", []),
+				env: { HTTP_PROXY: `http://127.0.0.1:${control.port}` },
+			});
+			expect(result.exitCode, `the probe did not run to completion: ${result.stderr.slice(0, 400)}`).toBe(0);
+			expect(result.stdout.trim()).toBe("proxy=REACHED control=REACHED");
+		} finally {
+			await exec.close();
+			control.close();
 		}
 	});
 });

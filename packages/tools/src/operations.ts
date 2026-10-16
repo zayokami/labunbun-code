@@ -28,7 +28,7 @@ import {
 	type SandboxRuntime,
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
-import { type NetworkProxy, startNetworkProxy } from "./sandbox/proxy.ts";
+import { type NetworkProxy, portsOf, startNetworkProxy } from "./sandbox/proxy.ts";
 import { isFileSync, pathCandidates } from "./sandbox/toolchain-roots.ts";
 
 export type { SandboxExecution } from "./sandbox/index.ts";
@@ -126,6 +126,16 @@ export interface ExecOperations {
 	// Long-form design notes: docs/dev/tools.md
 	/** The proxy variables a child under `policy` needs, or `undefined` when the policy confines no network. */
 	networkEnvFor?(policy: SandboxPolicy): Promise<Record<string, string> | undefined>;
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * The loopback ports a running proxy for `policy` listens on, or `undefined`
+	 * when no proxy runs. The macOS profile names them one rule at a time — it
+	 * denies every route off the machine except these — so the caller that
+	 * builds the argv needs them before the spawn, from the same listener
+	 * `networkEnvFor` hands out variables for.
+	 */
+	networkPortsFor?(policy: SandboxPolicy): Promise<readonly number[] | undefined>;
 
 	// Long-form design notes: docs/dev/tools.md
 	/** What confines commands run through here, when this implementation knows. */
@@ -441,6 +451,17 @@ export class ChildProcessExecOperations implements ExecOperations {
 		return (await this.#proxyFor(policy))?.env;
 	}
 
+	/**
+	 * The loopback ports that proxy listens on, or `undefined` when none runs.
+	 * Public for the same reason as the variables above — the background
+	 * manager spawns shells itself — and separate from them because the macOS
+	 * profile needs the numbers *before* the spawn, where the argv is built.
+	 */
+	async networkPortsFor(policy: SandboxPolicy): Promise<readonly number[] | undefined> {
+		const proxy = await this.#proxyFor(policy);
+		return proxy === undefined ? undefined : portsOf(proxy);
+	}
+
 	// Long-form design notes: docs/dev/tools.md
 	/** What confines a command on this machine. */
 	get sandboxBackend(): SandboxBackend {
@@ -470,6 +491,16 @@ export class ChildProcessExecOperations implements ExecOperations {
 		const { command, cwd, timeoutMs = 120_000, signal, env, onOutput, onTimeout, sandbox, spillDir } = options;
 		const { command: shellCommand, args } = this.#shell;
 
+		// The proxy starts **before** the resolution, and the order is the point:
+		// on macOS the profile must name the enforcing proxy's own loopback ports
+		// — it denies every other route — so the listener has to exist before the
+		// argv that permits it can be built. `#proxyFor` decides from the policy
+		// alone, so this reorder changes nothing about *whether* a proxy runs;
+		// it only makes its ports known where the wrapper is chosen. A restricted
+		// policy always gets a proxy (`needsNetworkProxy`), so the profile and
+		// the listener cannot disagree about which mode this command is in.
+		const proxy = sandbox ? await this.#proxyFor(sandbox) : undefined;
+
 		// The shell is named here and nowhere else, so this is the only place the
 		// argv tail a wrapper has to enclose can be built. `resolveSandboxExecution`
 		// therefore takes a policy rather than a finished command, and the
@@ -486,6 +517,9 @@ export class ChildProcessExecOperations implements ExecOperations {
 					hasAppContainer: this.#runtime.hasAppContainer,
 					appContainerReason: this.#runtime.appContainerReason,
 					executableRoots: this.#runtime.executableRoots,
+					// Read from the running listener rather than re-derived from the
+					// policy: a port is a fact about the proxy that is actually up.
+					networkPorts: proxy === undefined ? undefined : portsOf(proxy),
 				})
 			: ({ kind: "unconfined" } as const);
 		const [program, ...programArgs] =
@@ -498,7 +532,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 		// policy this command is running under is the thing that has to win.
 		// A proxy that is not running injects nothing at all, which is what
 		// leaves a session that confined nothing with the environment it had.
-		const proxyEnv = sandbox ? await this.networkEnvFor(sandbox) : undefined;
+		const proxyEnv = proxy?.env;
 		const childEnv = { ...process.env, ...env, ...proxyEnv };
 
 		// The container path's view of the child environment, with the `undefined`
@@ -738,6 +772,7 @@ export function defaultOperations(exec: ChildProcessExecOperations = new ChildPr
 		move: (from, to) => fs.move(from, to),
 		exec: (options) => exec.exec(options),
 		networkEnvFor: (policy) => exec.networkEnvFor(policy),
+		networkPortsFor: (policy) => exec.networkPortsFor(policy),
 		sandboxBackend: exec.sandboxBackend,
 		appContainerReason: exec.appContainerReason,
 	};

@@ -347,6 +347,12 @@ export class BackgroundShellManager {
 		const append = logAppender(outputFile);
 
 		const { command: shellCommand, args } = this.#shell;
+		// The macOS profile must name the enforcing proxy's own ports before the
+		// argv is built — the same order, and the same reason, as the foreground
+		// path documents — so the running listener is asked for them first. A
+		// manager with no policy, or an operations bundle from before this
+		// method existed, asks for nothing and gets the dead-network shape.
+		const networkPorts = sandbox ? await this.#operations.networkPortsFor?.(sandbox) : undefined;
 		const resolution = sandbox
 			? resolveSandboxExecution({
 					policy: sandbox,
@@ -356,6 +362,7 @@ export class BackgroundShellManager {
 					hasAppContainer: this.#runtime.hasAppContainer,
 					appContainerReason: this.#runtime.appContainerReason,
 					executableRoots: this.#runtime.executableRoots,
+					networkPorts,
 				})
 			: ({ kind: "unconfined" } as const);
 		// The shell has to be executable inside the container, and that check is

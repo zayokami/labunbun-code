@@ -61,6 +61,19 @@ export interface NetworkProxy {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
+/**
+ * The loopback ports this proxy is listening on, read from the two URLs it
+ * already publishes rather than a third field that could disagree with them.
+ * A caller that has to name the proxy by port — the macOS profile this build
+ * generates — reads these. Deduplicated because both listeners are separate
+ * today but a profile must not carry the same rule twice if that changes.
+ */
+export function portsOf(proxy: NetworkProxy): number[] {
+	const ports = [proxy.httpUrl, proxy.socksUrl].map((url) => Number(new URL(url).port));
+	return [...new Set(ports)];
+}
+
+// Long-form design notes: docs/dev/sandbox.md
 /** Environment variables that carry a proxy URL, in both cases. */
 const HTTP_PROXY_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] as const;
 const SOCKS_PROXY_KEYS = ["ALL_PROXY", "all_proxy"] as const;

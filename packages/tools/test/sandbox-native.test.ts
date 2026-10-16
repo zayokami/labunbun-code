@@ -572,6 +572,32 @@ describe("buildSeatbeltArgs", () => {
 		);
 	});
 
+	test("a restricted profile permits exactly the enforcing proxy's ports, one rule each", () => {
+		const argv = buildSeatbeltArgs({ ...POLICY, network: "restricted" }, COMMAND, [41234, 41235]);
+		const profile = profileOf(argv);
+
+		expect(profile).toContain('(allow network-outbound (remote ip "localhost:41234"))');
+		expect(profile).toContain('(allow network-outbound (remote ip "localhost:41235"))');
+		// No blanket rule came along: the port rules are the whole of the outbound
+		// surface, and inbound stays closed — along with the Mach services that
+		// exist to serve an open network. The ports are not the network axis on.
+		expect(profile).not.toContain("(allow network-outbound)");
+		expect(profile).not.toContain("(allow network-inbound)");
+		expect(profile).not.toContain("com.apple.SecurityServer");
+		expect(profile).toContain("(deny default)");
+	});
+
+	test("an unrestricted filesystem with a restricted network permits the ports too", () => {
+		// This shape shares `networkPolicy` with the profile above, so the port
+		// rules have to reach it as well: a command under `danger-full-access`
+		// with a restricted axis still gets out through the proxy and nothing
+		// else.
+		const profile = profileOf(buildSeatbeltArgs({ ...UNRESTRICTED, network: "restricted" }, COMMAND, [41234]));
+		expect(profile).toContain("(allow file-write*)");
+		expect(profile).toContain('(allow network-outbound (remote ip "localhost:41234"))');
+		expect(profile).not.toContain("(allow network-outbound)");
+	});
+
 	test("an unrestricted policy wraps nothing at all", () => {
 		expect(buildSeatbeltArgs(UNRESTRICTED, COMMAND)).toEqual(COMMAND);
 	});

@@ -92,6 +92,17 @@ export interface ResolveSandboxOptions {
 	 * live is a question about that machine, which this module cannot see.
 	 */
 	executableRoots?: readonly string[];
+	/**
+	 * Loopback ports the confined command must still reach: the proxy that
+	 * enforces a restricted network axis listens on them, and only the macOS
+	 * profile can express that — it denies every route and then permits the
+	 * proxy's own ports. The caller starts that proxy first and passes its
+	 * ports here; with none, the profile stays a dead network, which is the
+	 * fail-closed shape. Bubblewrap does not consume them (its namespace takes
+	 * the proxy down with everything else until a loopback bridge lands), and
+	 * the Windows container branch is reachable only with an open axis.
+	 */
+	networkPorts?: readonly number[];
 	platform?: SandboxPlatform;
 	/** Whether the platform's native backend is installed. Injected so this is testable. */
 	hasNativeBackend?: boolean;
@@ -375,7 +386,7 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	const program = nativeSandboxProgram(platform);
 	const args =
 		platform === "darwin"
-			? buildSeatbeltArgs(present, options.command)
+			? buildSeatbeltArgs(present, options.command, options.networkPorts)
 			: buildBwrapArgs(present, options.command, exists);
 
 	return { kind: "native", execution: { argv: [program, ...args], simulated: false }, program };
@@ -410,15 +421,28 @@ export function sandboxBackendFor(
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** Which of `describeNetworkPolicy`'s caveats applies here. The question order is the function. */
+/**
+ * Which of `describeNetworkPolicy`'s caveats applies here. The question order
+ * is the function: an open axis beats a working backend, and a mode that asked
+ * for no wrapper beats one too. The platform then splits the native case — a
+ * macOS profile permits the enforcing proxy's own loopback ports while denying
+ * every other route (`proxy-ports`), which the bubblewrap namespace cannot yet
+ * — it denies the proxy with everything else (`os-namespace`) until the
+ * loopback bridge lands. `platform` is defaulted the way
+ * `describeSandboxBackend` defaults it, and keying on it can only ever move
+ * the answer toward the stronger claim on a Mac, where the profile really does
+ * carry the port rules: the executor passes them every time it runs a
+ * restricted policy, because the same call starts the proxy.
+ */
 export function networkConfinement(
 	backend: SandboxBackend | undefined,
 	sandbox: SandboxMode,
 	network: "restricted" | "enabled",
+	platform: SandboxPlatform = process.platform,
 ): NetworkConfinement {
 	if (network === "enabled") return "network-left-open";
 	if (sandbox === "danger-full-access") return "filesystem-axis-off";
-	if (backend === "native") return "os-namespace";
+	if (backend === "native") return platform === "darwin" ? "proxy-ports" : "os-namespace";
 	if (backend === "unavailable") return "backend-missing";
 	// `simulated`, an unreported backend, and `appcontainer` all land here. The
 	// third is not an oversight — see the function's own doc for why a restricted

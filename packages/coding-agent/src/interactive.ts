@@ -3045,20 +3045,25 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// the session rather than off settings, so a session that changed it
 				// mid-run reports what it is actually running under. The caveat is
 				// derived from `ctx.sandboxBackend` and the sandbox axis — the same
-				// two answers the line above prints — and not from `process.platform`:
-				// a platform name says a backend *could* exist, not that one is
-				// installed, and it says nothing about whether the mode asked for a
-				// wrapper, so keying off it told a Linux box without bubblewrap, and a
-				// Mac running `danger-full-access`, that the OS was holding the line.
-				// The three session facts still travel, for the one case where the
+				// two answers the line above prints — and `process.platform` splits
+				// only what those two cannot: which shape a placed native wrapper
+				// takes (a macOS profile keeps the proxy's own loopback ports, the
+				// bwrap namespace keeps none). The platform still does not decide
+				// whether a backend is installed or whether the mode asked for a
+				// wrapper, so keying the whole caveat off it — the old mistake —
+				// told a Linux box without bubblewrap, and a Mac running
+				// `danger-full-access`, that the OS was holding the line.
+				// The three session facts still travel, for the case where the
 				// caveat is per-machine: on Windows a selected container does not
 				// take a restricted command and a declined one carries the probe's
 				// why — read from the same `ctx` the sentence above reads, so the
-				// two lines cannot contradict each other on this screen.
+				// two lines cannot contradict each other on this screen. The
+				// platform is the same value the sentence below receives, for the
+				// same reason.
 				describeNetworkPolicy(
 					session.network.access,
 					session.network.domains,
-					networkConfinement(ctx.sandboxBackend, session.sandbox, session.network.access),
+					networkConfinement(ctx.sandboxBackend, session.sandbox, session.network.access, process.platform),
 					process.platform,
 					ctx.sandboxBackend,
 					ctx.appContainerReason,

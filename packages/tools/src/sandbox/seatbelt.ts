@@ -125,10 +125,23 @@ interface SeatbeltParam {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** Build the `sandbox-exec` argument vector for `policy`, wrapping `command`. */
-export function buildSeatbeltArgs(policy: SandboxPolicy, command: string[]): string[] {
+/**
+ * Build the `sandbox-exec` argument vector for `policy`, wrapping `command`.
+ *
+ * `networkPorts` is the restricted-network half of the loopback design: the
+ * proxy that enforces the axis listens on those ports, and the profile has to
+ * permit exactly them — every other route stays denied. The caller starts the
+ * proxy before building the profile, so the ports are named where the argv is
+ * built; with none the restricted profile stays what it always was, a dead
+ * network, which is the fail-closed shape for a caller with no running proxy.
+ */
+export function buildSeatbeltArgs(
+	policy: SandboxPolicy,
+	command: string[],
+	networkPorts: readonly number[] = [],
+): string[] {
 	if (policy.fileSystem.kind === "unrestricted") {
-		return policy.network === "enabled" ? [...command] : ["-p", unconfinedProfile(), "--", ...command];
+		return policy.network === "enabled" ? [...command] : ["-p", unconfinedProfile(networkPorts), "--", ...command];
 	}
 
 	const params: SeatbeltParam[] = [];
@@ -161,7 +174,7 @@ export function buildSeatbeltArgs(policy: SandboxPolicy, command: string[]): str
 		BASE_POLICY,
 		READ_BASELINE,
 		...writableKeys.map((key) => `(allow file-write* (subpath (param "${key}")))`),
-		networkPolicy(policy.network),
+		networkPolicy(policy.network, networkPorts),
 		...deniedKeys.map((key) => `(deny file-read* file-write* (subpath (param "${key}")))`),
 		...protectedKeys.map((key) => `(deny file-write* (subpath (param "${key}")))`),
 		...ancestorParams.map(
@@ -185,8 +198,18 @@ const READ_BASELINE = `; Read baseline: readable everywhere, matching this build
 ; "read" entries are additions to this and so emit no rule of their own.
 (allow file-read*)`;
 
-/** The network axis. Emitted last of the non-deny sections so the denies still close the profile. */
-function networkPolicy(network: SandboxPolicy["network"]): string {
+/**
+ * The network axis. Emitted last of the non-deny sections so the denies still
+ * close the profile.
+ *
+ * `proxyPorts` is what the restricted case can permit. One rule per port, and
+ * the kernel denies every other route: the proxy is then the *only* way off
+ * the machine, so a program that ignores the proxy environment gains nothing
+ * — the same guarantee the all-denied shape gave, with the allowlist's route
+ * left standing. No ports means no running proxy to name, and the profile
+ * stays a dead network rather than a guessed-open one.
+ */
+function networkPolicy(network: SandboxPolicy["network"], proxyPorts: readonly number[]): string {
 	if (network === "enabled") {
 		return `; Network: enabled.
 (allow network-outbound)
@@ -197,21 +220,30 @@ function networkPolicy(network: SandboxPolicy["network"]): string {
     (socket-protocol 2)))
 ${NETWORK_MACH_LOOKUP}`;
 	}
-	return `; Network: restricted. No network-outbound or network-inbound rule is present
+	if (proxyPorts.length === 0) {
+		return `; Network: restricted. No network-outbound or network-inbound rule is present
 ; in this profile, and the base policy starts from (deny default), so the
 ; sandboxed process has no route off the machine.`;
+	}
+	const rules = proxyPorts.map((port) => `(allow network-outbound (remote ip "localhost:${port}"))`).join("\n");
+	return `; Network: restricted, narrowed to the enforcing proxy's own ports.
+; The proxy listens on loopback; (deny default) keeps every other route off
+; the machine denied, so the proxy is the only way out.
+${rules}`;
 }
 
 /**
  * The profile for an unconfined filesystem under a restricted network: every
- * read and every write, no network. Reached only by the branch documented on
- * `buildSeatbeltArgs`; the fully-unconfined case returns the command instead.
+ * read and every write, and the network confined to the proxy's ports when
+ * there is a proxy to name — otherwise no network at all. Reached only by the
+ * branch documented on `buildSeatbeltArgs`; the fully-unconfined case returns
+ * the command instead.
  */
-function unconfinedProfile(): string {
+function unconfinedProfile(networkPorts: readonly number[]): string {
 	return `${BASE_POLICY}
 (allow file-read*)
 (allow file-write*)
-${networkPolicy("restricted")}`;
+${networkPolicy("restricted", networkPorts)}`;
 }
 
 // Long-form design notes: docs/dev/sandbox.md

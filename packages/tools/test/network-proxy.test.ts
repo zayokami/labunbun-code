@@ -22,7 +22,7 @@ import type { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import { connect, createServer as createTcpServer, type Socket, type Server as TcpServer } from "node:net";
 import type { NetworkDomainRule } from "@labunbun/agent";
-import { splitHostPort, startNetworkProxy } from "../src/sandbox/proxy.ts";
+import { portsOf, splitHostPort, startNetworkProxy } from "../src/sandbox/proxy.ts";
 
 const allow = (...patterns: string[]): NetworkDomainRule[] =>
 	patterns.map((pattern) => ({ pattern, permission: "allow" as const }));
@@ -247,6 +247,45 @@ describe("startNetworkProxy", () => {
 		// The case that would otherwise cost a listening socket and a set of
 		// poisoned environment variables in every child, to enforce nothing.
 		expect(await startNetworkProxy({ network: "enabled", rules: [] })).toBeUndefined();
+	});
+
+	test("portsOf reports the live listeners the two URLs name, each once", async () => {
+		// The macOS profile names the proxy by number, so this is the reader that
+		// turns the published URLs back into the facts a profile needs. Pinned
+		// against the listening sockets rather than against a string: a URL that
+		// drifted from its listener would still parse.
+		const proxy = await startNetworkProxy({ network: "restricted", rules: [] });
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const ports = portsOf(proxy);
+			expect(ports).toHaveLength(2);
+			expect(new Set(ports).size).toBe(2);
+			for (const url of [proxy.httpUrl, proxy.socksUrl]) {
+				expect(ports).toContain(Number(new URL(url).port));
+			}
+			// Both are actually accepting: a resolving connect is the listener
+			// answering, not a promise that one would exist.
+			for (const port of ports) {
+				const socket = await new Promise<Socket>((resolve, reject) => {
+					const connecting = connect({ host: "127.0.0.1", port });
+					connecting.once("connect", () => resolve(connecting));
+					connecting.once("error", reject);
+				});
+				socket.destroy();
+			}
+			// And the deduplication is a property of the function, not of the two
+			// listeners happening to differ: the same port twice yields one entry.
+			expect(
+				portsOf({
+					httpUrl: "http://127.0.0.1:4321",
+					socksUrl: "socks5://127.0.0.1:4321",
+					env: {},
+					close: async () => {},
+				}),
+			).toEqual([4321]);
+		} finally {
+			await proxy.close();
+		}
 	});
 
 	test("env names the HTTP proxy for the URL keys and the SOCKS one for ALL_PROXY", async () => {
