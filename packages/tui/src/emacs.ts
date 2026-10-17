@@ -67,11 +67,18 @@
  *     `VimEngine`.
  *
  * Out of scope, deliberately: rectangle mode, `M-z` / `M-h`, the GNU transpose key this port
- * leaves alone (`C-M-t`), incremental search, `C-q`, and the rest of `ctl-x-map`. `C-t`
- * (`transpose-chars`) and `C-o` (`open-line`) are the host's keys here — the watch panel and the
- * transcript — so the engine does not declare them. The keys that *are* listed in
+ * leaves alone (`C-M-t`), the parts of `isearch-mode` this batch does not take (regexp search,
+ * yank-into-search, `M-n` / `M-p` ring motion, `ESC ESC ESC` `isearch-cancel`, and the
+ * empty-string nonincremental branch of `isearch-exit`), `C-q`, and the rest of `ctl-x-map`.
+ * `C-t` (`transpose-chars`) and `C-o` (`open-line`) are the host's keys here — the watch panel and
+ * the transcript — so the engine does not declare them. The keys that *are* listed in
  * {@link RESERVED_KEYS} are consumed without effect, so that they are *this engine's* and cannot
  * fall through to the host as something else.
+ *
+ * `C-s` and `C-r` used to be reserved no-ops; they now start GNU incremental search
+ * (`isearch-forward` / `isearch-backward`, `isearch.el:1000-1002`). The search is literal only,
+ * runs over the whole prompt buffer, and exposes its state through {@link EmacsEngine.isearch};
+ * the section on it below carries the citations and the deliberate departures.
  *
  *   - **What `undo` does not do here**, in four places, each with the citation that says what
  *     Emacs does instead. None of them is a decision taken for convenience; two of them are one
@@ -232,6 +239,17 @@ const CMD = {
 	transposeLines: "transpose-lines",
 	transposeChars: "transpose-chars",
 	undo: "undo",
+	// `isearch-mode`'s commands. These are the symbols Emacs's `this-command` takes while a
+	// search runs (`isearch.el:1000-1002`, `:600-601`, `:609`, `:618-619`, `:1647`, `:1930`,
+	// `:2588`), not invented names: `last-command` across an isearch is observable in GNU.
+	isearchForward: "isearch-forward",
+	isearchBackward: "isearch-backward",
+	isearchRepeatForward: "isearch-repeat-forward",
+	isearchRepeatBackward: "isearch-repeat-backward",
+	isearchExit: "isearch-exit",
+	isearchAbort: "isearch-abort",
+	isearchDeleteChar: "isearch-delete-char",
+	isearchPrintingChar: "isearch-printing-char",
 } as const;
 
 /** Any command symbol. The ones this engine compares on are the {@link CMD} constants. */
@@ -864,8 +882,10 @@ export const RESERVED_KEYS: ReadonlyArray<readonly [string, string]> = [
 	["M-q", "fill-paragraph (bindings.el:1705)"],
 	["M-a", "backward-sentence (bindings.el:1711)"],
 	["M-e", "forward-sentence (bindings.el:1712)"],
-	["C-s", "isearch-forward (isearch.el:1000)"],
-	["C-r", "isearch-backward (isearch.el:1002)"],
+	// `C-s` and `C-r` used to sit here. They are implemented now — `isearch-forward` and
+	// `isearch-backward` (`isearch.el:1000-1002`) — so the table's own rule ("an implemented
+	// command is deleted from it") moved them out. `C-M-s` / `C-M-r` below stay: regexp search
+	// is still out of scope.
 	// Spelled `C-M-`, not `M-C-`, because that is the order {@link emacsKeyToken} produces and
 	// the table is matched against tokens, not against Emacs's prose. `C-M-t` two rows up was
 	// already right and these two were not, which is the shape of a table edited by hand one row
@@ -919,6 +939,63 @@ export function emacsKeyToken(input: string, key: EmacsKey): string {
 }
 
 // ---------------------------------------------------------------------------
+// Incremental search state (the frozen host interface)
+// ---------------------------------------------------------------------------
+
+/**
+ * `isearch-forward` or `isearch-backward` (`isearch.el:1000-1002`) — `isearch-forward` is the
+ * variable's name (`isearch.el:860`) and its two values are the two keys' commands.
+ */
+export type EmacsIsearchDirection = "forward" | "backward";
+
+/**
+ * What the host draws while an incremental search is running. `query` is `isearch-string`
+ * (`isearch.el:912`) and may be the empty string; `failed` is "the most recent search failed"
+ * (`isearch-success` being nil, `isearch.el:918`), not "this search can never succeed" — the
+ * next repeat can wrap and clear it ({@link EmacsEngine.isearch}).
+ *
+ * A snapshot, not a live view: the getter rebuilds it from fields, the way `VimEngine.searchLine`
+ * does (`vim.ts:2431`). The host may hold it; it will not change under the host's feet.
+ */
+export interface EmacsIsearchState {
+	readonly query: string;
+	readonly direction: EmacsIsearchDirection;
+	readonly failed: boolean;
+}
+
+/**
+ * The engine's own isearch record — {@link EmacsIsearchState} plus the fields the host does not
+ * need. `origin` is `isearch-opoint` (`isearch.el:1291`), the point C-s/C-r was pressed at;
+ * `matchStart`/`matchEnd` are the last successful match (`isearch-other-end` holds one end of it,
+ * `isearch.el:920`); `lastSuccess` is the most recent successful state, which is what
+ * `isearch-abort` pops back to (`isearch.el:1944-1947`).
+ */
+interface EmacsIsearchSession {
+	query: string;
+	direction: EmacsIsearchDirection;
+	failed: boolean;
+	origin: number;
+	/**
+	 * `isearch-barrier` (`isearch.el:922`): set to point at the start of every repeat
+	 * (`isearch.el:1985`) and used to bound how far a backward query change may extend the
+	 * current match (`isearch.el:2896-2898`).
+	 */
+	barrier: number;
+	matchStart: number | null;
+	matchEnd: number | null;
+	lastSuccess: EmacsIsearchSnapshot;
+}
+
+interface EmacsIsearchSnapshot {
+	query: string;
+	direction: EmacsIsearchDirection;
+	barrier: number;
+	matchStart: number | null;
+	matchEnd: number | null;
+	point: number;
+}
+
+// ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
 
@@ -927,6 +1004,9 @@ const KILL_RING_MAX = 120;
 
 /** `mark-ring-max` is 16 (`simple.el:7410-7413`). */
 const MARK_RING_MAX = 16;
+
+/** `search-ring-max` is 16 (`isearch.el:258-260`). */
+const SEARCH_RING_MAX = 16;
 
 /**
  * `(skip-chars-forward " \t" end)` collapsed to a predicate on the text between point and the end
@@ -979,6 +1059,18 @@ export class EmacsEngine {
 	 * implemented; the rest is read and dropped.
 	 */
 	#ctlXPending = false;
+	/**
+	 * `isearch-mode` being active, or null. The session record — `isearch-string`,
+	 * `isearch-forward`, `isearch-success`, `isearch-opoint`, the last match and the last
+	 * successful state — lives here; {@link isearch} only projects the frozen three fields.
+	 */
+	#isearch: EmacsIsearchSession | null = null;
+	/**
+	 * `search-ring` (`isearch.el:253-260`), newest first, capped at 16 like
+	 * `search-ring-max` (`isearch.el:258`). Only `car` is read — the empty-query repeat
+	 * (`isearch.el:1953-1964`) — because `M-n` / `M-p` ring motion is out of scope.
+	 */
+	#searchRing: string[] = [];
 	/** `temporary-goal-column`: the column the current run of vertical motion returns to. */
 	#temporaryGoalColumn = 0;
 	/** Where the host's next write will start — `VimEngine`'s `#typedFrom`, `vim.ts:2499`. */
@@ -994,6 +1086,16 @@ export class EmacsEngine {
 	/** `last-command` — the reason a kill chain is a chain. */
 	get lastCommand(): EmacsCommandState {
 		return this.#lastCommand;
+	}
+
+	/**
+	 * `isearch-mode`'s state, or null when no search is running. Reading it does nothing to the
+	 * search: it is a field projection, rebuilt per call like `VimEngine.searchLine`
+	 * (`vim.ts:2431`), so the host can ask after every key and always see the latest state.
+	 */
+	get isearch(): EmacsIsearchState | null {
+		const s = this.#isearch;
+		return s === null ? null : { query: s.query, direction: s.direction, failed: s.failed };
 	}
 
 	/** `prefix-arg`, raw. `C-u`'s count and `C-u C-y`'s flag are the same field. */
@@ -1044,6 +1146,14 @@ export class EmacsEngine {
 	}
 
 	#dispatch(input: string, key: EmacsKey): boolean {
+		// `isearch-mode` is an overriding transient map, and the engine's whole copy of it is the
+		// session below. This test has to come **first**: before the host's Enter/Escape branches,
+		// because Enter is `isearch-exit` and Escape accepts the search (see
+		// {@link #dispatchIsearch}); and before `#prefixPending` / `#ctlXPending`, because a search
+		// in progress must swallow `C-u` and `C-x` rather than open a prefix map. Moving this line
+		// below either branch is the mutation the batch's tests are written to catch.
+		if (this.#isearch !== null) return this.#dispatchIsearch(input, key);
+
 		// Enter and Escape are the host's, and they are checked *before* the transient maps for a
 		// reason: a map's whole design is that a key it does not recognise is swallowed, and a REPL
 		// user who hits Escape to interrupt does not mean "discard the `C-x` I typed". In Emacs
@@ -1296,6 +1406,14 @@ export class EmacsEngine {
 				return this.#moveBeginningOfLine();
 			case "e":
 				return this.#moveEndOfLine();
+			// `global-map` binds `C-s` to `isearch-forward` and `C-r` to `isearch-backward`
+			// (`isearch.el:1000-1002`). While a search is running these two keys never reach this
+			// switch: `#dispatch` routes them to `#dispatchIsearch`, where they are
+			// `isearch-repeat-forward` / `isearch-repeat-backward` (`isearch.el:600-601`).
+			case "s":
+				return this.#isearchStart("forward");
+			case "r":
+				return this.#isearchStart("backward");
 			case "f":
 				this.#beginCommand(CMD.forwardChar);
 				this.#forwardChar(emacsPrefixValue(this.#prefixArg));
@@ -1499,6 +1617,364 @@ export class EmacsEngine {
 				}
 				return false;
 		}
+	}
+
+	// -- incremental search (C-s / C-r) --------------------------------------
+
+	/*
+	 * `isearch-mode` (`isearch.el:1238`) reduced to a literal search over the prompt buffer.
+	 *
+	 * The state machine is the one the source describes, not the one a summary describes:
+	 *
+	 *   - **Where a query change searches from.** Not the origin. `isearch-search-and-update`
+	 *     moves point back to the other end of the *current* match before searching
+	 *     (`isearch.el:2909-2913`), which is the match's start for a forward search and its end
+	 *     for a backward one. So after repeating to a later occurrence, typing another character
+	 *     extends *that* occurrence rather than jumping back to the first. The origin
+	 *     (`isearch-opoint`, `isearch.el:1291`) is the fallback only while no match has been
+	 *     found yet. This is why `#isearchSearchFrom` takes an explicit base.
+	 *   - **Point after a match.** `isearch-search-string` says "If found, move point to the end
+	 *     of the occurrence" (`isearch.el:3678-3683`); `re-search-backward` leaves point at the
+	 *     beginning. So forward point is the match **end**, backward point is its **start**.
+	 *   - **Smart case.** `search-upper-case` is `'not-yanks` by default (`isearch.el:97-106`),
+	 *     and `isearch-search` folds case only while the string has no upper-case character
+	 *     (`isearch.el:3727-3733`; the test is `isearch-no-upper-case-p`, `isearch.el:3945`).
+	 *     GNU makes the resulting `isearch-case-fold-search` sticky until the state is popped;
+	 *     this port recomputes it from the query on every change, so deleting back down to lower
+	 *     case re-enables folding. That is the observable in every test here and the one place
+	 *     the simplification shows.
+	 *   - **Wrap.** `isearch-wrap-pause` is `t` (`isearch.el:178-190`): a repeat that fails sets
+	 *     `isearch-success` nil and stops. The *next* same-direction repeat jumps to the far end
+	 *     of the buffer and searches from there (`isearch.el:1966-1971`). If nothing matches
+	 *     there either it stays failed. The "Wrapped" message has no frozen field, so it is not
+	 *     drawn; the state change is.
+	 *   - **Repeat and direction.** `C-s` / `C-r` inside a search are `isearch-repeat-forward` /
+	 *     `isearch-repeat-backward` (`isearch.el:600-601`); a repeat against the current direction
+	 *     toggles it and sets `isearch-success` t before searching from point
+	 *     (`isearch.el:1972-1983`).
+	 *
+	 * Deliberate departures, each named where it lives:
+	 *
+	 *   - **ESC accepts.** The plan this batch came from said "ESC returns to the origin". The
+	 *     source does not: `isearch-mode-map` binds only the three-key `ESC ESC ESC` sequence, to
+	 *     `isearch-cancel` (`isearch.el:614`). A single Escape *key event* is not a command in
+	 *     that map, and the map's own comment says "any unbound key exits Isearch and runs the
+	 *     command bound to it in the local or global map" (`isearch.el:572-575`). The exit is
+	 *     `isearch-pre-command-hook`'s last clause: `(isearch-done)` then the key's global
+	 *     command (`isearch.el:3272-3277`), and `isearch-done` leaves point where the search
+	 *     brought it. So Escape accepts, exactly like Enter; it does **not** cancel. (A raw
+	 *     ESC byte in a terminal is the meta prefix and waits for a second key; the host reports
+	 *     Escape as its own event, which is the GUI shape this follows.) The host's Escape would
+	 *     otherwise interrupt the prompt, so the engine consumes the key and performs only the
+	 *     accept half. Three Escapes can therefore not cancel; that is the out-of-scope item in
+	 *     the header.
+	 *   - **Every other key is swallowed.** Requirement of this host: an unbound key must not
+	 *     reach the prompt. GNU would exit the search and run the key globally
+	 *     (`isearch.el:572-575`), which this engine cannot do without handing the buffer to the
+	 *     host mid-search. Swallowed keys run no command, so `last-command` becomes nil exactly
+	 *     as for a reserved key.
+	 *   - **DEL deletes the last query character.** GNU's DEL is `isearch-delete-char`
+	 *     (`isearch.el:2588-2600`), which pops the last *state* — it can undo a repeat or a
+	 *     direction change, not only a typed character (`isearch-pop-state`,
+	 *     `isearch.el:1637-1639`). This engine keeps only the latest successful state (for
+	 *     `C-g`), so DEL is implemented as "drop the last query character and re-search", which
+	 *     is what it does after typing. Deleting the last character returns to the initial state:
+	 *     empty query, point at the origin, still searching.
+	 *   - **Enter accepts even with an empty query.** `isearch-exit`'s empty-string branch starts
+	 *     a nonincremental search in the minibuffer (`isearch.el:1647-1658`) when
+	 *     `search-nonincremental-instead` is non-nil (its default). There is no minibuffer here;
+	 *     accepting at the origin is the only part of that command this host can run.
+	 *   - **Ring push on accept only.** `isearch-done` adds a non-empty string to `search-ring`
+	 *     unless NOPUSH is set (`isearch.el:1527-1529`), and `isearch-cancel` sets it
+	 *     (`isearch.el:1926`). So Enter and Escape push, `C-g` does not.
+	 */
+
+	/** Start `isearch-mode` in `direction`, with the activation point as `isearch-opoint`. */
+	#isearchStart(direction: EmacsIsearchDirection): boolean {
+		this.#beginCommand(direction === "forward" ? CMD.isearchForward : CMD.isearchBackward);
+		// `isearch-forward` is a command, not a prefix: a `C-u` still pending from before the
+		// search does not survive into it here. GNU would pass the prefix to the command (and
+		// `C-u C-s` is regexp search, out of scope); opening the transient maps inside the
+		// search instead would be worse.
+		this.#prefixPending = false;
+		this.#ctlXPending = false;
+		const origin = this.#ops.getCursor();
+		this.#isearch = {
+			query: "",
+			direction,
+			failed: false,
+			origin,
+			// `isearch-barrier` starts at point (`isearch.el:1277`).
+			barrier: origin,
+			matchStart: null,
+			matchEnd: null,
+			// `isearch-mode` pushes the initial state after setting `isearch-success` t
+			// (`isearch.el:1344-1346`), and that state is what a failing first character's
+			// `C-g` pops back to.
+			lastSuccess: { query: "", direction, barrier: origin, matchStart: null, matchEnd: null, point: origin },
+		};
+		return true;
+	}
+
+	/** Run the search from `base` and move point the way `isearch-search` does. */
+	#isearchSearchFrom(base: number): void {
+		const s = this.#isearch;
+		if (s === null) return;
+		const text = this.#text();
+		const query = s.query;
+		if (query.length === 0) {
+			// `(if (equal isearch-string "") (setq isearch-success t) …)` (isearch.el:1987-1988).
+			s.failed = false;
+			return;
+		}
+		const foldCase = !emacsHasUpper(query);
+		const from = Math.max(0, Math.min(base, text.length));
+		const at =
+			s.direction === "forward"
+				? emacsSearchForward(text, from, query, foldCase)
+				: emacsSearchBackward(text, from, query, foldCase);
+		if (at === null) {
+			s.failed = true;
+			// The search functions are called with NOERROR, so a failure does not move point
+			// (`isearch.el:3678-3681`). Point belongs at the base the search started from — GNU's
+			// fallback moves there before searching (`isearch.el:2909-2913`), and a repeat already
+			// stands there — which is what leaves the cursor on the last successful match.
+			this.#ops.setCursor(from);
+			return;
+		}
+		s.matchStart = at;
+		s.matchEnd = at + query.length;
+		s.failed = false;
+		this.#ops.setCursor(s.direction === "forward" ? s.matchEnd : s.matchStart);
+	}
+
+	/** Record the state a failing `C-g` will pop back to. */
+	#isearchCaptureSuccess(): void {
+		const s = this.#isearch;
+		if (s === null) return;
+		s.lastSuccess = {
+			query: s.query,
+			direction: s.direction,
+			barrier: s.barrier,
+			matchStart: s.matchStart,
+			matchEnd: s.matchEnd,
+			point: this.#ops.getCursor(),
+		};
+	}
+
+	/** Every key while a search is running. All of them are consumed; see the section comment. */
+	#dispatchIsearch(input: string, key: EmacsKey): boolean {
+		// `\r` and `[return]` are `isearch-exit` (`isearch.el:618-619`): accept, leave point on
+		// the match, and consume — the host must not submit the prompt.
+		if (key.return) return this.#isearchAccept();
+		// A single Escape is *unbound* in `isearch-mode-map`, so the unbound-key rule accepts
+		// the search at point (`isearch.el:572-575`, `:3272-3277`); only `ESC ESC ESC` cancels
+		// (`isearch.el:614`), and that sequence is out of scope. See the section comment.
+		if (key.escape) return this.#isearchAccept();
+		if (key.ctrl && input === "s") return this.#isearchRepeat("forward");
+		if (key.ctrl && input === "r") return this.#isearchRepeat("backward");
+		if (key.ctrl && input === "g") return this.#isearchAbort();
+		// `\177` is `isearch-delete-char` (`isearch.el:609` is C-g; the DEL row is
+		// `isearch.el:607`), and a terminal's Backspace arrives as that character or as `^H`.
+		// `<backspace>` is `undefined` in the map on purpose (bug#20466), which is why the
+		// command is reached through the erase character rather than the key.
+		if (key.backspace || (input === "\u007f" && !key.ctrl && !key.meta)) return this.#isearchDeleteChar();
+		// Every printable character is `isearch-printing-char` (`isearch.el:581-589` binds the
+		// whole single-byte range and the char-table range above 255).
+		if (this.#isearchPrintable(input, key)) return this.#isearchAppend(input);
+		return true;
+	}
+
+	/**
+	 * The `isearch-printing-char` half of the map: the keys that extend the string. The
+	 * exclusions are the host's special keys, not Emacs's — Tab is `isearch-printing-char` in
+	 * GNU (`isearch.el:621`) but is completion in this prompt, and the arrows are left alone.
+	 */
+	#isearchPrintable(input: string, key: EmacsKey): boolean {
+		if (key.ctrl || key.meta || key.tab) return false;
+		if (key.return || key.escape) return false;
+		if (key.home || key.end || key.upArrow || key.downArrow || key.leftArrow || key.rightArrow) return false;
+		if (key.backspace || key.delete || key.ctrlBackspace || key.ctrlShiftBackspace) return false;
+		return input.length > 0;
+	}
+
+	/** Append a character to the query and re-search. */
+	#isearchAppend(input: string): boolean {
+		this.#beginCommand(CMD.isearchPrintingChar);
+		const s = this.#isearch;
+		if (s === null) return true;
+		s.query += input;
+		this.#isearchQueryChanged();
+		return true;
+	}
+
+	/** `isearch-delete-char` (`isearch.el:2588`): drop the last query character and search again. */
+	#isearchDeleteChar(): boolean {
+		this.#beginCommand(CMD.isearchDeleteChar);
+		const s = this.#isearch;
+		if (s === null) return true;
+		// One code point, not one UTF-16 unit: the query is a string a terminal built, and an
+		// astral character is a surrogate pair.
+		s.query = [...s.query].slice(0, -1).join("");
+		this.#isearchQueryChanged();
+		return true;
+	}
+
+	/**
+	 * Re-search after the query string changed — the `isearch-search-and-update` half of
+	 * `isearch-process-search-string` (`isearch.el:3362-3365`). Where the search starts is the
+	 * subtle part:
+	 *
+	 *   - Forward: `isearch-other-end` is the current match's start, and
+	 *     `isearch-search-and-update` goes there before searching (`isearch.el:2909-2913`), so
+	 *     the new string can extend the current match or move on. It is *not* the activation
+	 *     point: after a repeat the match can be anywhere in the buffer.
+	 *   - Backward: point is the match's start. GNU first tries `looking-at` the new string at
+	 *     point and keeps point when the extension still ends at or before
+	 *     `(min isearch-opoint isearch-barrier)` (`isearch.el:2883-2898`); otherwise it moves to
+	 *     `(min isearch-opoint isearch-barrier (1+ isearch-other-end))` and searches back from
+	 *     there (`isearch.el:2909-2913`). The bound is why a backward search cannot grow past
+	 *     the point it was started from.
+	 *
+	 * Empty string: `isearch-mode` pushes the initial state — point at `isearch-opoint`, success
+	 * t, no match, barrier at point (`isearch.el:1277`, `:1285`, `:1346`) — and that is the
+	 * state a final DEL returns to.
+	 *
+	 * Deviation, named: GNU runs this search only while `isearch-success` is non-nil for a
+	 * literal search (`isearch.el:2871-2877`), so typing on after a failure changes the string
+	 * without searching or moving point. This port re-searches on every change — from the
+	 * match's other end while a match is still standing, and from point once a search has
+	 * failed — because the batch specifies that every query change re-searches; a still-failing
+	 * string leaves `failed` set.
+	 */
+	#isearchQueryChanged(): void {
+		const s = this.#isearch;
+		if (s === null) return;
+		if (s.query.length === 0) {
+			s.failed = false;
+			s.matchStart = null;
+			s.matchEnd = null;
+			s.barrier = s.origin;
+			this.#ops.setCursor(s.origin);
+			this.#isearchCaptureSuccess();
+			return;
+		}
+		if (s.failed || s.matchStart === null || s.matchEnd === null) {
+			// No usable match to anchor on: search from point, where the failed search stopped.
+			this.#isearchSearchFrom(this.#ops.getCursor());
+		} else if (s.direction === "forward") {
+			this.#isearchSearchFrom(s.matchStart);
+		} else {
+			const point = this.#ops.getCursor();
+			const extensionEnd = point + s.query.length;
+			if (
+				emacsMatchesAt(this.#text(), point, s.query, !emacsHasUpper(s.query)) &&
+				extensionEnd <= Math.min(s.origin, s.barrier)
+			) {
+				// The current match still starts at point and the added characters stay within
+				// the backward search's origin: keep point, move the other end only.
+				s.matchStart = point;
+				s.matchEnd = extensionEnd;
+				s.failed = false;
+				this.#isearchCaptureSuccess();
+				return;
+			}
+			this.#isearchSearchFrom(Math.min(s.origin, s.barrier, s.matchEnd + 1));
+		}
+		if (!s.failed) this.#isearchCaptureSuccess();
+	}
+
+	/** `isearch-repeat-forward` / `isearch-repeat-backward` (`isearch.el:2031`, `:2054`). */
+	#isearchRepeat(direction: EmacsIsearchDirection): boolean {
+		this.#beginCommand(direction === "forward" ? CMD.isearchRepeatForward : CMD.isearchRepeatBackward);
+		const s = this.#isearch;
+		if (s === null) return true;
+		if (s.direction !== direction) {
+			// `(setq isearch-forward (not isearch-forward) isearch-success t)` and then search
+			// from point — no wrap on a direction change (`isearch.el:1972-1983`); the default
+			// `isearch-repeat-on-direction-change` is nil, so no `isearch-other-end` jump
+			// (`isearch.el:193`). An empty query runs no search at all (`isearch.el:1987-1988`).
+			s.direction = direction;
+			s.failed = false;
+			const from = this.#ops.getCursor();
+			s.barrier = from;
+			if (s.query.length > 0) this.#isearchSearchFrom(from);
+		} else if (s.query.length === 0) {
+			// Empty query: take the last search string from `search-ring`; with no ring there is
+			// nothing to find (`isearch.el:1953-1964`). The error it sets in GNU has no field
+			// here, so it is the frozen `failed` that reports it.
+			const last = this.#searchRing[0];
+			if (last === undefined) {
+				s.failed = true;
+				return true;
+			}
+			s.query = last;
+			const from = this.#ops.getCursor();
+			s.barrier = from;
+			this.#isearchSearchFrom(from);
+		} else if (s.failed) {
+			// `isearch-wrap-pause` t: the repeat that failed has already stopped; this one starts
+			// from the other end of the buffer (`isearch.el:1966-1971`). `isearch-barrier` is set
+			// to that end after the jump, before the search (`isearch.el:1985`).
+			const from = direction === "forward" ? 0 : this.#text().length;
+			s.barrier = from;
+			this.#isearchSearchFrom(from);
+		} else {
+			// A successful repeat searches on from point, which skips the current match: forward
+			// point is its end, backward point its start. The barrier is that point
+			// (`isearch.el:1985`).
+			const from = this.#ops.getCursor();
+			s.barrier = from;
+			this.#isearchSearchFrom(from);
+		}
+		if (!s.failed) this.#isearchCaptureSuccess();
+		return true;
+	}
+
+	/**
+	 * Enter / Escape: `isearch-exit` (`isearch.el:1647-1658`) — stop at point and accept. The
+	 * string joins `search-ring` because `isearch-done` is called without NOPUSH
+	 * (`isearch.el:1527-1529`).
+	 */
+	#isearchAccept(): boolean {
+		this.#beginCommand(CMD.isearchExit);
+		const s = this.#isearch;
+		if (s === null) return true;
+		if (s.query.length > 0) {
+			const at = this.#searchRing.indexOf(s.query);
+			if (at >= 0) this.#searchRing.splice(at, 1);
+			this.#searchRing.unshift(s.query);
+			if (this.#searchRing.length > SEARCH_RING_MAX) this.#searchRing.length = SEARCH_RING_MAX;
+		}
+		this.#isearch = null;
+		return true;
+	}
+
+	/**
+	 * `C-g` is `isearch-abort` (`isearch.el:609`, `:1930-1947`). Successful search: cancel to
+	 * `isearch-opoint` and exit (`isearch-cancel`, `isearch.el:1917-1928`). Failing search: pop
+	 * back to the last successful state and keep searching (`isearch.el:1944-1947`).
+	 */
+	#isearchAbort(): boolean {
+		this.#beginCommand(CMD.isearchAbort);
+		const s = this.#isearch;
+		if (s === null) return true;
+		if (!s.failed) {
+			// `isearch-cancel` calls `(isearch-done t)` — NOPUSH, so no ring entry
+			// (`isearch.el:1926`).
+			this.#isearch = null;
+			this.#ops.setCursor(s.origin);
+			return true;
+		}
+		const last = s.lastSuccess;
+		s.query = last.query;
+		s.direction = last.direction;
+		s.barrier = last.barrier;
+		s.matchStart = last.matchStart;
+		s.matchEnd = last.matchEnd;
+		s.failed = false;
+		this.#ops.setCursor(last.point);
+		return true;
 	}
 
 	// -- prefix argument -----------------------------------------------------
@@ -3391,4 +3867,52 @@ function replacedSpan(a: string, b: string): [number, number, number] {
 	let suffix = 0;
 	while (suffix < max - prefix && a.charCodeAt(a.length - 1 - suffix) === b.charCodeAt(b.length - 1 - suffix)) suffix++;
 	return [prefix, a.length - suffix, prefix + (b.length - suffix)];
+}
+
+/**
+ * `isearch-no-upper-case-p` (`isearch.el:3945`): true when the string contains no character that
+ * downcases to something else. `search-upper-case` is what `isearch-search` consults before
+ * giving `case-fold-search` its value (`isearch.el:3727-3733`).
+ */
+function emacsHasUpper(string: string): boolean {
+	for (const ch of string) {
+		if (ch.toLowerCase() !== ch) return true;
+	}
+	return false;
+}
+
+/**
+ * `search-forward` for a literal string: the first match starting at or after `from`. The
+ * comparison is per UTF-16 unit, which is exact for equality; folding compares `toLowerCase` of
+ * each unit, the same approximation {@link emacsHasUpper} makes.
+ */
+function emacsSearchForward(text: string, from: number, query: string, foldCase: boolean): number | null {
+	const last = text.length - query.length;
+	for (let i = from; i <= last; i++) {
+		if (emacsMatchesAt(text, i, query, foldCase)) return i;
+	}
+	return null;
+}
+
+/**
+ * `search-backward` for a literal string: the last match ending at or before `from`.
+ * `re-search-backward` requires the whole match to lie before point, which is why the loop
+ * starts at `from - query.length` rather than at `from`.
+ */
+function emacsSearchBackward(text: string, from: number, query: string, foldCase: boolean): number | null {
+	for (let i = Math.min(from, text.length) - query.length; i >= 0; i--) {
+		if (emacsMatchesAt(text, i, query, foldCase)) return i;
+	}
+	return null;
+}
+
+function emacsMatchesAt(text: string, at: number, query: string, foldCase: boolean): boolean {
+	if (at < 0 || at + query.length > text.length) return false;
+	for (let i = 0; i < query.length; i++) {
+		const a = text[at + i];
+		const b = query[i];
+		if (a === b) continue;
+		if (!foldCase || a.toLowerCase() !== b.toLowerCase()) return false;
+	}
+	return true;
 }

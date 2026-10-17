@@ -282,7 +282,9 @@ describe("emacs: motion", () => {
 		expect(e.press("t", M)).toBe(true);
 		expect(e.press("t", CM)).toBe(true);
 		expect(e.press("q", C)).toBe(true);
-		expect(e.press("s", C)).toBe(true);
+		// `M-z` is `zap-to-char`, still unimplemented; `C-s` stood here until it became
+		// `isearch-forward` and stopped being a key this batch leaves alone.
+		expect(e.press("z", M)).toBe(true);
 		expect(e.press("s", M)).toBe(true);
 		// an unbound key is still the host's
 		expect(e.press("v", C)).toBe(false);
@@ -1201,8 +1203,6 @@ describe("emacs: the reserved tables", () => {
 			"M-q",
 			"M-a",
 			"M-e",
-			"C-s",
-			"C-r",
 			"C-M-s",
 			"C-M-r",
 			"M-s",
@@ -2035,6 +2035,344 @@ describe("emacs: M-o transposes characters, uemacs's command", () => {
 		expect(middle.press("o", M)).toBe(true);
 		expect(middle.state.text).toBe("a\u{1F600}b");
 		expect(middle.state.cursor).toBe(2);
+	});
+});
+
+describe("emacs: C-s and C-r incremental search", () => {
+	// `C-s` is `isearch-forward` and `C-r` is `isearch-backward` (`isearch.el:1000-1002`). The
+	// engine exposes the running search through the frozen `isearch` getter — `query` is
+	// `isearch-string`, `direction` is `isearch-forward`, `failed` is "the last search found
+	// nothing" (`isearch-success` being nil) — and every `handleKey` here is followed by a read of
+	// it, because that is the contract the renderer depends on.
+	//
+	// Point follows GNU's search functions, not the plan's "origin" shorthand: a forward search
+	// leaves point at the end of the match and a backward search at its start
+	// (`isearch.el:3678-3683`), and a query change searches from the current match's other end
+	// (`isearch.el:2909-2913`) — after a repeat that is nowhere near the activation point.
+	//
+	// The keys inside the search are all consumed. A single Escape is not bound in
+	// `isearch-mode-map` (only `ESC ESC ESC` is, `isearch.el:614`), so GNU's unbound-key rule
+	// accepts the search at point (`isearch.el:572-575`, `:3272-3277`); this port pins that
+	// acceptance rather than the plan's "return to origin".
+
+	test("C-s starts forward with an empty query and each character moves point", () => {
+		const e = editor("abc abc", 0);
+		expect(e.engine.isearch).toBeNull();
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "forward", failed: false });
+		expect(e.engine.lastCommand).toBe("isearch-forward");
+		expect(e.state.cursor).toBe(0);
+
+		expect(e.press("a")).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "a", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(1);
+		expect(e.engine.lastCommand).toBe("isearch-printing-char");
+		expect(e.press("b")).toBe(true);
+		expect(e.press("c")).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "abc", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(3);
+		// The buffer is untouched: the printable keys were consumed by the search, not inserted.
+		expect(e.state.text).toBe("abc abc");
+		expect(e.writes).toEqual([]);
+		expect(e.undoDepth()).toBe(0);
+	});
+
+	test("C-r starts backward and each character extends the current match", () => {
+		// A backward query grows to the right from the match's start, not to the left: point is
+		// the start of the occurrence, and GNU keeps it there while the added characters still
+		// end at or before the activation point (`isearch.el:2883-2898`).
+		const e = editor("one two one", 11);
+		expect(e.press("r", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "backward", failed: false });
+		expect(e.engine.lastCommand).toBe("isearch-backward");
+		expect(e.state.cursor).toBe(11);
+
+		expect(e.press("o")).toBe(true);
+		expect(e.state.cursor).toBe(8);
+		expect(e.press("n")).toBe(true);
+		expect(e.state.cursor).toBe(8);
+		expect(e.press("e")).toBe(true);
+		expect(e.state.cursor).toBe(8);
+		expect(e.engine.isearch).toEqual({ query: "one", direction: "backward", failed: false });
+
+		// The repeat is what moves left: the previous occurrence ends at 3.
+		expect(e.press("r", C)).toBe(true);
+		expect(e.state.cursor).toBe(0);
+		expect(e.engine.isearch).toEqual({ query: "one", direction: "backward", failed: false });
+		expect(e.state.text).toBe("one two one");
+	});
+
+	test("smart case: all-lowercase folds, a query with an uppercase character does not", () => {
+		// `search-upper-case` is `not-yanks` (`isearch.el:97-106`): a query with no uppercase
+		// character is matched case-insensitively, one with uppercase is not.
+		const lower = editor("Alpha alpha", 0);
+		lower.press("s", C);
+		for (const ch of "alpha") lower.press(ch);
+		expect(lower.engine.isearch).toEqual({ query: "alpha", direction: "forward", failed: false });
+		expect(lower.state.cursor).toBe(5);
+		lower.press("s", C);
+		expect(lower.state.cursor).toBe(11);
+		expect(lower.engine.isearch).toEqual({ query: "alpha", direction: "forward", failed: false });
+
+		const upper = editor("Alpha alpha", 0);
+		upper.press("s", C);
+		for (const ch of "Alpha") upper.press(ch);
+		expect(upper.engine.isearch).toEqual({ query: "Alpha", direction: "forward", failed: false });
+		expect(upper.state.cursor).toBe(5);
+		upper.press("s", C);
+		expect(upper.engine.isearch).toEqual({ query: "Alpha", direction: "forward", failed: true });
+		expect(upper.state.cursor).toBe(5);
+	});
+
+	test("backspace deletes the last query character; emptying the query returns to point", () => {
+		const e = editor("abc abc", 0);
+		e.press("s", C);
+		for (const ch of "abc") e.press(ch);
+		expect(e.state.cursor).toBe(3);
+
+		expect(e.press("", { backspace: true })).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "ab", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(2);
+		expect(e.engine.lastCommand).toBe("isearch-delete-char");
+
+		// The raw erase character is what a terminal sends for Backspace, and it must delete too.
+		expect(e.press("\u007f")).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "a", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(1);
+
+		expect(e.press("", { backspace: true })).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(0);
+		expect(e.state.text).toBe("abc abc");
+	});
+
+	test("C-s repeats forward; C-r toggles direction and C-s toggles it back", () => {
+		const e = editor("ab ab ab", 0);
+		e.press("s", C);
+		e.press("a");
+		e.press("b");
+		expect(e.state.cursor).toBe(2);
+
+		expect(e.press("s", C)).toBe(true);
+		expect(e.state.cursor).toBe(5);
+		expect(e.engine.lastCommand).toBe("isearch-repeat-forward");
+
+		// A repeat against the current direction toggles it and searches from point — no wrap.
+		expect(e.press("r", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "ab", direction: "backward", failed: false });
+		expect(e.state.cursor).toBe(3);
+		expect(e.engine.lastCommand).toBe("isearch-repeat-backward");
+
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "ab", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(5);
+
+		expect(e.press("r", C)).toBe(true);
+		expect(e.state.cursor).toBe(3);
+		// Same direction now: back to the previous match.
+		expect(e.press("r", C)).toBe(true);
+		expect(e.state.cursor).toBe(0);
+	});
+
+	test("a failing repeat stops at the last match; the next one wraps and clears failed", () => {
+		// `isearch-wrap-pause` is t (`isearch.el:178-190`): the failing repeat stops, and the
+		// following same-direction repeat jumps to the far end before searching.
+		const e = editor("ab ab", 0);
+		e.press("s", C);
+		e.press("a");
+		e.press("b");
+		expect(e.state.cursor).toBe(2);
+		e.press("s", C);
+		expect(e.state.cursor).toBe(5);
+
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "ab", direction: "forward", failed: true });
+		expect(e.state.cursor).toBe(5);
+
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "ab", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("Enter accepts at point and is consumed, so the host must not submit", () => {
+		const e = editor("abc abc", 0);
+		e.press("s", C);
+		for (const ch of "abc") e.press(ch);
+		expect(e.state.cursor).toBe(3);
+		expect(e.press("\r", { return: true })).toBe(true);
+		expect(e.engine.isearch).toBeNull();
+		expect(e.state.cursor).toBe(3);
+		expect(e.engine.lastCommand).toBe("isearch-exit");
+		expect(e.state.text).toBe("abc abc");
+		expect(e.writes).toEqual([]);
+	});
+
+	test("Escape accepts at point too: a single Escape is unbound inside the search", () => {
+		const e = editor("abc abc", 0);
+		e.press("s", C);
+		e.press("a");
+		e.press("b");
+		expect(e.state.cursor).toBe(2);
+		expect(e.press("", { escape: true })).toBe(true);
+		expect(e.engine.isearch).toBeNull();
+		// Not back to the origin: `isearch-done` leaves point on the match.
+		expect(e.state.cursor).toBe(2);
+		expect(e.engine.lastCommand).toBe("isearch-exit");
+	});
+
+	test("C-g cancels a successful search to the origin and pushes no ring entry", () => {
+		const e = editor("abc abc", 0);
+		e.press("s", C);
+		for (const ch of "abc") e.press(ch);
+		expect(e.state.cursor).toBe(3);
+		expect(e.press("g", C)).toBe(true);
+		expect(e.engine.isearch).toBeNull();
+		expect(e.state.cursor).toBe(0);
+		expect(e.engine.lastCommand).toBe("isearch-abort");
+
+		// `isearch-cancel` calls `(isearch-done t)` — NOPUSH (`isearch.el:1926`) — so a new
+		// search's empty-query repeat has nothing to reuse and reports failure.
+		expect(e.press("s", C)).toBe(true);
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "forward", failed: true });
+	});
+
+	test("C-g during a failing search restores the last success and keeps searching", () => {
+		const e = editor("ab ab", 0);
+		e.press("s", C);
+		e.press("a");
+		e.press("b");
+		expect(e.state.cursor).toBe(2);
+
+		expect(e.press("x")).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "abx", direction: "forward", failed: true });
+		expect(e.state.cursor).toBe(0);
+
+		// `isearch-abort` pops the failing state rather than exiting (`isearch.el:1944-1947`).
+		expect(e.press("g", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "ab", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(2);
+		expect(e.engine.lastCommand).toBe("isearch-abort");
+
+		// Still running, and still searching: the next repeat finds the second copy.
+		expect(e.press("s", C)).toBe(true);
+		expect(e.state.cursor).toBe(5);
+	});
+
+	test("an empty-query repeat pulls the last search string from the ring", () => {
+		const e = editor("ab ab", 0);
+		e.press("s", C);
+		e.press("a");
+		e.press("b");
+		expect(e.press("\r", { return: true })).toBe(true);
+		expect(e.state.cursor).toBe(2);
+
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "forward", failed: false });
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "ab", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(5);
+	});
+
+	test("an empty-query repeat with no previous string reports failed", () => {
+		const e = editor("abc", 0);
+		e.press("s", C);
+		expect(e.press("s", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "forward", failed: true });
+		expect(e.state.cursor).toBe(0);
+		expect(e.engine.lastCommand).toBe("isearch-repeat-forward");
+
+		// `C-g` pops back to the activation state and leaves the search running.
+		expect(e.press("g", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(0);
+	});
+
+	test("search movement is cursor-only: no writes, no undo step, no typed characters", () => {
+		const e = editor("abc abc", 0);
+		e.press("s", C);
+		for (const ch of "abc") e.press(ch);
+		e.press("s", C); // repeat
+		e.press("", { backspace: true }); // delete
+		e.press("z"); // fail
+		expect(e.engine.isearch).toEqual({ query: "abz", direction: "forward", failed: true });
+		expect(e.state.text).toBe("abc abc");
+		expect(e.writes).toEqual([]);
+		expect(e.undoDepth()).toBe(0);
+	});
+
+	test("every other key is swallowed, including C-u and C-x prefixes", () => {
+		const e = editor("abc", 0);
+		e.press("s", C);
+		const query = { query: "", direction: "forward", failed: false } as const;
+
+		// C-u must not open `universal-argument`, C-x must not open `ctl-x-map`; both are consumed
+		// by the search and leave no prefix state behind.
+		expect(e.press("u", C)).toBe(true);
+		expect(e.engine.prefixArg).toBeNull();
+		expect(e.press("x", C)).toBe(true);
+		expect(e.engine.isearch).toEqual(query);
+		// Host special keys and meta chords do not extend the query either.
+		expect(e.press("", { upArrow: true })).toBe(true);
+		expect(e.press("\t", { tab: true })).toBe(true);
+		expect(e.press("f", M)).toBe(true);
+		expect(e.press("", { delete: true })).toBe(true);
+		expect(e.engine.isearch).toEqual(query);
+		expect(e.state.cursor).toBe(0);
+		expect(e.state.text).toBe("abc");
+
+		// The search is still live and still accepts characters after all of that.
+		expect(e.press("a")).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "a", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(1);
+	});
+
+	test("an empty buffer fails and C-g returns to the empty initial state", () => {
+		const e = editor("", 0);
+		e.press("s", C);
+		expect(e.press("a")).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "a", direction: "forward", failed: true });
+		expect(e.state.cursor).toBe(0);
+
+		expect(e.press("g", C)).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "", direction: "forward", failed: false });
+		expect(e.state.cursor).toBe(0);
+
+		// Enter accepts the empty search without pushing it on the ring.
+		expect(e.press("\r", { return: true })).toBe(true);
+		expect(e.engine.isearch).toBeNull();
+	});
+
+	test("no match in a non-empty buffer reports failed without moving point", () => {
+		const e = editor("abc", 1);
+		e.press("s", C);
+		expect(e.press("z")).toBe(true);
+		expect(e.engine.isearch).toEqual({ query: "z", direction: "forward", failed: true });
+		expect(e.state.cursor).toBe(1);
+		expect(e.state.text).toBe("abc");
+	});
+
+	test("Unicode: astral characters are one query character and DEL removes one code point", () => {
+		const accented = editor("héllo héllo", 0);
+		accented.press("s", C);
+		expect(accented.press("é")).toBe(true);
+		expect(accented.engine.isearch).toEqual({ query: "é", direction: "forward", failed: false });
+		expect(accented.state.cursor).toBe(2);
+		expect(accented.press("s", C)).toBe(true);
+		expect(accented.state.cursor).toBe(8);
+
+		const astral = editor("a\u{1F600}b a\u{1F600}b", 0);
+		astral.press("s", C);
+		expect(astral.press("\u{1F600}")).toBe(true);
+		expect(astral.engine.isearch).toEqual({ query: "\u{1F600}", direction: "forward", failed: false });
+		expect(astral.state.cursor).toBe(3);
+		expect(astral.press("s", C)).toBe(true);
+		expect(astral.state.cursor).toBe(8);
+
+		// One DEL deletes the whole astral character, not one UTF-16 half of it.
+		expect(astral.press("", { backspace: true })).toBe(true);
+		expect(astral.engine.isearch).toEqual({ query: "", direction: "forward", failed: false });
+		expect(astral.state.cursor).toBe(0);
 	});
 });
 
