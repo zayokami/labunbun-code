@@ -35,7 +35,11 @@ const REPO = join(import.meta.dir, "..", "..", "..");
 /** Extensions worth checking: the ones that end up as source, not artifacts. */
 const TEXT_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".md", ".yml", ".yaml", ".toml"]);
 
-const SKIP_DIRS = new Set(["node_modules", "dist", ".git", "coverage", ".next", "build"]);
+// `.claude` holds the git worktrees the agent tooling creates: full copies of
+// this repository, possibly on another branch. Scanning them reads the same
+// files twice, inflates the walk past this test's budget, and can fail the
+// guard on bytes that are not in the checkout under test.
+const SKIP_DIRS = new Set(["node_modules", "dist", ".git", "coverage", ".next", "build", ".claude"]);
 
 function textFilesUnder(dir: string, out: string[] = []): string[] {
 	for (const entry of readdirSync(dir)) {
