@@ -130,9 +130,13 @@ The tool summarizes the conversation when the context window fills. The summary 
 
 The tool first makes old tool results smaller. It replaces each old tool result with a short preview. This step makes no model call. The full text stays in the session file. The tool calls the model for a summary only if the first step did not free enough space.
 
+With a spill writer, the tool writes the full text to disk first. The first line of the preview is `[full output: N chars → path]`. The session file still holds the original record.
+
 The tool also runs the first step after one hour with no activity. The provider's cache is cold at that moment, so a smaller context costs nothing extra.
 
 Set `trimOldToolResults: false` to skip the first step. Use `/trim` to run the first step on request. Use `/context` to see what the window contains. The indicator counts the system prompt and the tool schemas.
+
+`/context` shows `Auto-compact` (`on`, `off (settings)`, or `paused after repeated failures`), `Hard limit`, and `Fixed (system + tools)`. The last row warns when the fixed part alone is over the hard limit.
 
 The `compaction` settings change this behavior. Set `compaction.model` to choose the model that writes the summaries. Set `compaction.thresholdPercent` to compact at a percent of the window. Set `compaction.reserveTokens` to change the space that the trigger line keeps free. Set `compaction.enabled` to `false` to stop the automatic passes. The manual commands still work. `/autocompact` changes this setting from the prompt.
 
@@ -173,6 +177,8 @@ The hook events are:
 - `PreCompact`
 - `PostCompact`
 - `Notification`
+
+`PreCompact` may veto a pass, including one that a provider refusal forced; a veto then ends the run. `PostCompact` runs after a pass in the REPL, `-p`, and ACP sessions. A compact pass waits for its listeners.
 
 The maximum timeout is 600000 ms.
 
@@ -545,7 +551,7 @@ Use these commands in the terminal.
 | `/cost` | Show the cost of this session, then of this project. |
 | `/context` | Show what the context window contains. |
 | `/cache` | Show the prompt cache hit rate and its ceiling. |
-| `/compact [focus]` | Summarize the conversation. |
+| `/compact [focus]` | Summarize the conversation. Warns when the compacted context is still at or over the hard limit, and points at `/trim`. |
 | `/trim` | Replace old tool results with short previews. |
 | `/autocompact [on\|off\|<percent>]` | Show or change the automatic compaction passes and their trigger line. |
 | `/checkpoint` | Show the tool ledger: the last call, the files that it touched, the tasks, and the context use. |

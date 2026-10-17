@@ -6,7 +6,7 @@ ACP is the Agent Client Protocol: an editor (Zed is the client this exists for) 
 
 ## The wire and its methods
 
-`runAcp` (`acp.ts:1181-1193`) wraps `process.stdout`/`stdin` as web streams, hands them to the protocol library's `ndJsonStream` (`@zed-industries/agent-client-protocol`), and constructs the `AgentSideConnection`. It serves until stdin ends — the client's way of ending the session (`:1196-1201`) — then closes out every open session with a `mission` close-out note and runs the pending `SessionEnd` hooks (`:837-857`), and returns 0.
+`runAcp` (`acp.ts:1316-1328`) wraps `process.stdout`/`stdin` as web streams, hands them to the protocol library's `ndJsonStream` (`@zed-industries/agent-client-protocol`), and constructs the `AgentSideConnection`. It serves until stdin ends — the client's way of ending the session (`:1331-1336`) — then closes out every open session with a `mission` close-out note and runs the pending `SessionEnd` hooks (`:837-857`), and returns 0.
 
 The implemented method set is the mandatory half of the agent side plus `session/set_mode` (`acp.ts:11-21`):
 
@@ -62,12 +62,12 @@ The replay's pairing rules (`:427-444`): an assistant tool call and the result t
 
 ## Session assembly
 
-`#createSession` (`acp.ts:871-1121`) is the shape `headless.ts` assembles a `-p` run in: the same settings tiers, permission rules and engine, tool set, compaction wiring, hooks, memory and skills, and the same spill directory. It is written out rather than shared, because the two differ in exactly the places that matter — the defaults each mode may pick, the mode sources, and where a turn's output goes (`:859-869`). The details worth naming:
+`#createSession` (`acp.ts:894-1256`) is the shape `headless.ts` assembles a `-p` run in: the same settings tiers, permission rules and engine, tool set, compaction wiring, hooks, memory and skills, and the same spill directory. It is written out rather than shared, because the two differ in exactly the places that matter — the defaults each mode may pick, the mode sources, and where a turn's output goes (`:859-869`). The details worth naming:
 
-- `settings.roles` resolves fail-soft, warned on stderr (`:904-914`). An editor session advertises the `plan` permission mode but has no `EnterPlanMode`/`ExitPlanMode` tools and no review loop, so the plan seat resolves but is never used; it also has no subagents, so the light seat is unused (`:904-908`, `:1076-1077`). Its task board is real and per live session: one `TaskStore` bound to the session's store, restored on load and re-saved when a compaction ends (`:974-975`, `:997-1002`, `:1128-1133`). The fallback orders cover main and compaction only (`:1078-1091`).
+- `settings.roles` resolves fail-soft, warned on stderr (`:904-914`). An editor session advertises the `plan` permission mode but has no `EnterPlanMode`/`ExitPlanMode` tools and no review loop, so the plan seat resolves but is never used; it also has no subagents, so the light seat is unused (`:904-908`, `:1076-1077`). Its task board is real and per live session: one `TaskStore` bound to the session's store, restored on load and re-saved when a compaction ends (`:974-975`, `:1009`, `:1159-1167`). The fallback orders cover main and compaction only (`:1078-1091`).
 - The model precedence is the REPL's — explicit `--model`, persisted `settings.model`, `roles.main`, built-in default — and an unknown model is a JSON-RPC error, not a stderr line and an exit code (`:894-910`).
 - The budget gate (`checkBudget`, `:1093-1097`) runs before every request: the model about to answer names its seat by ref (a model no seat owns is never gated), and the spend is this conversation's cumulative total re-costed from the transcript's own usage records — an editor session has no ledger of its own, and a resumed conversation counts what it already spent because the costed messages are the ones it was resumed with (`:1085-1092`).
-- The sign-in store is the same one the REPL reads, Claude, ChatGPT and Gemini (`:998-1008`); `SessionStart` runs at assembly (`:990-996`), `SessionEnd` at shutdown (`:837-857`).
+- The sign-in store is the same one the REPL reads, Claude, ChatGPT and Gemini (`:998-1008`); `SessionStart` runs at assembly (`:990-996`), `SessionEnd` at shutdown (`:837-857`). An editor session runs the `PreCompact` veto before a pass (`:1136-1153`) and the `PostCompact` observer after `done` (`:1172-1183`). A `-p` run does the same (`packages/coding-agent/src/headless.ts:684-696`, `:716-726`), and the REPL runs `PostCompact` too (`packages/coding-agent/src/interactive.ts:896-908`).
 
 ## Tests that hold these claims
 
