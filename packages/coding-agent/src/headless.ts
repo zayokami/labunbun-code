@@ -355,7 +355,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		const loaded = loadSessionForResume(match.path);
 		if (loaded) {
 			store = loaded.store;
-			const damage = damagedSessionNotice(loaded.store, loaded.removed);
+			const damage = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
 			if (damage) console.error(`Warning: ${damage}`);
 			resumedMessages = loaded.messages;
 		} else {
@@ -368,7 +368,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			const loaded = loadSessionForResume(target.path);
 			store = loaded?.store;
 			if (loaded) {
-				const damage = damagedSessionNotice(loaded.store, loaded.removed);
+				const damage = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
 				if (damage) console.error(`Warning: ${damage}`);
 				resumedMessages = loaded.messages;
 			}

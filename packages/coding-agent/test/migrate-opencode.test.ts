@@ -1841,8 +1841,8 @@ describe("opencode: the database", () => {
 	test("a tool result is read off whichever arm of the state union it carries", () => {
 		// `ToolState` is discriminated on `status` (`session.ts:304-310`): `output`
 		// once completed, `error` once it failed, neither while pending or running. A
-		// call with no terminal state is still emitted, because dropping it would
-		// leave a tool call with no answer — which is what `repairToolPairing` is for.
+		// call with no terminal state still gets a result — the placeholder — so the
+		// pair the provider requires is present without the repair's help.
 		withHome({}, (home) => {
 			makeOpencodeDb(dataPath(home), "opencode.db", (db) => {
 				insertSession(db, { id: "s1" });
@@ -1869,14 +1869,19 @@ describe("opencode: the database", () => {
 			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
 			const session = read.sessions[0];
 			const results = session.entries.filter((e) => e.kind === "message" && e.message.role === "toolResult") as Array<{
-				message: { isError: boolean; content: Array<{ type: string; text?: string }> };
+				message: { toolCallId: string; isError: boolean; content: Array<{ type: string; text?: string }> };
 			}>;
-			expect(results).toHaveLength(3);
+			expect(results.map((result) => result.message.toolCallId)).toEqual(["c1", "c2", "c3"]);
 			expect(results[0].message.isError).toBe(false);
 			expect(results[0].message.content[0].text).toContain("a.txt");
 			expect(results[1].message.isError).toBe(true);
 			expect(results[1].message.content[0].text).toContain("no such file");
+			// The running arm has neither output nor error: the placeholder is the
+			// result, and nothing was synthesized on top of it.
+			expect(results[2].message.isError).toBe(false);
+			expect(results[2].message.content[0].text).toBe("(no output recorded)");
 			expect(read.notes).toContainEqual({ reason: "tool call with no recorded output", count: 1 });
+			expect(read.notes.find((note) => note.reason === "unpaired tool call or result")).toBeUndefined();
 			// The arguments come off `state.input`, which is a record on all four arms
 			// of the union — so it is stringified as it stands rather than parsed out
 			// of a string, and they are what the model will be shown on `--continue`.

@@ -600,12 +600,13 @@ export function readCommandCodeSession(path: string, startedAt: number): Command
 	// pre-repair slots would shift every entry after the drop — one turn's words
 	// attributed to another, and an entry with no message at all at the end.
 	// The compaction marks keep their place as indices into the message stream;
-	// if the repair dropped anything, the marks move to the end rather than land
-	// mid-stream (the same trade the dsh and ZCode readers make).
+	// if the repair removed a message or inserted a synthetic result, the marks
+	// move to the end rather than land mid-stream (the same trade the dsh and
+	// ZCode readers make).
 	const repaired = repairToolPairing(rewriteToolNames(collected));
 	let entries: CommandCodeEntry[] = repaired.messages.map((message) => ({ kind: "message" as const, message }));
 	if (marks.length > 0) {
-		if (repaired.dropped === 0) {
+		if (repaired.dropped === 0 && repaired.synthesized === 0) {
 			for (const mark of [...marks].sort((a, b) => b.after - a.after)) {
 				entries.splice(Math.min(mark.after, entries.length), 0, mark.entry);
 			}
@@ -633,7 +634,8 @@ export function readCommandCodeSession(path: string, startedAt: number): Command
 			bookkeeping,
 		);
 	}
-	if (repaired.dropped > 0) bump("unpaired tool call or result", repaired.dropped);
+	const unpaired = repaired.dropped + repaired.synthesized;
+	if (unpaired > 0) bump("unpaired tool call or result", unpaired);
 	return { entries, notes: [...counts].map(([reason, count]) => ({ reason, count })) };
 }
 

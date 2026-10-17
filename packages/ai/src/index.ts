@@ -216,7 +216,11 @@ export {
 	withRetry,
 } from "./retry.ts";
 export { type StallTimeoutOptions, StreamStallError, withStallTimeout } from "./stall-timeout.ts";
-export { repairToolPairing } from "./transcript.ts";
+export {
+	INTERRUPTED_TOOL_RESULT_TEXT,
+	repairToolPairing,
+	type ToolPairingRepair,
+} from "./transcript.ts";
 // Types
 export type {
 	AgentMessage,

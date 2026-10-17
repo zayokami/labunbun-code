@@ -547,7 +547,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		const loaded = loadSessionForResume(match.path);
 		if (loaded) {
 			store = loaded.store;
-			damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
+			damageNotice = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
 			resumedMessages = loaded.messages;
 		} else {
 			// The file lists — its name is the id — and matches, but nothing can be
@@ -565,7 +565,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			const loaded = loadSessionForResume(target.path);
 			store = loaded?.store;
 			if (loaded) {
-				damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
+				damageNotice = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
 				resumedMessages = loaded.messages;
 			}
 		}
@@ -4252,11 +4252,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			const forkContext = forkStore.contextMessages();
 			const forkRepaired = repairToolPairing(forkContext);
 			forkSession.messages = forkRepaired.messages;
-			const forkRemoved = forkContext.length - forkRepaired.messages.length;
+			const forkRemoved = forkRepaired.droppedMessages;
+			const forkSynthesized = forkRepaired.synthesized;
 			pushInfo(
 				ctx.handle,
 				`Branched from ${arg.slice(0, 8)}. New messages continue on this branch.` +
-					(forkRemoved > 0 ? ` ${forkRemoved} message${forkRemoved === 1 ? "" : "s"} removed with its tool call.` : ""),
+					(forkRemoved > 0
+						? ` ${forkRemoved} message${forkRemoved === 1 ? "" : "s"} removed by the tool-call repair.`
+						: "") +
+					(forkSynthesized > 0
+						? ` ${forkSynthesized} interrupted tool call${forkSynthesized === 1 ? "" : "s"} answered with an error result.`
+						: ""),
 			);
 			return true;
 		}

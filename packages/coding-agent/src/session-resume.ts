@@ -110,48 +110,59 @@ function textOf(message: AgentMessage): string {
  * edited by something that did not know the format — and the entry that is gone
  * may have been half of a tool call. The half that remains is a request the
  * provider rejects, which would turn a recoverable session into one that cannot
- * be resumed at all; dropping both halves costs one tool call and keeps the
- * rest of the conversation.
+ * be resumed at all. An interrupted call is kept and answered with a synthetic
+ * error result, so the tool call the user saw is still in the conversation; an
+ * unpaired result is dropped, because there is no call for it to answer.
  *
  * `removed` is how many messages the repair took out of the transcript, so the
  * caller can say what the resumed conversation is missing rather than presenting
- * it as whole. It is a message count, where `repairToolPairing`'s own count is
- * of dropped blocks and emptied turns — the finer number is what a migration
- * report wants, and this one is what "your conversation is shorter" means.
+ * it as whole. `synthesized` is the calls that were answered instead of removed:
+ * not a loss, but a repair the user should hear about, since the error result is
+ * not something any tool produced.
  */
 export function loadSessionForResume(
 	path: string,
-): { store: SessionStore; messages: AgentMessage[]; removed: number } | null {
+): { store: SessionStore; messages: AgentMessage[]; removed: number; synthesized: number } | null {
 	const store = SessionStore.load(path);
 	if (!store.sessionId || store.entries.length === 0) return null;
 	// The model-facing view: a compacted session resumes from its boundary. The
 	// entries above it stay in the file for the record, not for the next request.
 	const context = store.contextMessages();
 	const repaired = repairToolPairing(context);
-	return { store, messages: repaired.messages, removed: context.length - repaired.messages.length };
+	return {
+		store,
+		messages: repaired.messages,
+		removed: repaired.droppedMessages,
+		synthesized: repaired.synthesized,
+	};
 }
 
 /**
- * One line about a session that came back shorter than the file it was written
- * to, or undefined when it came back whole.
+ * One line about a session the repair changed, or undefined when it came back
+ * whole.
  *
  * Silence here is the failure worth avoiding: the conversation looks like it
  * simply has less in it, and the person resuming has no way to tell a damaged
  * session from one they remember wrong.
  *
- * The two losses are named separately rather than added up. A damaged line is
- * an entry the file no longer holds, and a message removed with its tool call is
- * one this reader took out on purpose — possibly *because* of that same damaged
- * line, which would make one lost line read as two lost things. A count the user
- * cannot check is worse than two they can.
+ * The losses are named separately rather than added up. A damaged line is an
+ * entry the file no longer holds, and a message removed by the repair is one
+ * this reader took out on purpose — possibly *because* of that same damaged
+ * line, which would make one lost line read as two lost things. An interrupted
+ * call is not a loss at all: it is answered with an error result, and saying so
+ * is what keeps a synthetic answer from reading as something a tool said. A
+ * count the user cannot check is worse than three they can.
  */
-export function damagedSessionNotice(store: SessionStore, removed: number): string | undefined {
+export function damagedSessionNotice(store: SessionStore, removed: number, synthesized = 0): string | undefined {
 	const losses: string[] = [];
 	if (store.skippedLines > 0) {
 		losses.push(`${store.skippedLines} damaged line${store.skippedLines === 1 ? "" : "s"}`);
 	}
 	if (removed > 0) {
-		losses.push(`${removed} message${removed === 1 ? "" : "s"} removed with its tool call`);
+		losses.push(`${removed} message${removed === 1 ? "" : "s"} removed by the tool-call repair`);
+	}
+	if (synthesized > 0) {
+		losses.push(`${synthesized} interrupted tool call${synthesized === 1 ? "" : "s"} answered with an error result`);
 	}
 	if (losses.length === 0) return undefined;
 	return `Session file damaged: ${losses.join(" and ")} (${store.path}). The rest of the conversation is intact.`;

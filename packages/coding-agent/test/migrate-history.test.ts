@@ -260,7 +260,7 @@ describe("migrate: history from Claude Code", () => {
 		});
 	});
 
-	test("a tool call with no result loses both halves", () => {
+	test("a tool call with no result keeps its turn and is answered", () => {
 		withHome({}, (home) => {
 			writeJsonl(claudePath(home, "aaaa-8888"), [
 				{ type: "user", timestamp: at(0), cwd: CWD, message: { role: "user", content: "hello" } },
@@ -286,13 +286,25 @@ describe("migrate: history from Claude Code", () => {
 			]);
 			const result = runHistory(home, { apply: true });
 			const messages = SessionStore.load(result.plan.writes[0].path).messages();
-			expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "assistant"]);
-			expect(messages[1].role === "assistant" && messages[1].content.map((block) => block.type)).toEqual(["text"]);
+			// The turn that asked for the tool keeps its words and its call; the
+			// answer is synthesized where the provider expects one, rather than the
+			// turn being deleted for lacking it.
+			expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+			expect(messages[1].role === "assistant" && messages[1].content.map((block) => block.type)).toEqual([
+				"text",
+				"toolCall",
+			]);
+			const synthetic = messages[2];
+			if (synthetic?.role !== "toolResult") throw new Error("expected the synthesized result");
+			expect(synthetic.toolCallId).toBe("toolu_lost");
+			expect(synthetic.toolName).toBe("Read");
+			expect(synthetic.isError).toBe(true);
+			expect(synthetic.content).toEqual([{ type: "text", text: "Tool execution was interrupted before completion." }]);
 			expect(details(result).some((detail) => detail.includes("unpaired tool call or result — 1"))).toBe(true);
 		});
 	});
 
-	test("repair drops each half in both directions", () => {
+	test("repair answers orphan calls and drops orphan results", () => {
 		const messages: AgentMessage[] = [
 			{ role: "user", content: "hi", timestamp: 0 },
 			{
@@ -326,12 +338,24 @@ describe("migrate: history from Claude Code", () => {
 			},
 		];
 		const repaired = repairToolPairing(messages);
-		// Counted separately: the orphan call, the orphan result, the orphan call
-		// that was alone in its message, and that emptied message.
-		expect(repaired.dropped).toBe(4);
-		expect(repaired.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		// Each call is answered once, in its own turn; only the result that named
+		// no call is dropped, and it is the one message that leaves the list.
+		expect(repaired.dropped).toBe(1);
+		expect(repaired.synthesized).toBe(2);
+		expect(repaired.droppedMessages).toBe(1);
+		expect(repaired.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+			"toolResult",
+		]);
 		expect(repaired.messages[1].role === "assistant" && repaired.messages[1].content).toEqual([
 			{ type: "text", text: "kept" },
+			{ type: "toolCall", id: "orphan-call", name: "Read", arguments: "{}" },
+		]);
+		expect(repaired.messages[3].role === "assistant" && repaired.messages[3].content).toEqual([
+			{ type: "toolCall", id: "only-a-call", name: "Read", arguments: "{}" },
 		]);
 	});
 });

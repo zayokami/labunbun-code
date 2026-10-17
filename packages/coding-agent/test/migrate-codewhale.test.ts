@@ -36,6 +36,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { INTERRUPTED_TOOL_RESULT_TEXT } from "@labunbun/ai";
 import {
 	CODEWHALE_DEFAULT_DIR,
 	CODEWHALE_DENIED_HOME_ENTRIES,
@@ -1006,7 +1007,7 @@ test("a tool result is a user-role message carrying a tool_result block, and it 
 	expect(result.message.toolName).toBe("read_file");
 });
 
-test("an unpaired tool call loses both halves rather than producing a transcript the API rejects", () => {
+test("an unpaired tool call keeps its turn and is answered, rather than producing a transcript the API rejects", () => {
 	const { home } = codewhaleFixture({
 		files: {
 			"sessions/lonely.json": sessionJson({ id: "lonely", title: "half", workspace: FIXTURE_CWD_TOKEN }, [
@@ -1021,8 +1022,17 @@ test("an unpaired tool call loses both halves rather than producing a transcript
 	const calls = read.entries.flatMap((entry) =>
 		entry.kind === "message" && entry.message.role === "assistant" ? entry.message.content : [],
 	);
-	expect(calls.some((block) => block.type === "toolCall")).toBe(false);
-	expect(read.notes.some((note) => note.reason.includes("other half was not in the transcript"))).toBe(true);
+	expect(calls.some((block) => block.type === "toolCall")).toBe(true);
+	const roles = read.entries.map((entry) => (entry.kind === "message" ? entry.message.role : "compaction"));
+	expect(roles).toEqual(["user", "assistant", "toolResult"]);
+	const answered = read.entries[2];
+	if (answered.kind !== "message" || answered.message.role !== "toolResult") throw new Error("expected a tool result");
+	expect(answered.message.toolCallId).toBe("call_x");
+	expect(answered.message.toolName).toBe("t");
+	expect(answered.message.isError).toBe(true);
+	expect(answered.message.content).toEqual([{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }]);
+	const note = read.notes.find((entry) => entry.reason.includes("other half was not in the transcript"));
+	expect(note?.count).toBe(1);
 });
 
 test("an interrupted assistant turn becomes `aborted`, which is what the role is for", () => {

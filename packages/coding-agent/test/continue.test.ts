@@ -569,17 +569,16 @@ describe("a session file that lost a line", () => {
 		expect(notice).toContain("The rest of the conversation is intact.");
 	});
 
-	test("a tool call whose result went with the damaged line is dropped, not sent", () => {
+	test("a tool call whose result went with the damaged line is answered, not sent bare", () => {
 		const { home, cwd } = fixture();
 		const store = SessionStore.startNew(cwd, home);
 		const request = userMessage("run it");
+		const turn = assistantMessage({
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", id: "t1", name: "Read", arguments: '{"file_path":"a.txt"}' }],
+		});
 		store.appendMessage(request);
-		store.appendMessage(
-			assistantMessage({
-				stopReason: "toolUse",
-				content: [{ type: "toolCall", id: "t1", name: "Read", arguments: '{"file_path":"a.txt"}' }],
-			}),
-		);
+		store.appendMessage(turn);
 		store.appendMessage({
 			role: "toolResult",
 			toolCallId: "t1",
@@ -593,13 +592,26 @@ describe("a session file that lost a line", () => {
 		const loaded = loadSessionForResume(store.path);
 		if (!loaded) throw new Error("expected the session to load");
 
-		// The call that lost its result is a request the provider rejects, so both
-		// halves go — and the message that held it is a message the conversation
-		// no longer has.
-		expect(loaded.messages).toEqual([request]);
-		expect(loaded.removed).toBe(1);
-		const notice = damagedSessionNotice(loaded.store, loaded.removed);
-		expect(notice).toContain("1 damaged line and 1 message removed with its tool call");
+		// The call stays with the turn that asked for it, and the provider gets the
+		// answer it insists on — a synthetic error result — rather than losing the
+		// model's words along with the result that was destroyed.
+		expect(loaded.messages).toEqual([
+			request,
+			turn,
+			{
+				role: "toolResult",
+				toolCallId: "t1",
+				toolName: "Read",
+				isError: true,
+				content: [{ type: "text", text: "Tool execution was interrupted before completion." }],
+				timestamp: turn.timestamp,
+				synthetic: true,
+			},
+		]);
+		expect(loaded.removed).toBe(0);
+		expect(loaded.synthesized).toBe(1);
+		const notice = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
+		expect(notice).toContain("1 damaged line and 1 interrupted tool call answered with an error result");
 	});
 
 	test("says nothing about a session that came back whole", () => {
@@ -641,23 +653,23 @@ describe("a session file that lost a line", () => {
 		]);
 	}, 30_000);
 
-	test("continue on a file that lost a tool result sends no unpaired call", async () => {
+	test("continue on a file that lost a tool result sends an answered call", async () => {
 		// The test above loses a line that broke no pairing. This one loses a
 		// tool result: a raw read leaves an assistant turn holding a tool_use
 		// whose result is gone, and the provider rejects the first request of
-		// the resumed conversation. The notice already says the message was
-		// removed — what the session sends has to agree with it.
+		// the resumed conversation. The call is kept and answered with a synthetic
+		// error result, so the first request carries the pair the provider needs
+		// and the notice says an answer was invented rather than a message lost.
 		const { home, cwd } = fixture();
 		const store = SessionStore.startNew(cwd, home);
 		const request = userMessage("run it");
 		const newest = userMessage("the newest question");
+		const turn = assistantMessage({
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", id: "t1", name: "Read", arguments: '{"file_path":"a.txt"}' }],
+		});
 		store.appendMessage(request);
-		store.appendMessage(
-			assistantMessage({
-				stopReason: "toolUse",
-				content: [{ type: "toolCall", id: "t1", name: "Read", arguments: '{"file_path":"a.txt"}' }],
-			}),
-		);
+		store.appendMessage(turn);
 		store.appendMessage({
 			role: "toolResult",
 			toolCallId: "t1",
@@ -672,12 +684,22 @@ describe("a session file that lost a line", () => {
 		const result = await startup(home, cwd, { continueLast: true });
 
 		expect(result.exitCode).toBe(0);
-		expect(result.stderr).toContain("1 damaged line and 1 message removed with its tool call");
-		// The first request carries the repaired transcript: the half that lost
-		// its other half is not sent, because a rejected first request makes the
-		// resumed conversation unusable from the moment it opens.
+		expect(result.stderr).toContain("1 damaged line and 1 interrupted tool call answered with an error result");
+		// The first request carries the repaired transcript: the call is answered
+		// where the provider expects the result, because a rejected first request
+		// makes the resumed conversation unusable from the moment it opens.
 		expect(result.requests[0]).toEqual([
 			request,
+			turn,
+			{
+				role: "toolResult",
+				toolCallId: "t1",
+				toolName: "Read",
+				isError: true,
+				content: [{ type: "text", text: "Tool execution was interrupted before completion." }],
+				timestamp: turn.timestamp,
+				synthetic: true,
+			},
 			newest,
 			{ role: "user", content: "new question", timestamp: expect.any(Number) },
 		]);

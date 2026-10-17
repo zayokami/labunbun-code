@@ -329,13 +329,20 @@ export function readStepSession(session: StepSessionFile): StepRead | { error: s
 	}
 
 	// The shared guard the other sources use, kept even though this projection
-	// cannot produce a tool message for it to drop: it is the one place a mismatch
-	// between calls and results would be caught, and `dropped` is what the report
-	// prints. The repair only removes, and it removes in order, which is what lets
-	// the surviving messages be laid back over the message slots below.
+	// cannot produce a half-pair for it to act on: it is the one place a mismatch
+	// between calls and results would be caught, and the count is what the report
+	// prints. `projectAssistant` drops every `toolCall` block and `projectMessage`
+	// never emits a tool result, so the repair finds nothing to synthesize and
+	// nothing to remove, and its output stays in lockstep with `messages`. That is
+	// what lets the survivors be laid back over the message slots below by index —
+	// an insertion here would shift a turn's words onto the next entry, so the
+	// assumption is asserted rather than assumed.
 	const messages = items.flatMap((item) => (item.kind === "message" ? [item.message] : []));
 	const repaired = repairToolPairing(messages);
-	bump(counts, "unpaired tool call or result", repaired.dropped);
+	bump(counts, "unpaired tool call or result", repaired.dropped + repaired.synthesized);
+	if (repaired.messages.length !== messages.length) {
+		throw new Error("step session projection produced a transcript the tool-pairing repair changed");
+	}
 	const entries: StepEntry[] = [];
 	let next = 0;
 	for (const item of items) {

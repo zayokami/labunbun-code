@@ -150,7 +150,7 @@ export type HistoryImport = Partial<Record<MigrationSourceId, HistoryInput>>;
 // ---------------------------------------------------------------------------
 
 /**
- * Structural repair: both halves of an unpaired tool call go.
+ * Structural repair: an interrupted call is answered, an unpaired result goes.
  *
  * Re-exported so this module's callers (and its tests) keep one import site;
  * the implementation lives in `@labunbun/ai` because resuming a session whose
@@ -638,7 +638,8 @@ function readClaudeCodeSession(
 	if (malformed > 0) notes.push({ reason: "malformed line", count: malformed });
 	if (sidechain > 0) notes.push({ reason: "sidechain entry", count: sidechain });
 	if (ignored > 0) notes.push({ reason: "non-conversation entry", count: ignored });
-	if (repaired.dropped > 0) notes.push({ reason: "unpaired tool call or result", count: repaired.dropped });
+	const unpaired = repaired.dropped + repaired.synthesized;
+	if (unpaired > 0) notes.push({ reason: "unpaired tool call or result", count: unpaired });
 	return { entries: repaired.messages.map((message) => ({ kind: "message", message })), notes };
 }
 
@@ -828,7 +829,8 @@ function readCodexSession(
 	if (reasoning > 0) notes.push({ reason: "reasoning item (stored encrypted)", count: reasoning });
 	if (developer > 0) notes.push({ reason: "developer message (instructions, not conversation)", count: developer });
 	if (ignored > 0) notes.push({ reason: "unsupported response item", count: ignored });
-	if (repaired.dropped > 0) notes.push({ reason: "unpaired tool call or result", count: repaired.dropped });
+	const unpaired = repaired.dropped + repaired.synthesized;
+	if (unpaired > 0) notes.push({ reason: "unpaired tool call or result", count: unpaired });
 	return { entries: repaired.messages.map((message) => ({ kind: "message", message })), notes };
 }
 
@@ -888,7 +890,8 @@ function readZcodeSession(sourceId: string, home: string): { entries: HistoryEnt
 	const collected: AgentMessage[] = [];
 	// A compaction marker belongs right after the message that carried it. Its
 	// position is kept as an index into the message stream; if the repair pass
-	// drops something, the markers move to the end rather than land mid-stream.
+	// removes a message or inserts a synthetic result, the markers move to the end
+	// rather than land mid-stream.
 	const markers: Array<{ after: number; entry: HistoryEntry }> = [];
 	for (const message of messages) {
 		const role = asText(message.data.role);
@@ -982,7 +985,7 @@ function readZcodeSession(sourceId: string, home: string): { entries: HistoryEnt
 	const repaired = repairToolPairing(collected);
 	let entries: HistoryEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
 	if (markers.length > 0) {
-		if (repaired.dropped === 0) {
+		if (repaired.dropped === 0 && repaired.synthesized === 0) {
 			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
 				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
 			}
@@ -993,7 +996,8 @@ function readZcodeSession(sourceId: string, home: string): { entries: HistoryEnt
 	if (synthetic > 0) notes.push({ reason: "tool-injected text part", count: synthetic });
 	if (ignored > 0) notes.push({ reason: "unsupported part", count: ignored });
 	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
-	if (repaired.dropped > 0) notes.push({ reason: "unpaired tool call or result", count: repaired.dropped });
+	const unpaired = repaired.dropped + repaired.synthesized;
+	if (unpaired > 0) notes.push({ reason: "unpaired tool call or result", count: unpaired });
 	return { entries, notes };
 }
 
@@ -1095,11 +1099,11 @@ function opencodeV2ToolArguments(input: unknown): string {
 function assembleOpencodeEntries(
 	collected: AgentMessage[],
 	markers: Array<{ after: number; entry: HistoryEntry }>,
-): { entries: HistoryEntry[]; dropped: number } {
+): { entries: HistoryEntry[]; unpaired: number } {
 	const repaired = repairToolPairing(collected);
 	const entries: HistoryEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
 	if (markers.length > 0) {
-		if (repaired.dropped === 0) {
+		if (repaired.dropped === 0 && repaired.synthesized === 0) {
 			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
 				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
 			}
@@ -1107,7 +1111,7 @@ function assembleOpencodeEntries(
 			entries.push(...markers.map((marker) => marker.entry));
 		}
 	}
-	return { entries, dropped: repaired.dropped };
+	return { entries, unpaired: repaired.dropped + repaired.synthesized };
 }
 
 // Long-form design notes: docs/dev/migration-framework.md
@@ -1221,7 +1225,7 @@ function opencodeV2Session(rows: OpencodeSessionMessageRow[]): { entries: Histor
 		}
 	}
 
-	const { entries, dropped } = assembleOpencodeEntries(collected, markers);
+	const { entries, unpaired } = assembleOpencodeEntries(collected, markers);
 	if (synthetic > 0) notes.push({ reason: "tool-injected message", count: synthetic });
 	if (system > 0) notes.push({ reason: "system message", count: system });
 	if (shells > 0) notes.push({ reason: "shell record, with its output", count: shells });
@@ -1230,7 +1234,7 @@ function opencodeV2Session(rows: OpencodeSessionMessageRow[]): { entries: Histor
 	if (unknown > 0) notes.push({ reason: "message this build does not read", count: unknown });
 	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
 	if (summaries > 0) notes.push({ reason: "compaction summary", count: summaries });
-	if (dropped > 0) notes.push({ reason: "unpaired tool call or result", count: dropped });
+	if (unpaired > 0) notes.push({ reason: "unpaired tool call or result", count: unpaired });
 	return { entries, notes };
 }
 
@@ -1280,8 +1284,9 @@ function readOpencodeSession(sourceId: string, home: string): { entries: History
 
 	const collected: AgentMessage[] = [];
 	// A marker belongs right after the message that triggered it. Its position is
-	// kept as an index into the message stream; if the repair pass drops something,
-	// the markers move to the end rather than land mid-stream.
+	// kept as an index into the message stream; if the repair pass removes a message
+	// or inserts a synthetic result, the markers move to the end rather than land
+	// mid-stream.
 	const markers: Array<{ after: number; entry: HistoryEntry }> = [];
 	for (const message of messages) {
 		const role = asText(message.data.role);
@@ -1382,12 +1387,12 @@ function readOpencodeSession(sourceId: string, home: string): { entries: History
 		}
 	}
 
-	const { entries, dropped } = assembleOpencodeEntries(collected, markers);
+	const { entries, unpaired } = assembleOpencodeEntries(collected, markers);
 	if (synthetic > 0) notes.push({ reason: "tool-injected text part", count: synthetic });
 	if (ignored > 0) notes.push({ reason: "unsupported part", count: ignored });
 	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
 	if (summaries > 0) notes.push({ reason: "compaction summary", count: summaries });
-	if (dropped > 0) notes.push({ reason: "unpaired tool call or result", count: dropped });
+	if (unpaired > 0) notes.push({ reason: "unpaired tool call or result", count: unpaired });
 	return { entries, notes };
 }
 
@@ -1583,7 +1588,7 @@ function readMiMoCodeSession(sourceId: string, home: string): { entries: History
 	// shape this importer does not carry" are different sentences, and a user who
 	// ran subagents deserves the first.
 	const scope = readMiMoCodeMessageScope(dbPath, sourceId);
-	const { entries, dropped } = assembleMiMoCodeEntries(collected, markers);
+	const { entries, unpaired } = assembleMiMoCodeEntries(collected, markers);
 	if (scope.subagent > 0) {
 		notes.push({ reason: "subagent turn (a message whose `agent_id` is not `main`)", count: scope.subagent });
 	}
@@ -1591,7 +1596,7 @@ function readMiMoCodeSession(sourceId: string, home: string): { entries: History
 	if (ignored > 0) notes.push({ reason: "unsupported part", count: ignored });
 	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
 	if (summaries > 0) notes.push({ reason: "compaction summary", count: summaries });
-	if (dropped > 0) notes.push({ reason: "unpaired tool call or result", count: dropped });
+	if (unpaired > 0) notes.push({ reason: "unpaired tool call or result", count: unpaired });
 	return { entries, notes };
 }
 
@@ -1611,18 +1616,19 @@ function miMoCodeSummaryText(parts: MiMoCodePartRow[]): string {
 /**
  * Pair the repaired message stream with the compaction markers, in that order.
  *
- * A marker's position is an index into `collected`, and a repair pass that dropped
- * something invalidates it — so when anything was dropped the markers all move to
- * the end rather than land at positions that no longer mean what they said.
+ * A marker's position is an index into `collected`, and a repair pass that removed
+ * or inserted a message invalidates it — so when the repair changed the stream the
+ * markers all move to the end rather than land at positions that no longer mean
+ * what they said.
  */
 function assembleMiMoCodeEntries(
 	collected: AgentMessage[],
 	markers: Array<{ after: number; entry: HistoryEntry }>,
-): { entries: HistoryEntry[]; dropped: number } {
+): { entries: HistoryEntry[]; unpaired: number } {
 	const repaired = repairToolPairing(collected);
 	const entries: HistoryEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
 	if (markers.length > 0) {
-		if (repaired.dropped === 0) {
+		if (repaired.dropped === 0 && repaired.synthesized === 0) {
 			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
 				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
 			}
@@ -1630,7 +1636,7 @@ function assembleMiMoCodeEntries(
 			entries.push(...markers.map((marker) => marker.entry));
 		}
 	}
-	return { entries, dropped: repaired.dropped };
+	return { entries, unpaired: repaired.dropped + repaired.synthesized };
 }
 
 // ---------------------------------------------------------------------------
@@ -2813,7 +2819,8 @@ function readOpenClawSession(
 	if (compressed > 0) {
 		notes.push({ reason: "zstd-compressed transcript event", count: compressed });
 	}
-	if (repaired.dropped > 0) notes.push({ reason: "unpaired tool call or result", count: repaired.dropped });
+	const unpaired = repaired.dropped + repaired.synthesized;
+	if (unpaired > 0) notes.push({ reason: "unpaired tool call or result", count: unpaired });
 	return { entries: repaired.messages.map((message) => ({ kind: "message", message })), notes };
 }
 
@@ -3319,6 +3326,11 @@ export function renderHistorySession(session: HistorySession): string {
 	const sessionId = importedSessionId(session.source, session.sourceId);
 	const lines: string[] = [];
 	let parentId: string | null = null;
+	// The repair's `synthetic` marker is a memory-only fact. The session file
+	// records the answer as an ordinary error result, which is what a later load
+	// reads and what compaction matches against the file's own tail.
+	const stored = (message: AgentMessage): AgentMessage =>
+		message.role === "toolResult" && message.synthetic === true ? { ...message, synthetic: undefined } : message;
 	const push = (entry: SessionEntry): void => {
 		lines.push(JSON.stringify(entry));
 		parentId = entry.id;
@@ -3361,7 +3373,7 @@ export function renderHistorySession(session: HistorySession): string {
 			parentId: parent,
 			type: "message",
 			timestamp: entry.message.timestamp,
-			message: entry.message,
+			message: stored(entry.message),
 		});
 	});
 	return `${lines.join("\n")}\n`;

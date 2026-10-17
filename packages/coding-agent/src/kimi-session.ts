@@ -644,11 +644,13 @@ export function readKimiSession(session: KimiSessionFile): KimiRead | { error: s
 
 	const messages = carried.filter((item) => item.kind === "message").map((item) => item.entry.message);
 	fillToolNames(messages);
-	// The repair's own output is what goes in: a call whose result never came — and the
-	// result whose call never did — is a pair the provider would reject on the next
-	// request, which imports as a session that lists but cannot be resumed.
+	// The repair's own output is what goes in: a call whose result never came is
+	// answered with a synthetic error result, and the result whose call never did
+	// is dropped. Either half left alone is a pair the provider would reject on
+	// the next request, which imports as a session that lists but cannot be
+	// resumed.
 	const repaired = repairToolPairing(messages);
-	bump(counts, "unpaired tool call or result", repaired.dropped);
+	bump(counts, "unpaired tool call or result", repaired.dropped + repaired.synthesized);
 
 	// Boundaries keep their place among the messages, by the count of messages before each one.
 	// Long-form design notes: docs/dev/migration-sources.md
@@ -666,7 +668,7 @@ export function readKimiSession(session: KimiSessionFile): KimiRead | { error: s
 		});
 	}
 	if (markers.length > 0) {
-		if (repaired.dropped === 0) {
+		if (repaired.dropped === 0 && repaired.synthesized === 0) {
 			markers.sort((a, b) => a.after - b.after);
 			for (const [placed, marker] of markers.entries()) {
 				entries.splice(marker.after + placed, 0, marker.entry);

@@ -21,7 +21,13 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "@labunbun/ai";
-import { isContextOverflowError, textContent, toolResultMessage, userMessage } from "@labunbun/ai";
+import {
+	INTERRUPTED_TOOL_RESULT_TEXT,
+	isContextOverflowError,
+	textContent,
+	toolResultMessage,
+	userMessage,
+} from "@labunbun/ai";
 import { LENGTH_RECOVERY_MESSAGE } from "./compaction.ts";
 import { DEFAULT_MAX_CONCURRENCY, partitionToolCalls, Semaphore } from "./concurrency.ts";
 import { capRoundResults } from "./output-limits.ts";
@@ -956,12 +962,7 @@ export class AgentSession {
 		);
 		for (const block of assistant.content) {
 			if (block.type !== "toolCall" || existing.has(block.id)) continue;
-			const orphan = toolResultMessage(
-				block.id,
-				block.name,
-				[textContent("Tool execution was interrupted before completion.")],
-				true,
-			);
+			const orphan = toolResultMessage(block.id, block.name, [textContent(INTERRUPTED_TOOL_RESULT_TEXT)], true);
 			this.messages.push(orphan);
 			this.#store?.appendMessage(orphan);
 			// Recorded as it is written, so a second block carrying the same id —
@@ -992,7 +993,7 @@ function hasVisibleContent(message: AssistantMessage): boolean {
  * abandoned calls may only have a wire ToolCall block to hand.
  */
 function interruptedToolResult(callId: string, toolName: string): ToolResultMessage {
-	return toolResultMessage(callId, toolName, [textContent("Tool execution was interrupted before completion.")], true);
+	return toolResultMessage(callId, toolName, [textContent(INTERRUPTED_TOOL_RESULT_TEXT)], true);
 }
 
 function interruptedAssistant(model: Model, stopReason: "error" | "aborted", message?: string): AssistantMessage {

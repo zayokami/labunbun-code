@@ -25,7 +25,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
-import type { AgentMessage } from "@labunbun/ai";
+import { type AgentMessage, INTERRUPTED_TOOL_RESULT_TEXT } from "@labunbun/ai";
 import { type DshEntry, type DshRead, listDshSessions, readDshLog } from "../src/dsh-session.ts";
 import { type RunMigrationResult, runMigration } from "../src/migrate.ts";
 import { importedSessionId, listHistory, readHistory } from "../src/migrate-history.ts";
@@ -674,7 +674,7 @@ describe("migrate: history from DeepSeek Harness", () => {
 		});
 	});
 
-	test("a tool result whose call was never seen loses both halves, and says so", () => {
+	test("a tool call with no result is answered and a result with no call is dropped, and the note says so", () => {
 		withHome({}, (home) => {
 			const root = harnessRoot(home);
 			const path = writeSession(
@@ -691,10 +691,19 @@ describe("migrate: history from DeepSeek Harness", () => {
 
 			const read = logRead(path);
 			const messages = messagesOf(read.entries);
-			expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-			// The half-paired turn keeps its text and loses the call that answered
-			// nothing, exactly as the Codex reader does.
-			expect(messages[1].role === "assistant" && messages[1].content.map((block) => block.type)).toEqual(["text"]);
+			expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+			// The turn that made the call keeps its words and its call; the answer
+			// the provider expects is synthesized beside it, while the result that
+			// answered no call goes.
+			expect(messages[1].role === "assistant" && messages[1].content.map((block) => block.type)).toEqual([
+				"text",
+				"toolCall",
+			]);
+			const answered = messages[2];
+			if (answered.role !== "toolResult") throw new Error("expected the synthesized result");
+			expect(answered.toolCallId).toBe("orphan-call");
+			expect(answered.isError).toBe(true);
+			expect(answered.content).toEqual([{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }]);
 			const unpaired = read.notes.find((note) => note.reason.includes("unpaired"));
 			expect(unpaired?.count).toBe(2);
 		});

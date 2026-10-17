@@ -25,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@labunbun/ai";
+import { type AgentMessage, INTERRUPTED_TOOL_RESULT_TEXT } from "@labunbun/ai";
 import {
 	type KimiEntry,
 	type KimiRead,
@@ -774,10 +774,19 @@ describe("kimi: reading one session", () => {
 		// The journal is not the context: a cleared session imports with everything that
 		// was said (the fold's clear empties the context its own replay keeps), and the
 		// result the clear orphaned is counted rather than dropped in silence.
-		expect(messagesOf(read.entries).map(textOf)).toEqual(["first", "running it", "second", "second reply"]);
+		expect(messagesOf(read.entries).map(textOf)).toEqual([
+			"first",
+			// The call stays on the turn, so `textOf` joins its arguments after the
+			// sentence — the repair no longer removes it.
+			'running it\n{"command":"ls"}',
+			INTERRUPTED_TOOL_RESULT_TEXT,
+			"second",
+			"second reply",
+		]);
 		expect(note(read, "tool result with no open call")).toBe(1);
-		// The call the cleared context no longer holds goes with it, leaving the words the
-		// turn still has — the same repair a transcript read back from disk gets.
+		// The call the cleared context no longer holds keeps its turn and is answered
+		// with an error result beside it — the same repair a transcript read back from
+		// disk gets.
 		expect(note(read, "unpaired tool call or result")).toBe(1);
 	});
 
@@ -1275,7 +1284,7 @@ describe("kimi: reading one session", () => {
 		expect(note(read, "compaction that never completed")).toBe(1);
 	});
 
-	test("a boundary moves to the end when the repair pass dropped a message", () => {
+	test("a boundary moves to the end when the repair pass changed the stream", () => {
 		const root = freshRoot();
 		const head = [
 			metadata(),
@@ -1295,8 +1304,8 @@ describe("kimi: reading one session", () => {
 			lines: [
 				...head,
 				user("second"),
-				// A turn that asked for a tool whose result never came: the call goes, and
-				// the words the turn still has stay.
+				// A turn that asked for a tool whose result never came: the turn and its
+				// call stay, and an error result is synthesized beside them.
 				append({
 					role: "assistant",
 					content: [{ type: "text", text: "let me check that" }],
@@ -1310,12 +1319,22 @@ describe("kimi: reading one session", () => {
 		expect(note(intact, "unpaired tool call or result")).toBeUndefined();
 
 		const read = kimiRead(root, "s-repaired");
-		expect(messagesOf(read.entries).map(textOf)).toEqual(["first", "first reply", "second", "let me check that"]);
+		expect(messagesOf(read.entries).map(textOf)).toEqual([
+			"first",
+			"first reply",
+			"second",
+			// The call stays on the turn, so the joined text carries its arguments.
+			"let me check that\n{}",
+			INTERRUPTED_TOOL_RESULT_TEXT,
+		]);
+		const answered = messagesOf(read.entries)[4];
+		expect(answered.role === "toolResult" && answered.toolCallId).toBe("t-orphan");
+		expect(answered.role === "toolResult" && answered.isError).toBe(true);
 		expect(note(read, "unpaired tool call or result")).toBe(1);
 		// A boundary counts the messages that came before it, and the repair pass changed
 		// that count under it. A boundary landing mid-transcript with a suffix that no
 		// longer exists would resume the session with the wrong side of the summary, so a
 		// repaired transcript carries its boundaries at the end instead.
-		expect(read.entries.map(kindOf)).toEqual(["message", "message", "message", "message", "compaction"]);
+		expect(read.entries.map(kindOf)).toEqual(["message", "message", "message", "message", "message", "compaction"]);
 	});
 });

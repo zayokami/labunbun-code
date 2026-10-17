@@ -658,8 +658,9 @@ export function readDshLog(path: string): DshRead | { error: string } {
 	const messages: AgentMessage[] = [];
 	// A compaction boundary belongs where the harness put it: after the messages of
 	// the nodes before it. Its position is kept as an index into the message stream;
-	// if the repair pass drops something, the boundaries move to the end rather than
-	// land mid-stream (the same trade the ZCode reader makes).
+	// if the repair pass drops a message or inserts a synthetic result, the
+	// boundaries move to the end rather than land mid-stream (the same trade the
+	// ZCode reader makes).
 	const markers: Array<{ after: number; entry: DshEntry }> = [];
 	for (const entry of ordered) {
 		if (entry.kind === "message") messages.push(entry.message);
@@ -669,7 +670,7 @@ export function readDshLog(path: string): DshRead | { error: string } {
 	const repaired = repairToolPairing(rewriteToolNames(messages));
 	let entries: DshEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
 	if (markers.length > 0) {
-		if (repaired.dropped === 0) {
+		if (repaired.dropped === 0 && repaired.synthesized === 0) {
 			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
 				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
 			}
@@ -677,6 +678,6 @@ export function readDshLog(path: string): DshRead | { error: string } {
 			entries = [...entries, ...markers.map((marker) => marker.entry)];
 		}
 	}
-	bump(counts, "unpaired tool call or result", repaired.dropped);
+	bump(counts, "unpaired tool call or result", repaired.dropped + repaired.synthesized);
 	return { entries, notes: toNotes(counts) };
 }

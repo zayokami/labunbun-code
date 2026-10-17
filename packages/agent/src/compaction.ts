@@ -1053,12 +1053,20 @@ export class CompactionManager {
 			// value is the only place that answer exists, so it is read here and
 			// carried on the done phase. Undefined, not false, without a store:
 			// nothing was asked of a file that does not exist.
+			// A synthetic result the resume repair answered an interrupted call with
+			// was never written to the session file, so the file has no entry for it
+			// to match. `appendCompaction` verifies the suffix against the file's own
+			// tail, and a suffix carrying one would be refused — the file would keep
+			// the old transcript while the live context moved on. The record names
+			// the real tail; the in-memory transcript keeps the synthetic result,
+			// which is where the model needs it.
+			const recordedSuffix = suffix.filter((message) => !(message.role === "toolResult" && message.synthetic === true));
 			const recorded =
 				this.#deps.store === undefined
 					? undefined
 					: this.#deps.store.appendCompaction({
 							boundary,
-							suffix,
+							suffix: recordedSuffix,
 							summary,
 							preservedFiles,
 							preTokens,

@@ -123,6 +123,16 @@ export interface ToolResultMessage {
 	content: ToolResultContent[];
 	isError: boolean;
 	timestamp: number;
+	// Long-form design notes: docs/dev/ai-layer.md
+	/**
+	 * Set only on a result a transcript repair invented for an interrupted call.
+	 *
+	 * Memory-only: it is never written to a session file and never sent on the
+	 * wire — provider adapters read the roles and content they already know.
+	 * Compaction reads it to keep such a result out of the suffix it records,
+	 * because the file has no entry behind it to match against.
+	 */
+	synthetic?: true;
 }
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage;

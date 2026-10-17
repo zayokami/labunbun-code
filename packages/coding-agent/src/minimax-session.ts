@@ -294,10 +294,10 @@ export function readMinimaxSession(session: MinimaxSessionFile): MinimaxRead | {
 	const folded = foldRecords(records.value.records, counts);
 	for (const [reason, count] of records.value.notes) bump(counts, reason, count);
 	const repaired = repairToolPairing(folded.messages);
-	bump(counts, "unpaired tool call or result", repaired.dropped);
+	bump(counts, "unpaired tool call or result", repaired.dropped + repaired.synthesized);
 	// The marker goes first because the validator has already established that the
-	// boundary *is* the first record — the repair above can only remove messages
-	// after it.
+	// boundary *is* the first record — the repair above only removes or inserts
+	// messages after it, never before it.
 	const entries: MinimaxEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
 	if (folded.compaction) entries.unshift(folded.compaction);
 	return { entries, notes: toNotes(counts) };

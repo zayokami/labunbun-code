@@ -63,7 +63,7 @@ The registry lives in `packages/coding-agent/src/migrate-types.ts`. `MigrationSo
 
 The import writes session files for past conversations below `~/.labunbun/projects`, in the directory of the project they ran in. `packages/coding-agent/src/migrate-history.ts` holds all of the conversion.
 
-- The conversion is lossy on purpose. The reader drops encrypted thought text. It drops sidechains and subagent threads, and counts each. A tool call left without its result, or a result without its call, loses both halves. A shorter transcript is better than one that fails the API on the first `--continue`.
+- The conversion is lossy on purpose. The reader drops encrypted thought text. It drops sidechains and subagent threads, and counts each. A tool call left without its result keeps its turn and is answered with a synthetic error result, while a result without its call is dropped. A transcript the API rejects on the first `--continue` is worse than a repaired one, and deleting the turn cost the user the model's own words.
 - Two phases hold the design. `listHistory` lists candidates and opens no transcript. `readHistory` converts the chosen ones. `collectHistory` runs both with the user's choice between them.
 - The scope is `cwd`, `all` or `none`, and it defaults to `cwd`. Under `none` a source gives back nothing at all. The sentences `the user said no` and `there was nothing` must print differently.
 - `DEFAULT_HISTORY_LIMIT` is 20 sessions per source. `DEFAULT_PROMPT_HISTORY_LIMIT` is 500 prompts, and `PROMPT_HISTORY_BYTES` is 4 MiB.

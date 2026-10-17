@@ -29,7 +29,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@labunbun/ai";
+import { type AgentMessage, INTERRUPTED_TOOL_RESULT_TEXT } from "@labunbun/ai";
 import { COMMAND_CODE_DEFAULT_DIR } from "../src/command-code-home.ts";
 import { COMMAND_CODE_BRANCH_SUMMARY_LEAD, COMMAND_CODE_BRANCH_SUMMARY_TAIL } from "../src/command-code-session.ts";
 import { runMigration } from "../src/migrate.ts";
@@ -363,7 +363,7 @@ describe("reading a chosen session", () => {
 		expect(result?.content).toEqual([text("file body")]);
 	});
 
-	test("an unpaired call and an unpaired result both go, and the count says so", () => {
+	test("an unpaired call is answered and an unpaired result goes, and the count says so", () => {
 		const { home, cwd } = ccFixture();
 		writeSession(home, "unpaired", [
 			header("unpaired", cwd, at(0)),
@@ -380,15 +380,19 @@ describe("reading a chosen session", () => {
 		]);
 		const read = readOne(home, "unpaired");
 		const messages = messagesOf(read.sessions[0].entries);
-		expect(messages.flatMap(textsOf)).toEqual(["with text"]);
-		expect(
-			messages.every((message) => {
-				if (message.role === "toolResult") return false; // the orphan result's message went whole
-				const content = message.content;
-				if (typeof content === "string") return true; // a plain string holds no blocks at all
-				return content.every((block) => block.type !== "toolCall"); // and the orphan call was filtered out
-			}),
-		).toBe(true);
+		// The turn that asked for the tool keeps its words and its call; the orphan
+		// result — an answer to nothing — is the only message that goes.
+		expect(messages.map((message) => message.role)).toEqual(["assistant", "toolResult"]);
+		expect(messages[0].role === "assistant" && messages[0].content).toEqual([
+			text("with text"),
+			{ type: "toolCall", id: "tu-x", name: "Read", arguments: "{}" },
+		]);
+		const answered = messages[1];
+		if (answered.role !== "toolResult") throw new Error("expected the synthesized result");
+		expect(answered.toolCallId).toBe("tu-x");
+		expect(answered.toolName).toBe("Read");
+		expect(answered.isError).toBe(true);
+		expect(answered.content).toEqual([text(INTERRUPTED_TOOL_RESULT_TEXT)]);
 		expect(noteCount(read.notes, "unpaired tool call or result")).toBe(2);
 	});
 
@@ -575,15 +579,15 @@ describe("reading a chosen session", () => {
 	});
 
 	test("a drop in the middle shifts nothing: the entry list is built from the repaired stream", () => {
-		// The repair removes whole messages as well as blocks — an assistant turn
-		// that held nothing but an unpaired call goes entirely — and an entry list
-		// laid back over the *pre-repair* slots would hand the dropped slot's
-		// message to the next entry and end on an entry with no message at all.
+		// The repair can still remove a whole message — an unpaired result — and an
+		// entry list laid back over the *pre-repair* slots would hand the dropped
+		// slot's message to the next entry and end on an entry with no message at
+		// all.
 		const { home, cwd } = ccFixture();
 		writeSession(home, "mid-drop", [
 			header("mid-drop", cwd, at(0)),
 			messageEntry("e1", null, "user", [text("one")], { timestamp: at(1) }),
-			messageEntry("e2", "e1", "assistant", [{ type: "tool_use", id: "tu-x", name: "Read", input: {} }], {
+			messageEntry("e2", "e1", "user", [{ type: "tool_result", tool_use_id: "tu-other", content: "orphan" }], {
 				timestamp: at(2),
 			}),
 			messageEntry("e3", "e2", "user", [text("two")], { timestamp: at(3) }),
@@ -595,11 +599,11 @@ describe("reading a chosen session", () => {
 		expect(noteCount(read.notes, "unpaired tool call or result")).toBeGreaterThan(0);
 	});
 
-	test("when the repair drops something, a compaction mark moves to the end rather than land mid-stream", () => {
+	test("when the repair changes the stream, a compaction mark moves to the end rather than land mid-stream", () => {
 		// The documented trade (the dsh and ZCode readers make the same one): a
-		// marker's exact offset is unrecoverable once messages are gone, and a
-		// marker claiming the wrong boundary would misstate which turns the
-		// product summarized.
+		// marker's exact offset is unrecoverable once a message is gone or a
+		// synthetic result inserted, and a marker claiming the wrong boundary
+		// would misstate which turns the product summarized.
 		const { home, cwd } = ccFixture();
 		writeSession(home, "mark-trade", [
 			header("mark-trade", cwd, at(0)),
@@ -611,8 +615,8 @@ describe("reading a chosen session", () => {
 			messageEntry("e4", "e3", "user", [text("two")], { timestamp: at(4) }),
 		]);
 		const entries = readOne(home, "mark-trade").sessions[0].entries;
-		expect(entries.map((item) => item.kind)).toEqual(["message", "message", "compaction"]);
-		expect(messagesOf(entries).flatMap(textsOf)).toEqual(["one", "two"]);
+		expect(entries.map((item) => item.kind)).toEqual(["message", "message", "message", "message", "compaction"]);
+		expect(messagesOf(entries).flatMap(textsOf)).toEqual(["one", INTERRUPTED_TOOL_RESULT_TEXT, "two"]);
 	});
 
 	test("a session that moved since the listing is reported by that fact", () => {

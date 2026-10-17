@@ -40,7 +40,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentMessage } from "@labunbun/ai";
+import { type AgentMessage, INTERRUPTED_TOOL_RESULT_TEXT } from "@labunbun/ai";
 import {
 	listMinimaxSessions,
 	type MinimaxEntry,
@@ -667,7 +667,7 @@ describe("minimax: folding a canonical session", () => {
 		expect(textOf(messagesOf(read.entries)[0])).toBe("hello");
 	});
 
-	test("a tool pairing that never finished is repaired, and the text the user saw is kept", () => {
+	test("a tool pairing that never finished is answered, and the text the user saw is kept", () => {
 		const root = freshRoot();
 		writeSession(root, {
 			messages: [
@@ -688,17 +688,26 @@ describe("minimax: folding a canonical session", () => {
 		const read = minimaxRead(root);
 		// The tool's own read of a session the user quit mid-run keeps that message and
 		// reports no issue for it; the target, though, refuses a transcript holding a
-		// call with no result, so the call goes and the sentence stays. The count is
-		// what tells the report how much of the tail never returned.
+		// call with no result, so the call keeps its turn and an error result is
+		// synthesized beside it. The count is what tells the report how much of the
+		// tail never returned.
 		expect(note(read, "unpaired tool call or result")).toBe(1);
-		expect(kindsOf(read.entries)).toEqual(["message", "message"]);
+		expect(kindsOf(read.entries)).toEqual(["message", "message", "message"]);
 		const last = messagesOf(read.entries)[1];
 		if (last.role !== "assistant") throw new Error("expected an assistant message");
-		expect(last.content).toEqual([{ type: "text", text: "running the build" }]);
+		expect(last.content).toEqual([
+			{ type: "text", text: "running the build" },
+			{ type: "toolCall", id: "call-lost", name: "bash", arguments: '{"command":"make"}' },
+		]);
 		expect(last.stopReason).toBe("toolUse");
+		const answered = messagesOf(read.entries)[2];
+		if (answered.role !== "toolResult") throw new Error("expected the synthesized result");
+		expect(answered.toolCallId).toBe("call-lost");
+		expect(answered.isError).toBe(true);
+		expect(answered.content).toEqual([{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }]);
 	});
 
-	test("an assistant turn that held nothing but the lost call is dropped whole", () => {
+	test("an assistant turn that held nothing but the lost call keeps that turn and is answered", () => {
 		const root = freshRoot();
 		writeSession(root, {
 			messages: [
@@ -711,11 +720,14 @@ describe("minimax: folding a canonical session", () => {
 			],
 		});
 		const read = minimaxRead(root);
-		// An assistant message with no content is not a valid message at all: the repair
-		// drops both the call and the turn that held only it.
-		expect(note(read, "unpaired tool call or result")).toBe(2);
-		expect(messagesOf(read.entries).length).toBe(1);
+		// The call is the turn's only content, and it is still content: the turn stays
+		// and the answer the provider requires is synthesized after it.
+		expect(note(read, "unpaired tool call or result")).toBe(1);
+		expect(kindsOf(read.entries)).toEqual(["message", "message", "message"]);
 		expect(textOf(messagesOf(read.entries)[0])).toBe("go");
+		const answered = messagesOf(read.entries)[2];
+		if (answered.role !== "toolResult") throw new Error("expected the synthesized result");
+		expect(answered.toolCallId).toBe("call-lost");
 	});
 
 	test("an orphan tool result is repaired away rather than refusing the session", () => {

@@ -656,7 +656,7 @@ class AcpAgent implements acp.Agent {
 		// The same disclosure the terminal resume prints, on stderr because stdout
 		// is frames only: a resumed conversation that is shorter than it was must
 		// not be presented as whole.
-		const damage = damagedSessionNotice(loaded.store, loaded.removed);
+		const damage = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
 		if (damage) process.stderr.write(`Warning: ${damage}\n`);
 
 		const live = await this.#createSession(cwd, loaded);

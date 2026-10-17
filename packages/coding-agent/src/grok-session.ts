@@ -535,7 +535,7 @@ export function readGrokSession(session: GrokSessionFile): GrokRead | { error: s
 
 	const messages = assemble(kept, counts);
 	const repaired = repairToolPairing(messages);
-	bump(counts, "unpaired tool call or result", repaired.dropped);
+	bump(counts, "unpaired tool call or result", repaired.dropped + repaired.synthesized);
 
 	const entries: GrokEntry[] = [...readSegments(session.dir)];
 	for (const message of repaired.messages) entries.push({ kind: "message", message });

@@ -13,7 +13,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentSession, CompactionManager, SessionStore } from "@labunbun/agent";
-import { type AgentMessage, assistantMessage, type Context, userMessage } from "@labunbun/ai";
+import {
+	type AgentMessage,
+	assistantMessage,
+	type Context,
+	INTERRUPTED_TOOL_RESULT_TEXT,
+	userMessage,
+} from "@labunbun/ai";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { rewriteCause } from "../src/cache-report.ts";
 import { builtInCommands } from "../src/commands.ts";
@@ -218,7 +224,8 @@ describe("/fork", () => {
 		// A fork point can sit right after a tool_use whose result lives on the
 		// branch being left — the same half-pair a damaged line leaves behind.
 		// Taken raw it would be the transcript's next request, which the provider
-		// rejects; the repair drops both halves like every other read back.
+		// rejects; the repair keeps the turn and answers its call, like every other
+		// read back.
 		const notes: Notes = { causes: [] };
 		const branchMsg = userMessage("from the branch");
 		const orphaned = assistantMessage({
@@ -232,6 +239,18 @@ describe("/fork", () => {
 
 		expect(handleAppCommand("/fork abc12345", ctx)).toBe(true);
 
-		expect(ctx.getSession()?.messages).toEqual([branchMsg]);
+		expect(ctx.getSession()?.messages).toEqual([
+			branchMsg,
+			orphaned,
+			{
+				role: "toolResult",
+				toolCallId: "t9",
+				toolName: "Read",
+				isError: true,
+				content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
+				timestamp: orphaned.timestamp,
+				synthetic: true,
+			},
+		]);
 	});
 });

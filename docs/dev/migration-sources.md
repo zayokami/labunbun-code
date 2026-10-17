@@ -2113,14 +2113,14 @@ That is the failure `qoder-read.ts` documents in its own header, and a first dra
 **The boundaries, and the repair**
 
 - A compaction boundary keeps its place among the messages. Each one is carried as the number of messages that came before it. The messages are laid out in one pass, so that index is exact.
-- If the repair pass dropped anything, every boundary moves to the end instead of a place mid-transcript. A boundary whose suffix no longer exists is worse than a late one, and the ZCode and dsh readers make the same trade.
+- If the repair pass changed the stream — a message dropped or a synthetic result inserted — every boundary moves to the end instead of a place mid-transcript. A boundary whose suffix no longer exists is worse than a late one, and the ZCode and dsh readers make the same trade.
 - Two boundaries can share a position. The records of a compaction land where the records of one before it already sit. A rewind between them removed every message that did separate them.
 - They are inserted in the order the journal wrote them, and each position takes the count of messages before it plus the boundaries already placed. So the newest is the last.
 - The newest is the one a resumed session starts from. The target reads its context from the final boundary onward, and the newest summary stands for everything the older ones described.
 - The `fillToolNames` function fills a tool result's tool name from the call it answers, in place. The journal records the name on the call, and a result that renders unnamed is one the user cannot recognise.
 - In place rather than as a new array, because the messages are already held by the transcript's entries. A new array leaves the imported entries on the unnamed originals.
 - A tool name the source did not record gets the stand-in `unknown`, and `fillToolNames` replaces it when a call names it.
-- The output of `repairToolPairing` is what goes in, and its dropped count is reported. A call whose result never came, and the result whose call never did, is a pair the provider rejects on the next request. Such a session lists but cannot be resumed.
+- The output of `repairToolPairing` is what goes in. A call whose result never came keeps its turn and is answered with a synthetic error result (`synthetic: true` in memory; the rendered session file records it as an ordinary error result), while a result whose call never did is dropped. Both are counted: `dropped` keeps the block-and-turn count the reports have always used, `synthesized` counts the answered calls, and the note reports their sum. An unpaired half is a pair the provider rejects on the next request; such a session lists but cannot be resumed.
 - Every other record is not conversation: prompts, model requests, usage, goals, permissions, the tool store, and the agent and workspace records. None of them can add, remove or rewrite a message, so the report counts none of them as a loss. A count of every record in a long session buries the real skips.
 - A session with a `forkedFrom` value imports whole, and the report says whose words are in it. The inherited prefix cannot be told apart from the turns the user typed. A fork copies the parent's records into its own journal, ids and all.
 

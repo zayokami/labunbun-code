@@ -8,7 +8,9 @@ import {
 	assistantMessage,
 	FAUX_MODEL,
 	fauxProvider,
+	INTERRUPTED_TOOL_RESULT_TEXT,
 	MessageBuilder,
+	repairToolPairing,
 	textContent,
 	toolResultMessage,
 	userMessage,
@@ -1127,6 +1129,54 @@ describe("CompactionManager", () => {
 		// And nothing landed in the file — the flag is the only trace, which is
 		// exactly why it has to reach the report.
 		expect(store.compactions()).toHaveLength(0);
+	});
+
+	test("a synthetic result from a resume is kept in memory but never claimed by the file's record", async () => {
+		// A resume answers an interrupted call in memory; `appendMessage` cannot
+		// insert mid-stream, so the session file has no entry behind the synthetic
+		// result. The record names the file's real tail instead: a suffix carrying
+		// the synthetic would be refused, and the next resume would replay the old
+		// file as if no summary had run.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-compact-")),
+			mkdtempSync(join(tmpdir(), "lbb-compact-home-")),
+		);
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			store,
+		});
+		const earlier = userMessage("the earlier request");
+		const settled = assistantMessage({ content: [{ type: "text", text: "ok" }] });
+		const request = userMessage("run it");
+		const call = assistantMessage({
+			content: [{ type: "toolCall", id: "t1", name: "Read", arguments: "{}" }],
+			stopReason: "toolUse",
+		});
+		for (const message of [earlier, settled, request, call]) store.appendMessage(message);
+		const synthetic: AgentMessage = {
+			...toolResultMessage("t1", "Read", [textContent(INTERRUPTED_TOOL_RESULT_TEXT)], true, call.timestamp),
+			synthetic: true,
+		};
+		const compacted = await manager.compact(
+			{ systemPrompt: "sys", messages: [earlier, settled, request, call, synthetic] },
+			{ trigger: "manual" },
+		);
+
+		expect(manager.lastVerification()?.recorded).toBe(true);
+		expect(store.compactions()).toHaveLength(1);
+		// The live transcript keeps the answer the provider requires.
+		expect(compacted.messages.some((message) => message.role === "toolResult" && message.toolCallId === "t1")).toBe(
+			true,
+		);
+		// The file keeps the messages that existed on disk; the repair answers the
+		// call again on the next read, which is what keeps the two copies in step.
+		const context = SessionStore.load(store.path).contextMessages();
+		expect(context.some((message) => message.role === "toolResult" && message.toolCallId === "t1")).toBe(false);
+		const repaired = repairToolPairing(context);
+		const answered = repaired.messages.find((message) => message.role === "toolResult" && message.toolCallId === "t1");
+		expect(answered?.role === "toolResult" ? answered.isError : false).toBe(true);
+		expect(repaired.synthesized).toBe(1);
 	});
 
 	test("the summary request itself shrinks instead of failing when it is too large", async () => {

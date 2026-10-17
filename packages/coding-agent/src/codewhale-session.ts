@@ -411,18 +411,17 @@ export function readCodewhaleSession(session: CodewhaleSessionFile): CodewhaleRe
 		bump(`\`${role}\` message, which this build has no role for mid-conversation`);
 	}
 
-	// **Both halves of an unpaired tool call go.** `repairToolPairing` is the
-	// shared repair and the reason it is the right one: a transcript that half-pairs
-	// a call would be rejected by the messages API on the first `--continue`, which
-	// is worse than a shorter transcript.
+	// **An interrupted call is answered; an unpaired result is dropped.**
+	// `repairToolPairing` is the shared repair and the reason it is the right one:
+	// a transcript that half-pairs a call would be rejected by the messages API on
+	// the first `--continue`. The call stays with the synthetic error result the
+	// repair puts after it, so the turn that asked for the tool keeps its words.
 	const repaired = repairToolPairing(collected);
-	if (repaired.dropped > 0) {
-		counts.set(
-			"tool call or result whose other half was not in the transcript — both were dropped, because a half-paired call is one the messages API rejects",
-			(counts.get(
-				"tool call or result whose other half was not in the transcript — both were dropped, because a half-paired call is one the messages API rejects",
-			) ?? 0) + repaired.dropped,
-		);
+	const unpaired = repaired.dropped + repaired.synthesized;
+	if (unpaired > 0) {
+		const reason =
+			"tool call or result whose other half was not in the transcript — an interrupted call is answered with an error result, and a result with no call is dropped";
+		counts.set(reason, (counts.get(reason) ?? 0) + unpaired);
 	}
 	return {
 		entries: repaired.messages.map((message) => ({ kind: "message" as const, message })),
@@ -458,6 +457,7 @@ function codewhaleToolResult(
 	if (name === undefined) {
 		// Not a failure: `repairToolPairing` will drop this result anyway if its
 		// call is missing, and reporting it here would say the same thing twice.
+		// (A call whose result is missing is answered by that repair instead.)
 		bump("tool result whose call is not in this transcript");
 	}
 	const content: ToolResultContent[] = [];
