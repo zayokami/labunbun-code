@@ -254,26 +254,6 @@ describe("a `-p` run that runs out of room", () => {
 	});
 });
 
-/**
- * Wait for a file a hook writes outside the awaited path.
- *
- * `onPhase` is synchronous by contract, so the `PostCompact` run it starts is
- * not awaited by the manager: the run can return before the hook has finished.
- * Polling is the only honest way to observe it — a fixed sleep would either be
- * slower than needed or flake on a loaded machine.
- */
-async function waitForFile(path: string, timeoutMs = 20_000): Promise<string> {
-	const deadline = Date.now() + timeoutMs;
-	for (;;) {
-		try {
-			return readFileSync(path, "utf8");
-		} catch {
-			if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
-			await new Promise((resolve) => setTimeout(resolve, 50));
-		}
-	}
-}
-
 /** The session file's entries, as the store wrote them. */
 function sessionEntries(f: Fixture): Array<{ type?: string; trigger?: string }> {
 	const [session] = SessionStore.listSessions(f.cwd, f.home);
@@ -339,7 +319,10 @@ describe("the compaction hooks in a `-p` run", () => {
 		const compaction = sessionEntries(f).find((entry) => entry.type === "compaction");
 		expect(compaction?.trigger).toBe("overflow");
 
-		const payload = JSON.parse(await waitForFile(marker)) as {
+		// Read without polling: the phase callback is awaited through to the
+		// manager, so the hook has finished by the time the run returns. A poll
+		// here would hide exactly the exit race this contract closes.
+		const payload = JSON.parse(readFileSync(marker, "utf8")) as {
 			event?: string;
 			session_id?: string;
 			cwd?: string;

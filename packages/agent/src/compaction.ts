@@ -725,8 +725,15 @@ export interface CompactionManagerDeps {
 	 * and an empty `baseUrl`, which is a request that can never be sent.
 	 */
 	summarizerModel: Model;
-	/** Watch a summarization happen. Never consulted for a decision. */
-	onPhase?: (phase: CompactionPhase) => void;
+	/**
+	 * Watch a summarization happen. Never consulted for a decision.
+	 *
+	 * Awaited, so a listener that has work to finish — the `PostCompact` hook a
+	 * `-p` run fires on `done` — completes before the pass returns and before
+	 * the process that ran it can exit. A listener that is synchronous costs an
+	 * `await` on an already-settled value.
+	 */
+	onPhase?: (phase: CompactionPhase) => void | Promise<void>;
 	/**
 	 * Called immediately before each summarization request is sent.
 	 *
@@ -1026,12 +1033,12 @@ export class CompactionManager {
 			// Before the call, not after: this is the last moment at which the wait
 			// it announces has not started, and the wait is the whole point of saying
 			// it — a summary is a full-prefix request that can take half a minute.
-			this.#deps.onPhase?.({ kind: "preparing" });
+			await this.#deps.onPhase?.({ kind: "preparing" });
 			const { summary, model } = await this.#summarize(context, prefix, options.focus, options.signal);
 			// The reply is in; what remains is rebuilding the transcript it replaces
 			// — boundary, re-injected files, retained suffix. Quick, but it is still
 			// the pass working, and the last chance to say the pass has not ended.
-			this.#deps.onPhase?.({ kind: "resuming" });
+			await this.#deps.onPhase?.({ kind: "resuming" });
 			const reinjected = this.#reinjectFiles(prefix);
 			const boundary = compactionBoundary(summary, {
 				reinjected,
@@ -1106,7 +1113,7 @@ export class CompactionManager {
 			this.#lastVerification = verification;
 			// After the record, so a listener that reads the store's compaction list
 			// on this news sees the one being reported rather than the previous one.
-			this.#deps.onPhase?.({ kind: "done", preTokens, postTokens: this.#lastPostTokens, trigger, verification });
+			await this.#deps.onPhase?.({ kind: "done", preTokens, postTokens: this.#lastPostTokens, trigger, verification });
 
 			return { ...context, messages };
 		} catch (error) {
@@ -1114,7 +1121,7 @@ export class CompactionManager {
 			// Esc presses trip the breaker and switch automatic compaction off for
 			// the session, punishing the summarizer for the user's change of mind.
 			if (!options.signal?.aborted) this.#consecutiveFailures++;
-			this.#deps.onPhase?.({ kind: "failed", trigger });
+			await this.#deps.onPhase?.({ kind: "failed", trigger });
 			throw error;
 		}
 	}
@@ -1222,7 +1229,7 @@ export class CompactionManager {
 			// first byte arrives: to a watcher those are the two different waits —
 			// a request being accepted, then a reply being written — and `attempt`
 			// is what tells a descent down the ladder from the first try.
-			this.#deps.onPhase?.({ kind: "summarizing", attempt: retries + 1, mode: "requesting" });
+			await this.#deps.onPhase?.({ kind: "summarizing", attempt: retries + 1, mode: "requesting" });
 			// Before the send, not after: the tracker reads the cause the next
 			// recorded request consumes, and for this attempt that request is the
 			// one about to go out.
@@ -1246,7 +1253,7 @@ export class CompactionManager {
 				if (event.type === "text_delta") {
 					if (!announcedResponse) {
 						announcedResponse = true;
-						this.#deps.onPhase?.({ kind: "summarizing", attempt: retries + 1, mode: "responding" });
+						await this.#deps.onPhase?.({ kind: "summarizing", attempt: retries + 1, mode: "responding" });
 					}
 					text += event.delta;
 				}
@@ -1286,7 +1293,7 @@ export class CompactionManager {
 				// validating step a failure skips would leave the two endings without
 				// the one step they share. A reply that came back empty is announced
 				// here as nothing to keep, and then fails — in that order.
-				this.#deps.onPhase?.({ kind: "validating", summaryChars: summary.length });
+				await this.#deps.onPhase?.({ kind: "validating", summaryChars: summary.length });
 				if (!text.trim()) throw new Error("compaction produced empty summary");
 				return { summary, model: servedBy };
 			}

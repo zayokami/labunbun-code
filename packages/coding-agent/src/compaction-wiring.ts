@@ -310,7 +310,7 @@ export interface CompactionWiringOptions {
 	 * Without one, each phase is reported through `report` as text, which is what
 	 * a `-p` run and a subagent want.
 	 */
-	onPhase?: (phase: CompactionPhase) => void;
+	onPhase?: (phase: CompactionPhase) => void | Promise<void>;
 }
 
 export interface CompactionWiring {
@@ -352,9 +352,11 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 		// to change this very setting: the crossing already announced belonged to
 		// the last manager, so the next one starts with its notice unspent.
 		disabledWarned = false;
-		const phase = (event: CompactionPhase): void => {
+		const phase = async (event: CompactionPhase): Promise<void> => {
 			if (options.onPhase) {
-				options.onPhase(event);
+				// Awaited through to the manager, so a `PostCompact` hook a `-p`
+				// run starts here cannot outlive the pass that caused it.
+				await options.onPhase(event);
 			} else {
 				const text = compactionPhaseText(event);
 				if (text) options.report(text);

@@ -1213,7 +1213,9 @@ describe("CompactionManager", () => {
 			summarizerModel: SUMMARIZER,
 			store,
 			readFile: (path) => (path === "/present.ts" ? "const answer = 42;" : null),
-			onPhase: (phase) => phases.push(phase),
+			onPhase: (phase) => {
+				phases.push(phase);
+			},
 		});
 		const messages: AgentMessage[] = [
 			userMessage("the earlier request"),
@@ -1264,7 +1266,9 @@ describe("CompactionManager", () => {
 			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn,
 			summarizerModel: SUMMARIZER,
 			store,
-			onPhase: (phase) => phases.push(phase),
+			onPhase: (phase) => {
+				phases.push(phase);
+			},
 		});
 		const messages: AgentMessage[] = [userMessage("one"), assistantMessage({}), userMessage("two")];
 		// Deliberately not appended to the store: the file's tail is empty.

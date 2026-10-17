@@ -62,7 +62,9 @@ function watcher(options: { streamFn?: StreamFn; store?: SessionStore } = {}) {
 			streamFn,
 			summarizerModel: SUMMARIZER,
 			store,
-			onPhase: (phase) => phases.push(phase),
+			onPhase: (phase) => {
+				phases.push(phase);
+			},
 		}),
 	};
 }

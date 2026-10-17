@@ -119,7 +119,11 @@ function wiring(
 		spillOutput: options.spillOutput,
 		noteRewrite: (cause) => causes.push(cause),
 		onContextReduced: () => reducedClears++,
-		onPhase: options.phases ? (phase) => options.phases?.push(phase) : undefined,
+		onPhase: options.phases
+			? (phase) => {
+					options.phases?.push(phase);
+				}
+			: undefined,
 	});
 	return {
 		check: created.checkCompaction as Harness["check"],
