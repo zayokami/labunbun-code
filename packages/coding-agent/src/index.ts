@@ -1,5 +1,7 @@
-export const CODING_AGENT_VERSION = "0.1.0";
-export const CLI_NAME = "labunbun";
+// Kept in a module with no other imports so `main.ts` can read the version and
+// answer `--version` without loading the rest of this package. Re-exported here
+// so the public API is unchanged.
+export { CLI_NAME, CODING_AGENT_VERSION } from "./cli-constants.ts";
 
 export {
 	type AppliedResult,

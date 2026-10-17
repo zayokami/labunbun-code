@@ -1,22 +1,20 @@
 #!/usr/bin/env bun
+// Only the constants module and erased type imports are static: `--version` and
+// `--help` must not pay for the engine, the TUI or any mode implementation.
+// Everything else is imported inside the branch that needs it.
 import {
+	CLI_NAME,
+	CODING_AGENT_VERSION,
+	DEFAULT_HISTORY_LIMIT,
 	DEFAULT_MODE_CHOICE,
+	MIGRATION_SOURCE_IDS,
 	NETWORK_SANDBOX_POLICIES,
 	type NetworkSandboxPolicy,
 	PERMISSION_MODES,
 	type PermissionMode,
 	SANDBOX_MODES,
 	type SandboxMode,
-} from "@labunbun/agent";
-import { chunkWritesForConPTY, isConPTYHost } from "@labunbun/tui";
-import { runAcp } from "./acp.ts";
-import { runChatGptLoginCli, runChatGptLogoutCli } from "./chatgpt-login.ts";
-import { runClaudeLoginCli, runClaudeLogoutCli } from "./claude-login.ts";
-import { runGeminiLoginCli, runGeminiLogoutCli } from "./gemini-login.ts";
-import { runHeadless } from "./headless.ts";
-import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
-import { runInteractive } from "./interactive.ts";
-import { DEFAULT_HISTORY_LIMIT, MIGRATION_SOURCE_IDS, runMigration } from "./migrate.ts";
+} from "./cli-constants.ts";
 import type { RawSettingsInput } from "./settings.ts";
 
 /**
@@ -354,12 +352,14 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	// 8 KiB raw. That is byte-preserving over a pipe (measured), and it is an
 	// accident of type coercion either way; the ACP path keeps its frames away
 	// from it.
+	const { chunkWritesForConPTY, isConPTYHost } = await import("@labunbun/tui");
 	if (isConPTYHost() && args.subcommand !== "acp") chunkWritesForConPTY(process.stdout);
 
 	// Subcommands run before model resolution and the API-key check: importing a
 	// configuration is exactly what someone does when they have no working
 	// configuration yet, so it must not require one.
 	if (args.subcommand === "yoshi") {
+		const { runMigration } = await import("./migrate.ts");
 		const result = runMigration({
 			from: args.from ?? undefined,
 			apply: args.apply,
@@ -382,13 +382,27 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	// provider word — absent, or `claude` — selects the Claude flow the bare
 	// forms have always run; `gemini` selects the Gemini one.
 	if (args.subcommand === "login") {
-		if (args.loginProvider === "chatgpt") return runChatGptLoginCli({ home: options.home });
-		if (args.loginProvider === "gemini") return runGeminiLoginCli({ home: options.home });
+		if (args.loginProvider === "chatgpt") {
+			const { runChatGptLoginCli } = await import("./chatgpt-login.ts");
+			return runChatGptLoginCli({ home: options.home });
+		}
+		if (args.loginProvider === "gemini") {
+			const { runGeminiLoginCli } = await import("./gemini-login.ts");
+			return runGeminiLoginCli({ home: options.home });
+		}
+		const { runClaudeLoginCli } = await import("./claude-login.ts");
 		return runClaudeLoginCli({ home: options.home });
 	}
 	if (args.subcommand === "logout") {
-		if (args.loginProvider === "chatgpt") return runChatGptLogoutCli({ home: options.home });
-		if (args.loginProvider === "gemini") return runGeminiLogoutCli({ home: options.home });
+		if (args.loginProvider === "chatgpt") {
+			const { runChatGptLogoutCli } = await import("./chatgpt-login.ts");
+			return runChatGptLogoutCli({ home: options.home });
+		}
+		if (args.loginProvider === "gemini") {
+			const { runGeminiLogoutCli } = await import("./gemini-login.ts");
+			return runGeminiLogoutCli({ home: options.home });
+		}
+		const { runClaudeLogoutCli } = await import("./claude-login.ts");
 		return runClaudeLogoutCli({ home: options.home });
 	}
 
@@ -466,6 +480,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			console.error(`${stray.join(", ")} cannot be combined with \`acp\` (see --help)`);
 			return 2;
 		}
+		const { runAcp } = await import("./acp.ts");
 		return runAcp({
 			modelRef: args.model ?? undefined,
 			permissionMode: flags.mode,
@@ -502,6 +517,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			console.error(`--no-session cannot be combined with ${sessionFlags.join(", ")} (see --help)`);
 			return 2;
 		}
+		const { runHeadless } = await import("./headless.ts");
 		return runHeadless({
 			prompt: args.print,
 			modelRef: args.model ?? undefined,
@@ -527,6 +543,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	}
 
 	console.log(`${CLI_NAME} ${CODING_AGENT_VERSION} — starting interactive mode…`);
+	const { runInteractive } = await import("./interactive.ts");
 	return runInteractive({
 		modelRef: args.model ?? undefined,
 		permissionMode: flags.mode,
