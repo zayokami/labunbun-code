@@ -13,8 +13,10 @@ import {
 	shortenHome,
 } from "../src/interactive.ts";
 import {
+	buildTruncationNotice,
 	expandIncludes,
 	loadMemoryFiles,
+	selectMemoryContent,
 	userMemoryPath,
 	userRulesDir,
 	withheldProjectMemoryFiles,
@@ -172,7 +174,7 @@ describe("loadMemoryFiles", () => {
 		expect(result.truncated).toBe(false);
 	});
 
-	test("oversized memory is truncated at the 40k cap with a notice", () => {
+	test("a single oversized file is partial, names itself, and omits nothing", () => {
 		const home = mkdtempSync(join(tmpdir(), "lbb-memcap-"));
 		const cwd = mkdtempSync(join(tmpdir(), "lbb-memcap2-"));
 		mkdirSync(join(home, ".labunbun"), { recursive: true });
@@ -180,8 +182,144 @@ describe("loadMemoryFiles", () => {
 
 		const result = loadMemoryFiles(cwd, home);
 		expect(result.truncated).toBe(true);
-		expect(result.content.length).toBeLessThanOrEqual(40_000 + 100); // cap + notice line
-		expect(result.content).toContain("[memory files truncated");
+		// The cap counts the whole string: separators and the note included.
+		expect(result.content.length).toBeLessThanOrEqual(40_000);
+		expect(result.content).toContain("source completeness note");
+		expect(result.partialFiles).toEqual([userMemoryPath(home)]);
+		expect(result.omittedFiles).toEqual([]);
+		// Home paths are shown as `~/...`, not as an absolute path.
+		expect(result.content).toContain("~/.labunbun/MEMORY.md");
+	});
+
+	test("no memory files yields exactly the empty string, with no note", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-memempty2-home-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-memempty2-cwd-"));
+		// The project walk is untrusted with a fresh home, so ancestor fixtures
+		// on this machine cannot leak into the answer: the user tier is empty.
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).toBe("");
+		expect(result.files).toEqual([]);
+		expect(result.truncated).toBe(false);
+	});
+
+	test("an untrusted project never appears in the completeness note", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-memgate3-home-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-memgate3-cwd-"));
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		writeFileSync(join(home, ".labunbun", "MEMORY.md"), "x".repeat(60_000));
+		writeFileSync(join(cwd, "LABUNBUN.md"), "PROJECT-SECRET");
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.truncated).toBe(true);
+		// The note is built from loaded candidates only; a withheld path stays
+		// out of the prompt even as a name.
+		expect(result.content).not.toContain("LABUNBUN.md");
+		expect(result.content).not.toContain(cwd);
+		expect(result.files).not.toContain(join(cwd, "LABUNBUN.md"));
+		expect(withheldProjectMemoryFiles(cwd, home)).toContain(join(cwd, "LABUNBUN.md"));
+	});
+});
+
+describe("selectMemoryContent", () => {
+	test("the separator is charged before the next file, so no empty partial is reported", () => {
+		// 5 chars of content, then a 7-char separator leaves exactly 0 for `b`:
+		// that is an omitted file, not a partial file with an empty prefix.
+		const exact = selectMemoryContent(
+			[
+				{ path: "a.md", content: "12345" },
+				{ path: "b.md", content: "x" },
+			],
+			12,
+		);
+		expect(exact.parts.map((part) => part.path)).toEqual(["a.md"]);
+		expect(exact.omitted).toEqual(["b.md"]);
+
+		// One more character of budget and the same file is a one-character partial.
+		const partial = selectMemoryContent(
+			[
+				{ path: "a.md", content: "12345" },
+				{ path: "b.md", content: "xyz" },
+			],
+			13,
+		);
+		expect(partial.parts[1]).toMatchObject({ path: "b.md", content: "x", partial: true });
+		expect(partial.omitted).toEqual([]);
+	});
+
+	test("a partial file stops the walk; every farther file is omitted", () => {
+		const selection = selectMemoryContent(
+			[
+				{ path: "first.md", content: "0123456789" },
+				{ path: "second.md", content: "0123456789" },
+				{ path: "third.md", content: "0123456789" },
+			],
+			18,
+		);
+		expect(selection.parts).toHaveLength(2);
+		expect(selection.parts[1]?.partial).toBe(true);
+		expect(selection.omitted).toEqual(["third.md"]);
+		expect(selection.length).toBeLessThanOrEqual(18);
+	});
+});
+
+describe("the completeness note", () => {
+	const home = join("users", "me");
+	const cwd = join("work", "repo");
+
+	test("names at most eight paths in total and folds the rest into and N more", () => {
+		const omitted = Array.from({ length: 12 }, (_, index) => join(cwd, `note-${index}.md`));
+		const notice = buildTruncationNotice([], omitted, cwd, home);
+		expect(notice.match(/note-\d+\.md/g)).toHaveLength(8);
+		expect(notice).toContain("and 4 more");
+	});
+
+	test("sanitizes newlines, control characters and brackets, and keeps home/cwd forms", () => {
+		const partial = [join(home, ".labunbun", "MEMORY.md")];
+		const omitted = [join(cwd, "odd\nname\u0007[evil].md")];
+		const notice = buildTruncationNotice(partial, omitted, cwd, home);
+		expect(notice).toContain("~/.labunbun/MEMORY.md");
+		expect(notice).toContain("odd name (evil).md");
+		expect(notice).not.toContain("\n");
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: the assertion is that no control character survived
+		expect(/[\u0000-\u001f\u007f-\u009f]/.test(notice)).toBe(false);
+	});
+
+	test("is phrased as a source note, not a request to read the files", () => {
+		const notice = buildTruncationNotice([], [join(cwd, "AGENTS.md")], cwd, home);
+		expect(notice).toContain("source completeness note");
+		expect(notice).toContain("not an instruction to read those files");
+	});
+});
+
+describe("loadMemoryFiles, continued", () => {
+	/**
+	 * The budget is allocated nearest-first even though the prompt renders
+	 * farthest-first: a root-level guide that does not fit must not evict the
+	 * file from the directory the session is actually working in. The rendered
+	 * order is unchanged — root before cwd, nearest last — so the check is both
+	 * "the near file survived" and "it still comes last".
+	 */
+	test("a nearest project file keeps its budget when a farther file is oversized", () => {
+		const base = tempDir("lbb-memprio-");
+		const home = join(base, "home");
+		const project = join(base, "project");
+		const cwd = join(project, "pkg");
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		mkdirSync(cwd, { recursive: true });
+		writeFileSync(join(home, ".labunbun", "MEMORY.md"), "USER-LAYER");
+		writeFileSync(join(project, "AGENTS.md"), `ROOT-BIG-MARKER\n${"R".repeat(50_000)}`);
+		writeFileSync(join(cwd, "LABUNBUN.md"), "NEAR-CWD-MARKER");
+		approveProjectDefinitions(cwd, ["memory"], home);
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).toContain("NEAR-CWD-MARKER");
+		expect(result.files).toContain(join(cwd, "LABUNBUN.md"));
+		// Farther file is the one that gives way.
+		expect(result.content).toContain("ROOT-BIG-MARKER");
+		// Render order is untouched: root first, cwd last.
+		expect(result.content.indexOf("ROOT-BIG-MARKER")).toBeLessThan(result.content.indexOf("NEAR-CWD-MARKER"));
+		// The cap counts the whole string, separators and notice included.
+		expect(result.content.length).toBeLessThanOrEqual(40_000);
 	});
 });
 

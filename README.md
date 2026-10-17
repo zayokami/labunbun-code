@@ -620,7 +620,7 @@ The server reports the `loadSession` capability. The editor can open a new sessi
 | `<project>/.mcp.json` | The MCP servers of this project. |
 | `<dir>/LABUNBUN.md` or `<dir>/AGENTS.md` | The project guide of one directory. |
 
-The tool reads the memory files from the working directory up to the root of the filesystem. The nearest file has the highest priority. The total size of these files is 40000 characters.
+The tool reads the memory files from the working directory up to the root of the filesystem. The nearest file has the highest priority. The files are rendered from the root to the working directory, so the nearest file is last. The budget is spent from the nearest file outward: if the files are too large, a file that does not fit contributes its first part, and farther files are left out. A note at the end names the files that were partly or not loaded. The total output is at most 40000 characters, the note included.
 
 ### Settings tiers
 
