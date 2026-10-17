@@ -1,17 +1,19 @@
 /**
- * What `/resume` does to the Edit gate's memory of reads.
+ * What a session swap or a summary does to the Edit gate's memory of reads.
  *
  * The tool array crosses a session swap unchanged (`interactive.ts:1491`), so
  * the Read records crossed it too: the incoming conversation started able to
  * edit a file it was never shown, because the *outgoing* one had read it. The
- * gate's question is "was this file read this session" and a swap is the one
- * event where "this session" changes without a new tool set — so the record has
- * to be cleared with it, not carried.
+ * gate's question is "was this file read this session" and a swap is one event
+ * where "this session" changes without a new tool set — so the record has to be
+ * cleared with it, not carried. A compaction is the other: the boundary
+ * replaces the messages above it, so a read that is now only in the summary is
+ * no longer a read this conversation can edit from.
  *
- * Driven through the real `runInteractive` in a subprocess: the read, the swap,
- * the refusal, and the re-read that makes the edit legal are one story that
- * only the app can tell. The transport is scripted, so nothing is billed and
- * nothing leaves the machine.
+ * Driven through the real `runInteractive` in a subprocess: the read, the swap
+ * (or the summary), the refusal, and the re-read that makes the edit legal are
+ * one story that only the app can tell. The transport is scripted, so nothing
+ * is billed and nothing leaves the machine.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -196,6 +198,63 @@ describe("the edit gate across /resume", () => {
 		// The re-read in the arriving session licensed the same edit, so the
 		// refusal was one re-read away from working — the direction the clear()
 		// takes deliberately.
+		expect(edits[1]?.isError).toBe(false);
+		expect(readFileSync(target, "utf8")).toBe("ALPHA\nbeta\n");
+	}, 30_000);
+});
+
+describe("the edit gate across a compaction", () => {
+	// Two turns before the summary so the prefix being replaced is not empty;
+	// the summary call and the four calls after it are scripted like any other.
+	test("a read above the boundary does not license an edit after the summary", async () => {
+		const cwd = tempDir("lbb-readstate-compact-cwd-");
+		const home = tempDir("lbb-readstate-compact-home-");
+		const target = join(cwd, "target.txt");
+		writeFileSync(target, "alpha\nbeta\n");
+
+		const edit = (old_string: string, new_string: string) => ({
+			tool: { name: "Edit", arguments: { file_path: target, old_string, new_string } },
+		});
+		const outcome = await runScene(
+			{
+				pointedAt: target,
+				// Read, a second turn, the summary (one text answer is all the
+				// manager asks for), then an edit that must be refused, the re-read,
+				// and the same edit again — all in one prompt, since a tool result
+				// does not end a turn.
+				steps: JSON.stringify([
+					{ tool: { name: "Read", arguments: { file_path: target } } },
+					{ text: "read it" },
+					{ text: "noted" },
+					{ text: "SUMMARY OF THE EARLIER CONVERSATION" },
+					edit("alpha", "ALPHA"),
+					{ tool: { name: "Read", arguments: { file_path: target } } },
+					edit("alpha", "ALPHA"),
+					{ text: "edited" },
+				]),
+				run: `
+					promptResult = (await session.prompt("read it")).toString();
+					await session.prompt("and another thing");
+					await onCommand("/compact");
+					afterResume = (await session.prompt("now edit")).toString();
+				`,
+			},
+			{ cwd, home },
+		);
+
+		expect(outcome.promptResult).toBe("completed");
+		expect(outcome.afterResume).toBe("completed");
+		// The summary really ran: without it the first edit would be legal and the
+		// refusal below would pass for the wrong reason.
+		expect((outcome.infos as string[]).join("\n")).toContain("Conversation compacted");
+
+		const edits = (outcome.toolResults as Array<{ name: string; isError: boolean; text: string }>).filter(
+			(result) => result.name === "Edit",
+		);
+		expect(edits).toHaveLength(2);
+		expect(edits[0]?.isError).toBe(true);
+		expect(edits[0]?.text).toContain("was not read this session");
+		// One re-read brought the record back: the clear is a cost, not a lockout.
 		expect(edits[1]?.isError).toBe(false);
 		expect(readFileSync(target, "utf8")).toBe("ALPHA\nbeta\n");
 	}, 30_000);

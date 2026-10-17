@@ -865,6 +865,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// the next resume pairs. Right here for the same reason — `done` is
 			// the first moment the boundary is in the file.
 			if (phase.kind === "done") {
+				// The read records go the other way, out rather than back in: a
+				// summary replaces what the model was shown, so a file read above
+				// the boundary is no longer in its context, and an Edit or Write
+				// through the old record would rewrite content this conversation
+				// never saw. The store cannot say which reads survived in the
+				// suffix — an entry names a path, not a message — so the whole
+				// record is dropped and the next Edit pays one re-read. Manual
+				// `/compact` lands here too: it runs the same manager and ends
+				// with the same `done`.
+				readState.clear();
 				saveTasks(taskStore, store);
 				// The plan goes back for the same reason and at the same moment: its
 				// snapshot was above the boundary too, and a summary that cost the
