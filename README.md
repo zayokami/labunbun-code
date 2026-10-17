@@ -336,6 +336,7 @@ The Emacs editor has no mode line. Use these keys.
 | `C-x C-x` | Go to the mark. |
 | `C-x C-u`, `C-x C-l` | Upcase or downcase the region. |
 | `C-x C-o` | Delete the blank lines around the point. |
+| `C-x C-t` | Swap the current line with the previous line. A count moves the previous line past that many lines. A count of zero swaps the lines at the point and the mark. |
 | `C-u` | The prefix argument. Its value is `(4)`. Press it again to multiply by 4. |
 | `M-1` to `M-9`, `M--` | Set the prefix argument to a number. |
 | `M-C-H` | Kill the word before the point. Most terminals cannot send this key. |

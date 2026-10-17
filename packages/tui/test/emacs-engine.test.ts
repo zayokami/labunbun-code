@@ -109,9 +109,9 @@ function pressToken(e: ReturnType<typeof editor>, token: string): boolean {
  * `C-x` then a member of `ctl-x-map`, which is how every `C-x` command is reached.
  *
  * The member is spelled the way {@link CTL_X_RESERVED} spells it — a *raw* key spelling, because
- * that is what the dispatch compares — so the reserved members (`t`, `C-@`, ` `) and the
- * implemented ones (`C-x`, `u`, `C-u`, `C-l`, `C-o`) come out of two vocabularies on purpose. The
- * two reserved tables
+ * that is what the dispatch compares — so the reserved members (`C-@`, ` `) and the
+ * implemented ones (`C-x`, `u`, `C-u`, `C-l`, `C-o`, `C-t`) come out of two vocabularies on
+ * purpose. The two reserved tables
  * do not agree on spelling either: `RESERVED_KEYS` is keyed by `emacsKeyToken`, so a ctrl+meta key
  * there is `C-M-t`, while `CTL_X_RESERVED` holds `t` and `C-@` as themselves.
  *
@@ -1208,7 +1208,7 @@ describe("emacs: the reserved tables", () => {
 			"M-s",
 			"M-=",
 		]);
-		expect(CTL_X_RESERVED.map(([member]) => member)).toEqual(["t", "C-@", "C-SPC", " ", "n", "h", "=", "r"]);
+		expect(CTL_X_RESERVED.map(([member]) => member)).toEqual(["C-@", "C-SPC", " ", "n", "h", "=", "r"]);
 	});
 
 	test("C-t and C-o are declined, so the watch panel and the transcript keep their keys", () => {
@@ -1235,14 +1235,16 @@ describe("emacs: the reserved tables", () => {
 	});
 
 	test("an implemented command is in neither reserved table, so the tables cannot drift into lying", () => {
-		// `C-x C-x`, `C-x u` and — since the uemacs batch — `C-u`, `C-l` and `C-o` are the
-		// implemented members of `ctl-x-map`, and none is listed. The tables' own docstring says
-		// an implemented member must be deleted from them rather than left behind, so this is
-		// the assertion that keeps the promise checkable.
+		// `C-x C-x`, `C-x u`, the uemacs batch's `C-u`, `C-l` and `C-o`, and batch 3a's
+		// `C-t` are the implemented members of `ctl-x-map`, and none is listed. The tables'
+		// own docstring says an implemented member must be deleted from them rather than left
+		// behind, so this is the assertion that keeps the promise checkable.
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("u");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("x");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-u");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-l");
+		// Batch 3a took `t`: `C-x C-t` is `transpose-lines` (`bindings.el:1599`).
+		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("t");
 		// Batch 2a removed `M-t` and `M-o` when their commands landed. `M-o`'s old row also
 		// cited `bindings.el:1229` for `split-line`, which is `esc-map "\C-o"` — `C-M-o` — so
 		// the row was mis-keyed as well as unimplemented; the new command explains the move.
@@ -1821,6 +1823,137 @@ describe("emacs: M-t transposes words", () => {
 		expect(overlap.state.cursor).toBe(0);
 		expect(overlap.engine.lastCommand).toBeNull();
 		expect(overlap.undoDepth()).toBe(0);
+	});
+});
+
+describe("emacs: C-x C-t transposes lines", () => {
+	// GNU's `transpose-lines` (`bindings.el:1599`, `simple.el:8864-8880`) through
+	// `transpose-subr` (`simple.el:8885-8919`). The mover is the lambda at `simple.el:8869-8879`,
+	// so the units are logical lines and the positive half creates a newline when the final line
+	// has none. `C-x t` is *not* this command: `bindings.el:1599` binds the control character
+	// `"\C-t"` in `ctl-x-map`, and the dispatch tests the modifier.
+
+	test("C-x C-t exchanges the current line with the previous one and leaves point after both", () => {
+		const e = editor("aa\nbb\ncc\n", 4); // inside "bb"
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("bb\naa\ncc\n");
+		expect(e.state.cursor).toBe(6); // start of "cc": after the two exchanged lines
+		expect(e.engine.lastCommand).toBe("transpose-lines");
+		expect(e.undoDepth()).toBe(1);
+	});
+
+	test("the first line is exchanged with the second, because the backward mover clamps at BOB", () => {
+		// `(forward-line -1)` on line 1 goes as far as it can — the start of line 1 (`src/cmds.c`:
+		// 101) — so `aux(-1)` is line 1 itself and `aux(1)` is line 2. The docstring's "previous
+		// line" has no empty slot to fall into, and the source has no guard for it. This is the
+		// reference's boundary behavior; "no-op on the first line" is the plan's assumption, not
+		// what `transpose-subr` does.
+		const e = editor("aa\nbb\ncc\n", 0);
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("bb\naa\ncc\n");
+		expect(e.state.cursor).toBe(6);
+		expect(e.engine.lastCommand).toBe("transpose-lines");
+	});
+
+	test("a numeric prefix drags the previous line past that many lines", () => {
+		// `pos1 = aux(-1)` is "one\n"; `pos2 = aux(3)` runs from the start of "two" to the start
+		// of the empty line after "four\n", so point lands at `(car pos2)` — after the moved run
+		// (`simple.el:8909-8913`). The argument survives the `C-x` prefix, which re-arms
+		// `#prefixArgLive` because a prefix key is not a command (`src/subr.el:1762`).
+		const e = editor("one\ntwo\nthree\nfour\n", 4); // start of "two"
+		e.press("u", C);
+		e.press("3");
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("two\nthree\nfour\none\n");
+		expect(e.state.cursor).toBe(19);
+		expect(e.engine.lastCommand).toBe("transpose-lines");
+		expect(e.undoDepth()).toBe(1);
+	});
+
+	test("a negative prefix drags the previous line backward past the one before it", () => {
+		// The `t` branch: `(goto-char (car pos1))`, `pos2 = aux(arg)` from there, and point at
+		// `(car pos2) + (cdr pos1 - car pos1)` (`simple.el:8914-8919`). `M--` gives the symbol
+		// `'-` (`simple.el:5591-5593`), whose numeric value is -1.
+		const e = editor("one\ntwo\nthree\n", 8); // start of "three"
+		e.press("-", M);
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("two\none\nthree\n");
+		expect(e.state.cursor).toBe(4);
+		expect(e.engine.lastCommand).toBe("transpose-lines");
+	});
+
+	test("C-x t is not the command; only the control member runs it", () => {
+		// `ctl-x-map` binds `"\C-t"`, not the bare `t` (`bindings.el:1599`). A bare member falls
+		// into the map's read-and-drop default, which consumes the key and commits no command.
+		const e = editor("aa\nbb\ncc\n", 4);
+		expect(pressCtlX(e, "t")).toBe(true);
+		expect(e.state.text).toBe("aa\nbb\ncc\n");
+		expect(e.state.cursor).toBe(4);
+		expect(e.engine.lastCommand).toBeNull();
+		expect(e.undoDepth()).toBe(0);
+		// The same member with ctrl does run, which is the distinction the row above pins.
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("bb\naa\ncc\n");
+		expect(e.engine.lastCommand).toBe("transpose-lines");
+	});
+
+	test("with a zero argument the lines at point and mark are exchanged", () => {
+		// `(= arg 0)`: `aux(1)` at point, `goto-char (mark)`, `aux(1)` at the mark, the swap, then
+		// `exchange-point-and-mark` (`simple.el:8902-8908`). Point and mark are markers, so the
+		// four-step insert/delete sequence decides their final positions; a marker at the start
+		// boundary of a span is preserved there (`simple.el:8930-8945`).
+		const e = editor("aa\nbb\ncc\n", 0);
+		e.press(" ", C); // C-SPC: mark at 0, the start of line 1
+		e.state.cursor = 6; // start of line 3
+		e.press("u", C);
+		e.press("0");
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("cc\nbb\naa\n");
+		// exchange-point-and-mark: point goes to the old mark's adjusted position (0), the mark
+		// to the old point's (6), and the mark is active.
+		expect(e.state.cursor).toBe(0);
+		expect(e.engine.mark).toBe(6);
+		expect(e.engine.markActive).toBe(true);
+		expect(e.engine.lastCommand).toBe("transpose-lines");
+		expect(e.undoDepth()).toBe(1);
+	});
+
+	test("zero with no mark signals, and a buffer the mover did not touch is left alone", () => {
+		// `(or (mark) (error "No mark set in this buffer"))` (`simple.el:8905`): the key is
+		// consumed, no command commits, and nothing is written.
+		const e = editor("aa\nbb\ncc\n", 4);
+		e.press("u", C);
+		e.press("0");
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("aa\nbb\ncc\n");
+		expect(e.state.cursor).toBe(4);
+		expect(e.engine.lastCommand).toBeNull();
+		expect(e.undoDepth()).toBe(0);
+	});
+
+	test("the empty buffer follows the mover: it gains newlines instead of doing nothing", () => {
+		// `aux(-1)`'s positive half calls `(newline 2)`: `forward-line 1` reports one missing
+		// line and the absent line terminator adds another (`simple.el:8874-8878`); `aux(1)` then
+		// adds a third. `transpose-subr-1` exchanges the two newline runs, which leaves the three
+		// newlines in place. There is no error, because the mover has just given the buffer two
+		// "lines" to transpose.
+		const e = editor("", 0);
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("\n\n\n");
+		expect(e.state.cursor).toBe(3);
+		expect(e.engine.lastCommand).toBe("transpose-lines");
+		expect(e.undoDepth()).toBe(1);
+	});
+
+	test("a single unterminated line is terminated and swapped with the new empty line", () => {
+		// The 1986 ChangeLog entry for this function is "Create a newline (if nec) to terminate
+		// the line being transposed". The mover does that (`simple.el:8875-8878`), and the second
+		// `aux(1)` creates the empty line after it; the exchange puts that empty line first.
+		const e = editor("abc", 1);
+		expect(pressCtlX(e, "C-t")).toBe(true);
+		expect(e.state.text).toBe("\nabc\n");
+		expect(e.state.cursor).toBe(5);
+		expect(e.engine.lastCommand).toBe("transpose-lines");
 	});
 });
 

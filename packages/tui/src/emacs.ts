@@ -229,6 +229,7 @@ const CMD = {
 	deleteBlankLines: "delete-blank-lines",
 	gotoMatchingFence: "goto-matching-fence",
 	transposeWords: "transpose-words",
+	transposeLines: "transpose-lines",
 	transposeChars: "transpose-chars",
 	undo: "undo",
 } as const;
@@ -755,6 +756,66 @@ export function emacsCasify(text: string, action: EmacsCaseAction): string {
 }
 
 // ---------------------------------------------------------------------------
+// Line coordinates — what `forward-line` moves over
+// ---------------------------------------------------------------------------
+
+/**
+ * The 0-based line a position is on: the number of newlines before it. `forward-line` is defined
+ * as "if point is on line I, move to the start of line I + N" (`src/cmds.c:97-101`).
+ */
+function emacsLineIndex(text: string, point: number): number {
+	let line = 0;
+	for (let i = 0; i < point && i < text.length; i++) if (text[i] === "\n") line += 1;
+	return line;
+}
+
+/** The position at which 0-based line `line` starts — `forward-line`'s "start of line". */
+function emacsLineStart(text: string, line: number): number {
+	if (line <= 0) return 0;
+	let seen = 0;
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] !== "\n") continue;
+		seen += 1;
+		if (seen === line) return i + 1;
+	}
+	return text.length;
+}
+
+/**
+ * `forward-line` (`src/cmds.c:97-146`) reduced to the two things the line mover needs: where
+ * point lands and how many lines are left to move. It never signals; at an edge point goes as
+ * far as it can (`src/cmds.c:101`).
+ *
+ * The positive direction's exception is load-bearing here: a non-empty last line counts as one
+ * line successfully moved, and point stops at its end even though there is no next line
+ * (`src/cmds.c:108-112`, `:138-145`). That is why `transpose-lines` inserts a terminating
+ * newline when it drags the last line of a buffer with no final newline.
+ */
+function emacsForwardLine(text: string, point: number, n: number): { point: number; shortage: number } {
+	const line = emacsLineIndex(text, point);
+	const last = emacsLineIndex(text, text.length);
+	if (n > 0) {
+		const target = line + n;
+		if (target <= last) return { point: emacsLineStart(text, target), shortage: 0 };
+		// The scan ran out at ZV. `counted` is the number of newlines actually found, which is
+		// `last - line` (`src/search.c:942-943`, `:134-145`), and the last-line exception subtracts
+		// one more when point moved onto an unterminated final line.
+		let shortage = n - (last - line);
+		if (shortage !== 0 && point !== text.length && text.length > 0 && text[text.length - 1] !== "\n") {
+			shortage -= 1;
+		}
+		return { point: text.length, shortage };
+	}
+	if (n < 0) {
+		const target = line + n;
+		if (target >= 0) return { point: emacsLineStart(text, target), shortage: 0 };
+		// "If moving backward, that is N plus number moved" (`src/cmds.c:104-106`).
+		return { point: 0, shortage: n + line };
+	}
+	return { point: emacsLineStart(text, line), shortage: 0 };
+}
+
+// ---------------------------------------------------------------------------
 // Reserved keys — later batches
 // ---------------------------------------------------------------------------
 
@@ -827,7 +888,6 @@ export const RESERVED_KEYS: ReadonlyArray<readonly [string, string]> = [
  * takes them rather than leaving a table that drifts from the switch.
  */
 export const CTL_X_RESERVED: ReadonlyArray<readonly [string, string]> = [
-	["t", "transpose-lines (bindings.el:1599)"],
 	["C-@", "pop-global-mark (bindings.el:1339)"],
 	["C-SPC", "pop-global-mark (bindings.el:1341)"],
 	[" ", "rectangle-mark-mode (bindings.el:1340)"],
@@ -1021,10 +1081,11 @@ export class EmacsEngine {
 		}
 
 		if (this.#ctlXPending) {
-			// Five implemented members: `C-x C-x` is `exchange-point-and-mark`
+			// Six implemented members: `C-x C-x` is `exchange-point-and-mark`
 			// (`bindings.el:1338`), `C-x u` is `undo` (`bindings.el:1246`), `C-x C-u` and
-			// `C-x C-l` are `upcase-region` / `downcase-region` (`subr.el:1748-1749`), and
-			// `C-x C-o` is `delete-blank-lines` (`bindings.el:1234`). Anything else in the map
+			// `C-x C-l` are `upcase-region` / `downcase-region` (`subr.el:1748-1749`),
+			// `C-x C-o` is `delete-blank-lines` (`bindings.el:1234`), and `C-x C-t` is
+			// `transpose-lines` (`bindings.el:1599`). Anything else in the map
 			// is *read and dropped*: the key is consumed so the user is not typing into the
 			// prompt, and no command runs — which is what `this_command` = `Qnil` means
 			// (`src/keyboard.c:1416`), and `last-command` becomes `nil`, breaking a kill chain
@@ -1049,6 +1110,7 @@ export class EmacsEngine {
 			if (key.ctrl && input === "u") return this.#caseRegion("up");
 			if (key.ctrl && input === "l") return this.#caseRegion("down");
 			if (key.ctrl && input === "o") return this.#deleteBlankLines();
+			if (key.ctrl && input === "t") return this.#transposeLines(emacsPrefixValue(this.#prefixArg));
 			this.#commit = true;
 			return true;
 		}
@@ -2636,6 +2698,129 @@ export class EmacsEngine {
 		}
 		const cursor = n > 0 ? pos2[0] : pos2[0] + (pos1[1] - pos1[0]);
 		this.#write(swap.text, this.#clamp(cursor));
+	}
+
+	/**
+	 * `transpose-lines` (`bindings.el:1599`), the command GNU binds to `C-x C-t`. The body is
+	 * `transpose-subr` (`simple.el:8885-8919`) driven by the line mover at `simple.el:8869-8880`:
+	 * `aux(x)` is "point after moving x lines, then point after moving back"
+	 * (`simple.el:8896-8899`), and the three argument cases are the `cond` at `:8901-8919`.
+	 *
+	 *   - **positive**: `pos1 = aux(-1)` is the line before point, `pos2 = aux(arg)` is the
+	 *     current line through `arg` lines ahead, and the previous line is dragged past those
+	 *     lines; point ends at `(car pos2)` (`simple.el:8909-8913`);
+	 *   - **negative**: the previous line is dragged backward past `-arg` lines; point ends at
+	 *     `(car pos2) + (cdr pos1 - car pos1)` (`simple.el:8914-8919`);
+	 *   - **zero**: the lines at point and mark are exchanged, then point and mark are exchanged
+	 *     (`simple.el:8902-8908`). No mark signals.
+	 *
+	 * Two consequences of the mover are reproduced rather than smoothed over, because they are
+	 * visible and a "tidier" rule would be an invention:
+	 *
+	 *   - `forward-line` clamps at the buffer edges, so on the **first line** `aux(-1)`
+	 *     degenerates to that line and the command exchanges line 1 with line 2. It is not a
+	 *     no-op there, and there is no error either.
+	 *   - the positive half of the mover terminates an unterminated final line and creates
+	 *     missing lines with `newline` (`simple.el:8871-8878`), so it can edit the buffer before
+	 *     `transpose-subr-1` runs. An empty buffer therefore gains newlines rather than staying
+	 *     empty. The simulation below applies those insertions in the reference's order, and on
+	 *     a later signal they are kept, as they are in Emacs.
+	 *
+	 * The swap itself is `#transposeSpans`, which is `transpose-subr-1`'s ordering and
+	 * "Don't have two things to transpose" check (`simple.el:8921-8929`); the spans are
+	 * line-aligned, so adjacency is legal and overlap is a signal. The zero branch replays the
+	 * four-step insert/delete sequence on point and mark through `#markerThroughSwap`, exactly
+	 * as `#transposeWords`'s zero branch does (`simple.el:8930-8945`). The other branches let
+	 * `#write` adjust the mark across the replacement, the engine's usual marker rule; the
+	 * mover's own newline insertions are tracked on both markers below before that.
+	 */
+	#transposeLines(n: number): boolean {
+		this.#beginCommand(CMD.transposeLines);
+		const startText = this.#text();
+		const state = { text: startText, point: this.#ops.getCursor() };
+		// `save-excursion` saves point as a marker (`src/editfns.c:778-787`), and the mark is a
+		// marker of its own. Both move through the mover's insertions; a marker at the insertion
+		// point stays before the inserted text (insertion type nil), so only positions strictly
+		// after it shift.
+		let savedPoint = state.point;
+		let savedMark = this.mark;
+		const shift = (m: number, at: number, len: number): number => (m > at ? m + len : m);
+		const insertNewlines = (len: number): void => {
+			const at = state.point;
+			state.text = state.text.slice(0, at) + "\n".repeat(len) + state.text.slice(at);
+			state.point += len;
+			savedPoint = shift(savedPoint, at, len);
+			if (savedMark !== null) savedMark = shift(savedMark, at, len);
+		};
+		/** `simple.el:8869-8879`: move, then repair a missing line terminator. */
+		const move = (x: number): void => {
+			const moved = emacsForwardLine(state.text, state.point, x);
+			state.point = moved.point;
+			if (x <= 0) return;
+			let missing = moved.shortage;
+			// `(if (/= (preceding-char) ?\n) (setq arg (1+ arg)))` (`simple.el:8875-8876`);
+			// `(preceding-char)` is 0 at the beginning of the buffer (`src/editfns.c:980-987`).
+			if (state.point === 0 || state.text[state.point - 1] !== "\n") missing += 1;
+			if (missing > 0) insertNewlines(missing);
+		};
+		const aux = (x: number): [number, number] => {
+			move(x);
+			const first = state.point;
+			move(-x);
+			return [first, state.point];
+		};
+		/**
+		 * A signal in `transpose-subr` or `transpose-subr-1` leaves the buffer where the mover
+		 * left it and reaches no command tail, so `last-command` is not committed. If the mover
+		 * edited the text, commit that edit; its mark position is already `savedMark`.
+		 */
+		const signal = (cursor: number): boolean => {
+			if (state.text !== startText) {
+				this.#write(state.text, cursor);
+				this.mark = savedMark;
+			}
+			this.#commit = false;
+			return true;
+		};
+		if (n === 0) {
+			const pos1 = aux(1);
+			if (savedMark === null) return signal(savedPoint);
+			// `(goto-char (or (mark) ...))` (`simple.el:8905`): from the mark's *current* marker
+			// position, which the first `aux` may have shifted.
+			state.point = savedMark;
+			const pos2 = aux(1);
+			const swap = this.#transposeSpans(state.text, pos1, pos2);
+			if (swap === null) return signal(savedPoint);
+			const [a, b] = swap.p1;
+			const [c, d] = swap.p2;
+			const pointAfter = this.#markerThroughSwap(savedPoint, a, b, c, d);
+			const markAfter = this.#markerThroughSwap(savedMark, a, b, c, d);
+			this.#write(swap.text, pointAfter);
+			// `exchange-point-and-mark` (`simple.el:8908`): point takes the mark's adjusted
+			// position and the mark takes point's, and the mark is reactivated (`simple.el:7579`).
+			this.mark = pointAfter;
+			this.markActive = true;
+			this.#ops.setCursor(markAfter);
+			return true;
+		}
+		if (n > 0) {
+			const pos1 = aux(-1);
+			const pos2 = aux(n);
+			const swap = this.#transposeSpans(state.text, pos1, pos2);
+			if (swap === null) return signal(state.point);
+			this.mark = savedMark;
+			this.#write(swap.text, pos2[0]);
+			return true;
+		}
+		const pos1 = aux(-1);
+		// `(goto-char (car pos1))`, then read the argument from there (`simple.el:8914-8918`).
+		state.point = pos1[0];
+		const pos2 = aux(n);
+		const swap = this.#transposeSpans(state.text, pos1, pos2);
+		if (swap === null) return signal(state.point);
+		this.mark = savedMark;
+		this.#write(swap.text, pos2[0] + (pos1[1] - pos1[0]));
+		return true;
 	}
 
 	/**
