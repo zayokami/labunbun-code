@@ -34,6 +34,7 @@ import {
 	userMessage,
 } from "@labunbun/ai";
 import {
+	COMPACTION_DISABLED_EDGE_NOTICE,
 	type CompactionTuning,
 	compactionPhaseText,
 	createCompactionWiring,
@@ -689,6 +690,67 @@ describe("the doors the session opens itself", () => {
 		const forced = await harness.check({ systemPrompt: "", messages: overThreshold() }, { force: true });
 		expect(forced?.action).toBe("compact");
 		expect(harness.summaries()).toBe(1);
+	});
+});
+
+describe("automatic compaction switched off", () => {
+	const context = () => ({ systemPrompt: "", messages: overThreshold() });
+	const short = () => ({ systemPrompt: "", messages: [userMessage("short")] });
+	const edgeNotices = (harness: Harness) => harness.reports.filter((text) => text === COMPACTION_DISABLED_EDGE_NOTICE);
+
+	test("one line when the context crosses the threshold, not one per check", async () => {
+		// With the switch off the manager answers "not yet" on every turn, so the
+		// crossing is invisible without this line — and a line every turn is noise
+		// the user learns to skip past, at the moment it is the only warning.
+		const harness = wiring({ tuning: { enabled: false } });
+
+		await harness.check(context());
+		await harness.check(context());
+
+		expect(edgeNotices(harness)).toHaveLength(1);
+	});
+
+	test("a new crossing is a new line, after the context drops below the line", async () => {
+		// Dropping below (a trim, an edit that removes a giant result) and crossing
+		// again is a second moment where the user can act; the first line is stale
+		// by then.
+		const harness = wiring({ tuning: { enabled: false } });
+
+		await harness.check(context());
+		await harness.check(short());
+		await harness.check(context());
+
+		expect(edgeNotices(harness)).toHaveLength(2);
+	});
+
+	test("a forced check is the switch being overridden on purpose, and says nothing", async () => {
+		// The provider already refused the request for size: the pass has to run
+		// whatever the setting says, so this is not a crossing the user needs to
+		// act on — and the trim is off so the forced pass's one remaining answer is
+		// the summary.
+		const harness = wiring({ tuning: { enabled: false }, trimOldToolResults: false });
+
+		const forced = await harness.check(context(), { force: true });
+
+		expect(forced?.action).toBe("compact");
+		expect(edgeNotices(harness)).toHaveLength(0);
+	});
+
+	test("a tripped breaker has its own notice, and the setting does not speak over it", async () => {
+		// Forced passes still run with the setting off, and three failed ones trip
+		// the breaker. That state is both "off" and "tripped"; the specific
+		// diagnosis — the summarizer is failing, not the setting — is the one to
+		// print.
+		const harness = wiring({ tuning: { enabled: false }, trimOldToolResults: false, streamFn: failingStream() });
+
+		for (let i = 0; i < 3; i++) await harness.check(context(), { force: true });
+		// The breaker announced itself on the check that tripped it, in its own
+		// words; what must not happen is the setting's line arriving at all.
+		expect(harness.reports).toContain(COMPACTION_DISABLED_NOTICE);
+		harness.reports.length = 0;
+
+		expect(await harness.check(context())).toBeNull();
+		expect(edgeNotices(harness)).toHaveLength(0);
 	});
 });
 

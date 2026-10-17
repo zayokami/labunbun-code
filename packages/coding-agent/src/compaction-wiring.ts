@@ -20,6 +20,7 @@ import {
 	type CompactionPhase,
 	type CompactionTrigger,
 	type CompactionVerification,
+	estimateContextUsage,
 	type SessionStore,
 	type SpillWriter,
 	SUMMARY_SECTIONS,
@@ -27,6 +28,22 @@ import {
 import { type Model, missingApiKey, resolveModel, type StreamFn } from "@labunbun/ai";
 import { rewriteCause } from "./cache-report.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE, formatTokens } from "./context-report.ts";
+
+/**
+ * Said once each time the context crosses the threshold with automatic
+ * compaction switched off.
+ *
+ * Without it the crossing is silent: the manager returns "not yet" on every
+ * turn, and the user finds out when a request is refused — long after the
+ * moment a command could have helped. The words say the state is a choice
+ * ("off in settings"), not a fault, because the breaker has a notice of its own
+ * and the two must not borrow each other's diagnosis. Both ways forward are
+ * named, cheapest first: `/trim` spends no tokens, `/compact` spends one
+ * summarization call.
+ */
+export const COMPACTION_DISABLED_EDGE_NOTICE =
+	"Automatic compaction is off in settings and this context is over the compaction threshold. " +
+	"Run /compact to summarize it now, or /trim to free space without a summary.";
 
 /**
  * One line for one phase — the default report, and the wording the apps share.
@@ -322,8 +339,19 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 	 * conversation young again.
 	 */
 	let accuracyNoticed = false;
+	/**
+	 * Whether the "off in settings" line has been said for the crossing in
+	 * progress. Edge-triggered off the estimate rather than the manager's
+	 * decision, because a disabled manager's decision is always "nothing": the
+	 * crossing is the event, and it is the only moment the line is news.
+	 */
+	let disabledWarned = false;
 
 	const build = (forModel: Model, forStore: SessionStore | undefined): CompactionManager => {
+		// A rebuilt manager is a different window, and `/autocompact` rebuilds it
+		// to change this very setting: the crossing already announced belonged to
+		// the last manager, so the next one starts with its notice unspent.
+		disabledWarned = false;
 		const phase = (event: CompactionPhase): void => {
 			if (options.onPhase) {
 				options.onPhase(event);
@@ -427,6 +455,22 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 					// The previews replaced bytes the model can no longer see, so the
 					// read evidence has to go with them.
 					options.onContextReduced?.();
+				}
+				// The switch being off is otherwise silent: the manager answers "not
+				// yet" on every turn, and the context is free to sail past the point
+				// where a command would still have helped. Said once per crossing, not
+				// once per turn — and not at all for a forced check, where the switch
+				// is overridden on purpose, or for a tripped manager, whose breaker
+				// notice below is the more specific diagnosis. The estimate is the
+				// manager's own measurement of this context against the manager's own
+				// line, so the notice fires on exactly the boundary the pass would.
+				if (checkOptions?.force !== true && (compaction.isDisabled || disabledWarned)) {
+					const overThreshold = estimateContextUsage(context) >= compaction.limits().threshold;
+					if (!overThreshold) disabledWarned = false;
+					else if (compaction.isDisabled && !compaction.isTripped && !disabledWarned) {
+						disabledWarned = true;
+						options.report(COMPACTION_DISABLED_EDGE_NOTICE);
+					}
 				}
 				// The breaker has no other way to be seen. Silent, it looks like the
 				// session simply stopped managing its context — until the run ends with

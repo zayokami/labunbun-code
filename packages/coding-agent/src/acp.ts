@@ -1133,12 +1133,30 @@ class AcpAgent implements acp.Agent {
 			// The cheap rung replaces old tool results with previews, so the bytes
 			// the model was shown are gone from its context and the record goes too.
 			onContextReduced: () => readState.clear(),
+			// The same hook the REPL consults before a pass. An editor session has
+			// a client, not a transcript scroller, so a hook is one of the few ways
+			// the workspace gets a word in — and it has to defer the same passes it
+			// defers interactively: the estimate's, never one the provider already
+			// refused (the wiring handles that).
+			preCompact: async (trigger, customInstructions) => {
+				if (!hooksRuntime.has("PreCompact")) return { blocked: false };
+				const outcome = await hooksRuntime.run("PreCompact", {
+					session_id: sessionId,
+					cwd,
+					trigger,
+					// A manual pass's focus argument; undefined for the automatic
+					// passes, and dropped from the payload then.
+					custom_instructions: customInstructions,
+				});
+				for (const error of outcome.errors) process.stderr.write(`PreCompact hook failed: ${error}\n`);
+				return { blocked: outcome.blocked, reason: outcome.reason };
+			},
 			// The end of a pass is the first moment the chain below the boundary can
 			// hold the list again, and the save is the same one the REPL makes at the
 			// same point. The reporting is the wiring's default, reproduced because
 			// passing `onPhase` replaces it: an editor session's surface is stderr,
 			// and it must keep saying exactly what it said before the board existed.
-			onPhase: (phase) => {
+			onPhase: async (phase) => {
 				const text = compactionPhaseText(phase);
 				if (text) process.stderr.write(`${text}\n`);
 				if (phase.kind !== "done") return;
@@ -1147,6 +1165,22 @@ class AcpAgent implements acp.Agent {
 				readState.clear();
 				for (const warning of compactionWarnings(phase.verification)) process.stderr.write(`${warning}\n`);
 				saveTasks(taskStore, store);
+				// The observer event, after everything the pass had to put back is in
+				// place. An editor session says things on stderr for the same reason
+				// a `-p` run does, and the hook's answer cannot change a pass that
+				// already happened — a failure is a line, never a veto.
+				if (hooksRuntime.has("PostCompact")) {
+					const outcome = await hooksRuntime.run("PostCompact", {
+						session_id: sessionId,
+						cwd,
+						trigger: phase.trigger,
+						pre_tokens: phase.preTokens,
+						post_tokens: phase.postTokens,
+					});
+					for (const message of advisoryHookFailures("PostCompact", outcome)) {
+						process.stderr.write(`Warning: ${message}\n`);
+					}
+				}
 			},
 		});
 

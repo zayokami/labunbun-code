@@ -4327,7 +4327,8 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/context": {
 			if (!session) return true;
 			const breakdown = contextBreakdown(session.currentContext());
-			const limits = ctx.compaction().limits();
+			const compaction = ctx.compaction();
+			const limits = compaction.limits();
 			// Read from the store rather than the manager: the session file is where
 			// a compaction is recorded, and a resumed session's earlier ones happened
 			// before this manager was built.
@@ -4343,6 +4344,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					// "the summary still describes this file" is a claim about the
 					// file as it was, and only a hash taken then can check it.
 					keptFiles: last?.preservedFiles ? preservedFilesDrift(last.preservedFiles, readFileOrNull) : undefined,
+					// The manager's own state, so the card cannot disagree with the
+					// session it is describing: `isDisabled` is the setting and
+					// `isTripped` is the breaker, two different answers to why the
+					// automatic passes are not running.
+					autoCompact: { disabled: compaction.isDisabled, tripped: compaction.isTripped },
 				}),
 			});
 			pushInfo(ctx.handle, contextSummaryLine(breakdown, limits));

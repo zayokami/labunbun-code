@@ -84,6 +84,66 @@ describe("contextRows", () => {
 	});
 });
 
+describe("the compaction state rows", () => {
+	const withState = (autoCompact: { disabled: boolean; tripped: boolean }) =>
+		contextRows(BREAKDOWN, LIMITS, { autoCompact });
+
+	test("absent when no state is handed over, so older callers keep their shape", () => {
+		// The rows describe a manager the caller may not have. An embedder that
+		// measures a context but owns no setting would be inventing the answer.
+		const labels = contextRows(BREAKDOWN, LIMITS).map(([label]) => label);
+		expect(labels).not.toContain("Auto-compact");
+		expect(labels).not.toContain("Hard limit");
+		expect(labels).not.toContain("Fixed (system + tools)");
+	});
+
+	test("on when the setting is on and the breaker has not tripped", () => {
+		expect(rowOf(withState({ disabled: false, tripped: false }), "Auto-compact")).toBe("on");
+	});
+
+	test("off in settings is a choice, said in its own words", () => {
+		// Not the breaker's words: one is a decision the user made, the other a
+		// fault the manager diagnosed, and a card that conflated them would send
+		// the user looking for a bug that is a setting.
+		expect(rowOf(withState({ disabled: true, tripped: false }), "Auto-compact")).toBe("off (settings)");
+		// Disabled wins when both hold: with the setting off, no pass runs at all,
+		// so the breaker has nothing to be the reason for.
+		expect(rowOf(withState({ disabled: true, tripped: true }), "Auto-compact")).toBe("off (settings)");
+	});
+
+	test("a tripped breaker says it paused rather than blaming the setting", () => {
+		expect(rowOf(withState({ disabled: false, tripped: true }), "Auto-compact")).toBe("paused after repeated failures");
+	});
+
+	test("the hard limit is the manager's own number", () => {
+		expect(rowOf(withState({ disabled: false, tripped: false }), "Hard limit")).toBe("197.0k");
+	});
+
+	test("the fixed part is system plus tools, and says compaction cannot touch it", () => {
+		// 5.0k of system prompt plus 3.0k of schemas: the part of every request a
+		// summary can never shrink, whatever it does to the transcript.
+		expect(rowOf(withState({ disabled: false, tripped: false }), "Fixed (system + tools)")).toBe(
+			"8.0k — compaction cannot reduce this part",
+		);
+	});
+
+	test("a fixed part that alone reaches the hard limit says the context can never be sent", () => {
+		// The warning is the whole reason the row sums the two: at this size no
+		// compaction can make the request sendable, and the card should say so
+		// before the user pays for one.
+		const tight: ContextLimits = { contextWindow: 10_000, threshold: 6_000, hardLimit: 8_000 };
+		const rows = contextRows(BREAKDOWN, tight, { autoCompact: { disabled: false, tripped: false } });
+		expect(rowOf(rows, "Fixed (system + tools)")).toBe(
+			"8.0k — compaction cannot reduce this part; this context is over the hard limit even after compaction",
+		);
+	});
+
+	test("they sit after the reserve row, in the order the questions are asked", () => {
+		const labels = withState({ disabled: false, tripped: false }).map(([label]) => label);
+		expect(labels.slice(-3)).toEqual(["Auto-compact", "Hard limit", "Fixed (system + tools)"]);
+	});
+});
+
 describe("what the rows say about compaction", () => {
 	test("no store, no row — and a store with nothing done says exactly that", () => {
 		// Absent without a session file, the way the memory row is absent without

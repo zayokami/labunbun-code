@@ -107,17 +107,27 @@ export { formatTokens };
 
 /**
  * The card's rows, in reading order: what the context is made of, then what is
- * left, then what is held back.
+ * left, then what is held back, then what manages it and what cannot be reduced.
  *
  * `free` is measured to the threshold — the point where the session acts — and
  * the reserve is what sits between there and the model's own refusal. Showing
  * only one of the two would answer half the question: "how much can I still
  * write" and "what happens if I do".
+ *
+ * `autoCompact` is the manager's own state, handed over rather than inferred:
+ * an embedder that measures a context but owns no manager would be inventing
+ * whether the setting is off or a breaker is tripped. Absent, the three rows
+ * that need it are absent too — the shape callers had before the state existed.
  */
 export function contextRows(
 	breakdown: ContextBreakdown,
 	limits: ContextLimits,
-	options: { memoryChars?: number; compactions?: CompactionHistory; keptFiles?: PreservedFilesDrift } = {},
+	options: {
+		memoryChars?: number;
+		compactions?: CompactionHistory;
+		keptFiles?: PreservedFilesDrift;
+		autoCompact?: { disabled: boolean; tripped: boolean };
+	} = {},
 ): Array<[string, string]> {
 	const rows: Array<[string, string]> = [
 		["System prompt", formatTokens(breakdown.systemPromptTokens)],
@@ -144,6 +154,28 @@ export function contextRows(
 		["Free before auto-compact", formatTokens(Math.max(0, limits.threshold - breakdown.usedTokens))],
 		["Reserved beyond that", formatTokens(Math.max(0, limits.hardLimit - limits.threshold))],
 	);
+	if (options.autoCompact) {
+		// Two different reasons not to compact, and they get different words: one
+		// is a choice the user made in settings, the other is the manager's own
+		// breaker after repeated failures. Calling both "off" would blame the user
+		// for a fault, or hide a fault behind a setting.
+		const { disabled, tripped } = options.autoCompact;
+		rows.push(["Auto-compact", disabled ? "off (settings)" : tripped ? "paused after repeated failures" : "on"]);
+		rows.push(["Hard limit", formatTokens(limits.hardLimit)]);
+		// The part a summary can never touch: the system prompt and the tool
+		// schemas ride on every request whatever the transcript does. A row that
+		// only gave its size would leave the reader to discover, after a
+		// compaction that freed nothing, that this part is fixed — and when it
+		// alone is over the hard limit, no compaction can ever make the request
+		// sendable, which is worth saying outright.
+		const fixed = breakdown.systemPromptTokens + breakdown.toolSchemaTokens;
+		rows.push([
+			"Fixed (system + tools)",
+			`${formatTokens(fixed)} — compaction cannot reduce this part${
+				fixed >= limits.hardLimit ? "; this context is over the hard limit even after compaction" : ""
+			}`,
+		]);
+	}
 	return rows;
 }
 

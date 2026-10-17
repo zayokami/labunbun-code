@@ -25,6 +25,8 @@ afterEach(() => {
 interface Fixture {
 	home: string;
 	cwd: string;
+	/** Write the home-tier settings, which is where hooks are honoured from. */
+	writeSettings(settings: unknown): void;
 }
 
 function fixture(): Fixture {
@@ -32,7 +34,11 @@ function fixture(): Fixture {
 	const cwd = mkdtempSync(join(tmpdir(), "lbb-headless-compact-cwd-"));
 	roots.push(home, cwd);
 	mkdirSync(join(home, ".labunbun"), { recursive: true });
-	return { home, cwd };
+	return {
+		home,
+		cwd,
+		writeSettings: (settings) => writeFileSync(join(home, ".labunbun", "settings.json"), JSON.stringify(settings)),
+	};
 }
 
 const OVERFLOW = {
@@ -246,4 +252,107 @@ describe("a `-p` run that runs out of room", () => {
 		// Announced before it started, reported when it was over.
 		expect(stderr.indexOf("Compacting context…")).toBeLessThan(stderr.indexOf("Context compacted"));
 	});
+});
+
+/**
+ * Wait for a file a hook writes outside the awaited path.
+ *
+ * `onPhase` is synchronous by contract, so the `PostCompact` run it starts is
+ * not awaited by the manager: the run can return before the hook has finished.
+ * Polling is the only honest way to observe it — a fixed sleep would either be
+ * slower than needed or flake on a loaded machine.
+ */
+async function waitForFile(path: string, timeoutMs = 20_000): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		try {
+			return readFileSync(path, "utf8");
+		} catch {
+			if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
+}
+
+/** The session file's entries, as the store wrote them. */
+function sessionEntries(f: Fixture): Array<{ type?: string; trigger?: string }> {
+	const [session] = SessionStore.listSessions(f.cwd, f.home);
+	const path = session?.path;
+	if (!path) throw new Error("the run saved no session file");
+	return readFileSync(path, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as { type?: string; trigger?: string });
+}
+
+/** A hook command that runs `body` under the test's own runtime. */
+function hookCommand(f: Fixture, name: string, body: string): string {
+	const script = join(f.cwd, `${name}.mjs`);
+	writeFileSync(script, body);
+	return `${process.execPath} ${script}`;
+}
+
+describe("the compaction hooks in a `-p` run", () => {
+	test("a PreCompact hook vetoes the pass the refusal forced, and nothing is recorded", async () => {
+		// The same hook the REPL honors: a `-p` run has no dialog, so a veto is the
+		// only way a script gets a word in. A veto cannot defer a refusal — the
+		// next request would be the same request — so the run ends with the
+		// manager's "cannot free enough space" message instead of re-sending.
+		const f = fixture();
+		const command = hookCommand(
+			f,
+			"precompact",
+			`console.log(${JSON.stringify(JSON.stringify({ decision: "block", reason: "hold the summary" }))});\n`,
+		);
+		f.writeSettings({ hooks: { PreCompact: [{ hooks: [{ type: "command", command }] }] } });
+		const faux = fauxProvider([OVERFLOW, { text: "done" }]);
+
+		const { code } = await runCaptured(f, { streamFn: faux.streamFn, noSession: false });
+
+		expect(code).toBe(1);
+		// One request — the one that was refused — and no summarization request.
+		expect(faux.receivedContexts).toHaveLength(1);
+		// The veto really vetoed: the store a resume reads carries no boundary.
+		expect(sessionEntries(f).some((entry) => entry.type === "compaction")).toBe(false);
+	}, 30_000);
+
+	test("a completed compaction fires PostCompact with the trigger and the sizes", async () => {
+		// The observer event, wired exactly as the REPL wires it: a failing hook is
+		// a line, and the payload carries the same pair the receipt prints.
+		const f = fixture();
+		const marker = join(f.cwd, "postcompact.json");
+		const command = hookCommand(
+			f,
+			"postcompact",
+			'import { writeFileSync } from "node:fs";\n' +
+				'let input = "";\n' +
+				"for await (const chunk of process.stdin) input += chunk;\n" +
+				`writeFileSync(${JSON.stringify(marker)}, input);\n`,
+		);
+		f.writeSettings({ hooks: { PostCompact: [{ hooks: [{ type: "command", command }] }] } });
+		const faux = fauxProvider([OVERFLOW, { text: "<summary>1. Primary Request: hello</summary>" }, { text: "done" }]);
+
+		const { code } = await runCaptured(f, { streamFn: faux.streamFn, noSession: false });
+
+		expect(code).toBe(0);
+		// The pass completed, so there is a boundary to be the event about.
+		const compaction = sessionEntries(f).find((entry) => entry.type === "compaction");
+		expect(compaction?.trigger).toBe("overflow");
+
+		const payload = JSON.parse(await waitForFile(marker)) as {
+			event?: string;
+			session_id?: string;
+			cwd?: string;
+			trigger?: string;
+			pre_tokens?: number;
+			post_tokens?: number;
+		};
+		expect(payload.event).toBe("PostCompact");
+		expect(payload.trigger).toBe("overflow");
+		expect(payload.cwd).toBe(f.cwd);
+		const [session] = SessionStore.listSessions(f.cwd, f.home);
+		expect(payload.session_id).toBe(session?.sessionId);
+		expect(payload.pre_tokens ?? 0).toBeGreaterThan(0);
+		expect(typeof payload.post_tokens).toBe("number");
+	}, 30_000);
 });

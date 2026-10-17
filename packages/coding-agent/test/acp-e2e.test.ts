@@ -757,3 +757,147 @@ describe("the ACP server, end to end", () => {
 		});
 	}, 60_000);
 });
+
+/**
+ * Rewrite the home settings with the fixture's provider plus extra keys.
+ *
+ * The home tier is the trusted one: project keys are reported as untrusted (the
+ * fixture's own project hooks block exists to produce that stderr line), so a
+ * hook or a compaction knob written into a project file would never run.
+ */
+function writeHomeSettings(f: Fixture, extra: Record<string, unknown>): void {
+	writeFileSync(
+		join(f.home, ".labunbun", "settings.json"),
+		JSON.stringify({
+			model: "stub/stub-model",
+			providers: {
+				openaiCompatible: [
+					{
+						id: "stub",
+						baseUrl: f.stub.openAIBaseUrl,
+						apiKeyEnv: "STUB_KEY",
+						models: [{ id: "stub-model", contextWindow: 200_000, maxOutputTokens: 8_192 }],
+					},
+				],
+			},
+			...extra,
+		}),
+	);
+}
+
+/** Wait for a file a hook writes; the hook runs outside the awaited path. */
+async function waitForFile(path: string, timeoutMs = 20_000): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		try {
+			return readFileSync(path, "utf8");
+		} catch {
+			if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
+}
+
+/** The file of the session the editor created, or a fixture that failed to save. */
+function sessionPath(f: Fixture, sessionId: string): string {
+	const path = SessionStore.listSessions(f.dir, f.home).find((session) => session.sessionId === sessionId)?.path;
+	if (!path) throw new Error(`no session file for ${sessionId}`);
+	return path;
+}
+
+/** A hook script that records the payload it was handed, then replies once. */
+function payloadHook(f: Fixture, name: string, marker: string, reply: string): string {
+	const script = join(f.dir, `${name}.mjs`);
+	writeFileSync(
+		script,
+		'import { writeFileSync } from "node:fs";\n' +
+			'let input = "";\n' +
+			"for await (const chunk of process.stdin) input += chunk;\n" +
+			`writeFileSync(${JSON.stringify(marker)}, input);\n` +
+			(reply ? `console.log(${JSON.stringify(reply)});\n` : ""),
+	);
+	return `${process.execPath} ${script}`;
+}
+
+describe("the compaction hooks in an ACP session", () => {
+	// A 20k-character prompt is ~5k estimated tokens, which clears a threshold of
+	// 1% of a 200k window (2k) with room to spare: the automatic pass is certain
+	// to be asked, so what the hook sees — or whether it is consulted at all — is
+	// what these tests are about.
+	const LONG_PROMPT = "x".repeat(20_000);
+
+	test("a PreCompact hook vetoes the automatic pass, and no summary is requested", async () => {
+		// The same veto the REPL and a `-p` run honor. An editor has no dialog, so
+		// a hook is the workspace's word — and a blocked estimate-driven pass must
+		// leave the transcript alone rather than pay for a summary anyway.
+		const f = fixture([{ text: "holding" }]);
+		const marker = join(f.dir, "precompact.json");
+		const command = payloadHook(
+			f,
+			"precompact",
+			marker,
+			JSON.stringify({ decision: "block", reason: "editor said no" }),
+		);
+		writeHomeSettings(f, {
+			compaction: { thresholdPercent: 1 },
+			hooks: { PreCompact: [{ hooks: [{ type: "command", command }] }] },
+		});
+
+		let sessionId = "";
+		await withAcp(f, ["acp"], async (client) => {
+			sessionId = await openSession(client, f.dir);
+			const response = await client.promptResult(await client.startPrompt(sessionId, LONG_PROMPT));
+			expect(response.error).toBeUndefined();
+			expect(response.result?.stopReason).toBe("end_turn");
+		});
+
+		// The veto came before the manager: the only model call is the prompt.
+		expect(f.stub.requests).toHaveLength(1);
+		// The hook really saw the pass it vetoed, so silence is not the story.
+		const payload = JSON.parse(readFileSync(marker, "utf8")) as { trigger?: string };
+		expect(payload.trigger).toBe("auto");
+		// And the session file carries no boundary, so a resume replays it unchanged.
+		expect(fileEntries(sessionPath(f, sessionId)).some((entry) => entry.type === "compaction")).toBe(false);
+	}, 60_000);
+
+	test("a completed compaction fires PostCompact with the trigger and the sizes", async () => {
+		// The observer event: the pass completed, the editor's surface is stderr,
+		// and the hook's answer cannot change what already happened. The payload is
+		// the same one the REPL hands over, through the ACP host.
+		const f = fixture([{ text: "<summary>1. Primary Request: a long prompt</summary>" }, { text: "done" }]);
+		const marker = join(f.dir, "postcompact.json");
+		const command = payloadHook(f, "postcompact", marker, "");
+		writeHomeSettings(f, {
+			compaction: { thresholdPercent: 1 },
+			hooks: { PostCompact: [{ hooks: [{ type: "command", command }] }] },
+		});
+
+		let sessionId = "";
+		await withAcp(f, ["acp"], async (client) => {
+			sessionId = await openSession(client, f.dir);
+			const response = await client.promptResult(await client.startPrompt(sessionId, LONG_PROMPT));
+			expect(response.error).toBeUndefined();
+			expect(response.result?.stopReason).toBe("end_turn");
+			// The `onPhase` contract is synchronous, so the hook run is not awaited
+			// by the manager; poll while the child is still up.
+			await waitForFile(marker);
+		});
+
+		const payload = JSON.parse(readFileSync(marker, "utf8")) as {
+			event?: string;
+			session_id?: string;
+			cwd?: string;
+			trigger?: string;
+			pre_tokens?: number;
+			post_tokens?: number;
+		};
+		expect(payload.event).toBe("PostCompact");
+		expect(payload.trigger).toBe("auto");
+		expect(payload.session_id).toBe(sessionId);
+		expect(payload.cwd).toBe(f.dir);
+		expect(payload.pre_tokens ?? 0).toBeGreaterThan(0);
+		expect(typeof payload.post_tokens).toBe("number");
+		// The store recorded the pass the hook was told about.
+		expect(fileEntries(sessionPath(f, sessionId)).some((entry) => entry.type === "compaction")).toBe(true);
+	}, 60_000);
+});

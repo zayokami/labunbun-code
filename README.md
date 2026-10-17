@@ -171,6 +171,7 @@ The hook events are:
 - `SessionEnd`
 - `Stop`
 - `PreCompact`
+- `PostCompact`
 - `Notification`
 
 The maximum timeout is 600000 ms.

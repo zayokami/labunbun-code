@@ -677,13 +677,30 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// The cheap rung replaces old tool results with previews, so the bytes the
 		// model was shown are gone from its context and the read record goes too.
 		onContextReduced: () => readState.clear(),
+		// The same hook the REPL consults before a pass. A `-p` run has no dialog
+		// to ask, so a hook is the only way a script gets a word in — and a veto
+		// has to defer the same passes it defers interactively: the estimate's,
+		// never one the provider already refused (the wiring handles that).
+		preCompact: async (trigger, customInstructions) => {
+			if (!hooksRuntime.has("PreCompact")) return { blocked: false };
+			const outcome = await hooksRuntime.run("PreCompact", {
+				session_id: sessionId,
+				cwd,
+				trigger,
+				// A manual pass's focus argument; undefined for the automatic
+				// passes, and dropped from the payload then.
+				custom_instructions: customInstructions,
+			});
+			for (const error of outcome.errors) console.error(`PreCompact hook failed: ${error}`);
+			return { blocked: outcome.blocked, reason: outcome.reason };
+		},
 		// The pass re-roots the chain above the task snapshot, so the end of it is
 		// the first moment the list can be put back where a restart reads it — the
 		// same save the REPL makes at the same point. The reporting here is the
 		// wiring's own default, reproduced because passing `onPhase` replaces it:
 		// a `-p` run's surface is stderr, and it must say exactly what it said
 		// before the board existed.
-		onPhase: (phase) => {
+		onPhase: async (phase) => {
 			const text = compactionPhaseText(phase);
 			if (text) console.error(text);
 			if (phase.kind !== "done") return;
@@ -692,6 +709,22 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			readState.clear();
 			for (const warning of compactionWarnings(phase.verification)) console.error(warning);
 			saveTasks(taskStore, store);
+			// The observer event, after everything the pass had to put back is in
+			// place: a `-p` run reports to stderr because that is where it says
+			// things, and the hook's answer cannot change a pass that already
+			// happened — a failure is a line, never a veto.
+			if (hooksRuntime.has("PostCompact")) {
+				const outcome = await hooksRuntime.run("PostCompact", {
+					session_id: sessionId,
+					cwd,
+					trigger: phase.trigger,
+					pre_tokens: phase.preTokens,
+					post_tokens: phase.postTokens,
+				});
+				for (const message of advisoryHookFailures("PostCompact", outcome)) {
+					console.error(`Warning: ${message}`);
+				}
+			}
 		},
 	});
 
