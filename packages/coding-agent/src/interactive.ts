@@ -145,6 +145,7 @@ import {
 	readToolCheckpoints,
 	recordRewind,
 	resendCheckpointsAcrossCompaction,
+	restoreCheckpointFile,
 	type TouchedFileReport,
 	touchedFileReports,
 } from "./checkpoint-log.ts";
@@ -4226,7 +4227,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			}
 			const checkpoint = checkpoints[index];
 			try {
-				writeFileSync(checkpoint.path, checkpoint.content, "utf8");
+				restoreCheckpointFile(checkpoint.path, checkpoint.content);
 				// The rollback itself is recorded, so a later reader can tell a
 				// workspace that was rolled back from one that was merely edited —
 				// the drift a restore leaves behind has no tool call to explain it.

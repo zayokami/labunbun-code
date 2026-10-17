@@ -25,7 +25,7 @@
  * history silently.
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, constants, lstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import type { SessionEntry, SessionStore } from "@labunbun/agent";
 import type { ToolResultMessage } from "@labunbun/ai";
 import type { AgentTask } from "@labunbun/tools";
@@ -324,7 +324,14 @@ export function createToolLedger(options: {
 		if (filePath === undefined) return;
 		let beforeHash: string | null = null;
 		try {
-			if (existsSync(filePath)) {
+			// `lstat`, not `stat`: a path the call named may be a symlink, and a
+			// checkpoint copies contents into the session file. Following the
+			// link would pull a file the user never asked this session to hold
+			// in through a name an Edit/Write happened to mention. Links,
+			// directories and devices are simply not captured — the same
+			// "nothing to snapshot" answer a missing file gets.
+			const stats = lstatSync(filePath);
+			if (stats.isFile() && !stats.isSymbolicLink()) {
 				const content = readFileSync(filePath, "utf8");
 				beforeHash = sha256Of(content);
 				// Over the cap the content is not inlined — a session file is not
@@ -488,6 +495,70 @@ export function writeToolCheckpoint(store: SessionStore, record: ToolCheckpoint)
 export function recordRewind(store: SessionStore, path: string, fromEntryId: string): void {
 	const record: RewindRecord = { at: Date.now(), path, fromEntryId };
 	appendEntry(store, REWIND_KIND, record);
+}
+
+/** `O_NOFOLLOW` where the platform defines one; Windows has no such flag, and 0 is the flagless value. */
+const O_NOFOLLOW_OR_ZERO: number = constants.O_NOFOLLOW ?? 0;
+
+/** The mode a restore requests for a path it has to create. */
+const RESTORE_FILE_MODE = 0o600;
+
+/**
+ * Write a checkpoint's content back over `path` for `/rewind` — refusing every
+ * name that is not a plain, singly-linked file.
+ *
+ * The content comes out of the session file, which is data this build may not
+ * have written (a damaged or hand-edited entry, another build's session), and
+ * the path it names is written over the live workspace. So the destination is
+ * checked before the write: a symlink would make `/rewind` overwrite whatever
+ * it points at — including a file outside the project — and a hard link would
+ * silently rewrite the other name it shares its inode with. Both are refused
+ * with an error the caller reports; neither is ever written through.
+ *
+ * The write itself repeats the symlink refusal at the syscall where the
+ * platform has one (`O_NOFOLLOW`): the `lstat` above and the `open` below are
+ * two moments, and only the open can refuse the link that appeared between
+ * them. Windows defines no `O_NOFOLLOW`, so there the `lstat` guard is the
+ * defense. A missing path is the ordinary "Write created this file" case and is
+ * created — with the same failure to make missing parents the caller's plain
+ * write had, and with `0o600` as the requested mode. An existing file keeps
+ * the mode it arrived with, because `open` consults the mode only when it
+ * creates.
+ */
+export function restoreCheckpointFile(path: string, content: string): void {
+	let mode = RESTORE_FILE_MODE;
+	try {
+		const stats = lstatSync(path);
+		if (stats.isSymbolicLink()) {
+			throw new Error(`Refusing to restore ${path}: it is a symbolic link.`);
+		}
+		if (!stats.isFile()) {
+			throw new Error(`Refusing to restore ${path}: it is not a regular file.`);
+		}
+		if (stats.nlink > 1) {
+			throw new Error(`Refusing to restore ${path}: it has ${stats.nlink} hard links.`);
+		}
+		mode = stats.mode & 0o777;
+	} catch (error) {
+		// A path that is not there yet is the creation case: let the open below
+		// make it. Every other lstat failure — a permissions problem, a parent
+		// that is a file — is the caller's to see.
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+
+	if (O_NOFOLLOW_OR_ZERO === 0) {
+		// Windows: no `O_NOFOLLOW` to pass, and its `open` does not take the
+		// numeric flag set at all (Bun answers EINVAL). The `lstat` guard above
+		// is the defense there; the write itself is the plain one.
+		writeFileSync(path, content, { encoding: "utf8", mode });
+		return;
+	}
+	const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | O_NOFOLLOW_OR_ZERO, mode);
+	try {
+		writeFileSync(fd, content, "utf8");
+	} finally {
+		closeSync(fd);
+	}
 }
 
 /**

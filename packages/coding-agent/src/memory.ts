@@ -16,7 +16,7 @@
  * The user tier is not gated: it is the user's own, read from the same home
  * whatever the cwd.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { isProjectTierTrusted } from "./project-trust.ts";
@@ -43,8 +43,13 @@ export interface MemoryLoadResult {
 
 function readIfExists(path: string): string | null {
 	try {
-		if (!existsSync(path)) return null;
-		if (!statSync(path).isFile()) return null;
+		// `lstat` describes the name, not what it points at: a memory file
+		// swapped for a symlink would otherwise turn `@include`, a rules file or
+		// LABUNBUN.md into a way to pull an arbitrary file into the system
+		// prompt. Only a regular file of our own is readable here; a link, a
+		// directory or a device is "nothing to read", the same answer as absent.
+		const stats = lstatSync(path);
+		if (stats.isSymbolicLink() || !stats.isFile()) return null;
 		return readFileSync(path, "utf8");
 	} catch {
 		return null;
