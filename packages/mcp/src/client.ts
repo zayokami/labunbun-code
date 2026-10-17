@@ -520,7 +520,17 @@ function adaptTools(
 	serverName: string,
 	config: McpServerConfig,
 	client: Client,
-	definitions: Array<{ name: string; description?: string; inputSchema?: unknown }>,
+	definitions: Array<{
+		name: string;
+		description?: string;
+		inputSchema?: unknown;
+		annotations?: {
+			readOnlyHint?: boolean;
+			destructiveHint?: boolean;
+			idempotentHint?: boolean;
+			openWorldHint?: boolean;
+		};
+	}>,
 	callTimeoutMs: number,
 ): AnyTool[] {
 	return definitions.map((mcpTool) =>
@@ -528,8 +538,14 @@ function adaptTools(
 			name: `mcp__${serverName}__${mcpTool.name}`,
 			description: mcpTool.description ?? `MCP tool ${mcpTool.name} from ${serverName}`,
 			inputSchema: jsonSchemaToZod((mcpTool.inputSchema ?? { type: "object" }) as Record<string, unknown>) as z.ZodType,
-			isReadOnly: () => false,
-			isConcurrencySafe: () => true,
+			// The server owns the declaration: only an explicit readOnlyHint:true
+			// makes a tool read-only; absent, false, or a destructiveHint alone
+			// keeps the fail-closed default. Plan mode reads this same isReadOnly
+			// answer through collectReadOnlyToolNames.
+			isReadOnly: () => mcpTool.annotations?.readOnlyHint === true,
+			// Conservative default: a tool may run in parallel only when the
+			// server declares it read-only; idempotentHint alone does not qualify.
+			isConcurrencySafe: () => mcpTool.annotations?.readOnlyHint === true,
 			// No maxResultSizeChars override on purpose: the result flows
 			// through the same pipeline budget as every other tool, so a
 			// server cannot outgrow the conversation by answering over the
