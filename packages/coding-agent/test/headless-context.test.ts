@@ -206,6 +206,9 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 		// Memory is the third kind behind the same gate: a checkout's LABUNBUN.md
 		// reaches a `-p` run's prompt only after the directory is trusted.
 		plant(join(f.cwd, "LABUNBUN.md"), "PROJECT-MEMORY-MARKER\n");
+		// Output styles are the fourth kind: the file is named in the notice so the
+		// operator knows the decision would load it, and is never read before then.
+		plant(join(f.cwd, ".labunbun", "output-styles", "brief.md"), "PROJECT-STYLE-MARKER\n");
 
 		const seen = await runScene(
 			{
@@ -236,6 +239,9 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 		// The memory file is withheld with them, and is not in any request either.
 		expect(seen.systemPrompts.join("\n")).not.toContain("PROJECT-MEMORY-MARKER");
 		expect(seen.stderr).toContain("memory file");
+		// The style file is counted and named, and its body never reaches a request.
+		expect(seen.stderr).toContain("1 output style");
+		expect(seen.systemPrompts.join("\n")).not.toContain("PROJECT-STYLE-MARKER");
 	}, 30_000);
 
 	test("an approved project's definitions are loaded, out of the same ledger", async () => {
@@ -248,6 +254,9 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 			join(f.cwd, ".labunbun", "agents", "helper.md"),
 			"---\nname: helper\ndescription: helps\n---\nPROJECT-AGENT-BODY\n",
 		);
+		// The style rides the same ledger: approved here, it must add nothing to the
+		// notice below, which is the assertion for the fourth kind.
+		plant(join(f.cwd, ".labunbun", "output-styles", "brief.md"), "PROJECT-STYLE-MARKER\n");
 		// The same call the REPL's `/agents approve` makes, in-process: this is the
 		// `-p` side of the one decision, and it has to read the one record. Memory
 		// rides along because the memory walk reaches above the temp directory: on
@@ -258,7 +267,7 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 		// home directory instead of about this scene. Approving memory turns the
 		// whole walk on, which is what makes the scene hermetic the way production
 		// is (where home IS the real home and those files are subtracted).
-		approveProjectDefinitions(f.cwd, ["agents", "skills", "memory"], f.home);
+		approveProjectDefinitions(f.cwd, ["agents", "skills", "memory", "styles"], f.home);
 
 		const seen = await runScene(
 			{
