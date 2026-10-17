@@ -123,6 +123,13 @@ describe("shortcutGroups", () => {
 		expect(keys).toContain("C-x C-u / C-x C-l");
 		expect(keys).toContain("C-x C-o");
 		expect(keys).toContain("M-C-H");
+		// Batch 2a's three commands, and the reason the third is on `M-o` rather than the
+		// uemacs `C-t`: the watch panel owns that key, so a row for it would advertise a
+		// command the engine cannot deliver there. `C-t` therefore stays out of the list,
+		// and the reserved check just below keeps it out.
+		expect(keys).toContain("M-C-F");
+		expect(keys).toContain("M-t");
+		expect(keys).toContain("M-o");
 		// Bound-but-unimplemented keys are claimed and consumed, so advertising them as
 		// working would be a lie in a new place. They must not appear. `M-u` stood in this
 		// list until the case commands landed; it is one of the rows above now.

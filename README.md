@@ -311,7 +311,10 @@ The Emacs editor has no mode line. Use these keys.
 | `C-f`, `C-b` | Move one character forward or back. |
 | `C-n`, `C-p` | Move one line down or up. |
 | `M-f`, `M-b` | Move one word forward or back. |
+| `M-C-F` | Jump to the matching bracket. |
 | `M-u`, `M-l`, `M-c` | Upcase, downcase, or capitalize one word. |
+| `M-t` | Move the word at the point past the next word. A count moves it past that many words. |
+| `M-o` | Swap the two characters around the point. This is uemacs's `C-t`, which the watch panel owns here. It does not cross a line break. |
 | `C-k` | Kill to the end of the line. |
 | `C-w` | Kill the word before the point. |
 | `C-d`, `C-h` | Delete one character forward or back. |

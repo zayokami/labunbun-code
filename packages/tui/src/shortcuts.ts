@@ -174,7 +174,14 @@ export function shortcutGroups(opts: {
 				["C-f / C-b", "character forward / back"],
 				["C-n / C-p", "line down / up"],
 				["M-f / M-b", "word forward / back"],
+				// uemacs's `goto-matching-fence`; GNU gives the key to `forward-sexp`. The
+				// divergence is named on the command in `emacs.ts`, where the key is taken.
+				["M-C-F", "jump to the matching bracket"],
 				["M-u / M-l / M-c", "upcase / downcase / capitalize word"],
+				// GNU's `transpose-words` on its own key, and uemacs's `transpose-chars`
+				// relocated from the watch panel's `C-t`; `emacs.ts` records both decisions.
+				["M-t", "transpose the word at point with the next"],
+				["M-o", "transpose the characters around point (uemacs's C-t)"],
 				["C-k", "kill to end of line"],
 				["C-w", "kill region"],
 				["M-w", "copy region as kill"],

@@ -1189,11 +1189,9 @@ describe("emacs: the reserved tables", () => {
 		// first.
 		expect(RESERVED_KEYS.map(([token]) => token)).toEqual([
 			"C-t",
-			"M-t",
 			"C-M-t",
 			"C-q",
 			"C-o",
-			"M-o",
 			"C-g",
 			"M-z",
 			"M-h",
@@ -1237,6 +1235,11 @@ describe("emacs: the reserved tables", () => {
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("x");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-u");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-l");
+		// Batch 2a removed `M-t` and `M-o` when their commands landed. `M-o`'s old row also
+		// cited `bindings.el:1229` for `split-line`, which is `esc-map "\C-o"` — `C-M-o` — so
+		// the row was mis-keyed as well as unimplemented; the new command explains the move.
+		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("M-t");
+		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("M-o");
 		// `C-o` is the key the `shortcuts.ts` rows cite when they explain what the engine
 		// claims, so it belongs in *this* table and saying so here is what keeps the two files
 		// from disagreeing: a reader of the shortcut list can check the claim one layer down.
@@ -1597,6 +1600,299 @@ describe("emacs: M-C-H kills the previous word", () => {
 		expect(e.state.text).toBe("aa ");
 		expect(e.state.cursor).toBe(3);
 		expect(e.engine.killRing).toEqual(["bb cc"]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// uemacs batch 2a: the fence jump and the two transposes
+// ---------------------------------------------------------------------------
+
+describe("emacs: M-C-F jumps to the matching fence", () => {
+	// uemacs's `cmd_goto_matching_fence` (`random.c:921`, key `META | CONTROL | 'F'`,
+	// `ebind.h:99`). GNU binds `C-M-f` to `forward-sexp` instead (`bindings.el:1651`), which is
+	// a different command on the same key; this is a compat port, so uemacs's command runs and
+	// the divergence is named here. The host side is the reason the engine has to take the key:
+	// `PromptInput.tsx:696` tests `key.meta` alone, so `C-M-f` would otherwise reach the host's
+	// meta-f branch, which is `moveWordRight` (`:697`) — a different motion, one modifier short.
+
+	test("forward from an opener, backward from a closer", () => {
+		const forward = editor("a (foo) b", 2);
+		expect(forward.press("f", CM)).toBe(true);
+		expect(forward.state.text).toBe("a (foo) b");
+		expect(forward.state.cursor).toBe(6);
+		expect(forward.engine.lastCommand).toBe("goto-matching-fence");
+
+		const backward = editor("a (foo) b", 6);
+		expect(backward.press("f", CM)).toBe(true);
+		expect(backward.state.cursor).toBe(2);
+	});
+
+	test("all three fence pairs, both directions", () => {
+		for (const [text, from, to] of [
+			["(x)", 0, 2],
+			["(x)", 2, 0],
+			["[x]", 0, 2],
+			["[x]", 2, 0],
+			["{x}", 0, 2],
+			["{x}", 2, 0],
+		] as const) {
+			const e = editor(text, from);
+			expect(e.press("f", CM)).toBe(true);
+			expect(e.state.cursor).toBe(to);
+		}
+	});
+
+	test("nesting of the same kind is counted; the other kinds are stepped over", () => {
+		// `count` rises on the character under point and falls on its opposite
+		// (`random.c:985-988`); nothing there compares the *other* fence families, so `([)]`
+		// matches the `)` under point with the `(` two characters back. That is uemacs's answer,
+		// not a parser's, and it is pinned rather than corrected.
+		const nested = editor("((a))", 0);
+		expect(nested.press("f", CM)).toBe(true);
+		expect(nested.state.cursor).toBe(4);
+
+		const mixed = editor("([{}])", 0);
+		expect(mixed.press("f", CM)).toBe(true);
+		expect(mixed.state.cursor).toBe(5);
+
+		const interleaved = editor("([)]", 0);
+		expect(interleaved.press("f", CM)).toBe(true);
+		expect(interleaved.state.cursor).toBe(2);
+
+		const reverse = editor("([)]", 3);
+		expect(reverse.press("f", CM)).toBe(true);
+		expect(reverse.state.cursor).toBe(1);
+	});
+
+	test("a fence inside a string is still a fence", () => {
+		// uemacs scans characters, not syntax (`random.c:979-995`); there is no string state to
+		// consult in a prompt either, so the `)` inside the quotes closes the form.
+		const e = editor('(")")', 0);
+		expect(e.press("f", CM)).toBe(true);
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("an unmatched fence changes nothing and runs no command", () => {
+		// Failure restores the saved line and offset (`random.c:1007-1010`) and returns before the
+		// command loop's tail, so `last-command` keeps the previous command. The fixture plays a
+		// motion first so the assertion can tell "left unchanged" from "reset to nil".
+		const forward = editor("(abc", 0);
+		forward.press("f", C);
+		expect(forward.engine.lastCommand).toBe("forward-char");
+		forward.state.cursor = 0;
+		expect(forward.press("f", CM)).toBe(true);
+		expect(forward.state.text).toBe("(abc");
+		expect(forward.state.cursor).toBe(0);
+		expect(forward.engine.lastCommand).toBe("forward-char");
+		expect(forward.undoDepth()).toBe(0);
+
+		const backward = editor("abc)", 3);
+		expect(backward.press("f", CM)).toBe(true);
+		expect(backward.state.cursor).toBe(3);
+		expect(backward.engine.lastCommand).toBeNull();
+	});
+
+	test("point off a fence, or on a newline, is not a fence", () => {
+		const off = editor("abc", 1);
+		expect(off.press("f", CM)).toBe(true);
+		expect(off.state.cursor).toBe(1);
+		expect(off.engine.lastCommand).toBeNull();
+
+		// At the end of a line uemacs reads `'\n'` (`random.c:936-939`), and `'\n'` has no arm
+		// in the fence switch (`:942-969`), so the key rings the bell rather than scanning.
+		const eol = editor("(\n)", 1);
+		expect(eol.press("f", CM)).toBe(true);
+		expect(eol.state.cursor).toBe(1);
+		expect(eol.engine.lastCommand).toBeNull();
+	});
+
+	test("the opener at the first position of the buffer is matched", () => {
+		// A deliberate divergence, and the only one in this command. uemacs steps before it
+		// reads and breaks *after* the step when `at_buffer_end` says the scan has run out
+		// (`random.c:989-994`, `search.c:988-998`), so a reverse scan never reads offset 0:
+		// `(foo)` with point on the `)` fails there. This port reads position 0 before deciding
+		// the scan is over, because the alternative is a visible no-op on the commonest
+		// two-character form. Everything else about the scan is the reference's.
+		const e = editor("(foo)", 4);
+		expect(e.press("f", CM)).toBe(true);
+		expect(e.state.cursor).toBe(0);
+		expect(e.engine.lastCommand).toBe("goto-matching-fence");
+	});
+});
+
+describe("emacs: M-t transposes words", () => {
+	// GNU's `transpose-words` (`bindings.el:1597`, `simple.el:8798`), which is the command the
+	// key owns in the reference tree; uemacs binds no `M-t` at all — its only transpose command
+	// is `transpose-chars` on `C-t` (`random.c:191`, `ebind.h:39`), a key the host's watch panel
+	// also claims. The algorithm is `transpose-subr` / `transpose-subr-1`
+	// (`simple.el:8885-8945`), and the word mover is this engine's `forward-word`, so the word
+	// rule is the one documented on `#caseWord`: `_` splits, a script change splits.
+
+	test("M-t moves the word at point past the next one and leaves point at the end", () => {
+		const e = editor("foo bar", 3);
+		expect(e.press("t", M)).toBe(true);
+		expect(e.state.text).toBe("bar foo");
+		expect(e.state.cursor).toBe(7);
+		expect(e.engine.lastCommand).toBe("transpose-words");
+		expect(e.undoDepth()).toBe(1);
+	});
+
+	test("unequal word lengths keep the run's end as point", () => {
+		// `(goto-char (car pos2))` (`simple.el:8913`) is the *forward* endpoint collected before
+		// the edit (`:8898`), which remains the end of the transposed run because the two spans
+		// and the middle between them cover the same length in both orders.
+		const e = editor("foo barbaz", 3);
+		expect(e.press("t", M)).toBe(true);
+		expect(e.state.text).toBe("barbaz foo");
+		expect(e.state.cursor).toBe(10);
+	});
+
+	test("a positive count drags the word past that many", () => {
+		const e = editor("foo bar baz", 3);
+		e.press("2", M);
+		expect(e.press("t", M)).toBe(true);
+		expect(e.state.text).toBe("bar baz foo");
+		expect(e.state.cursor).toBe(11);
+	});
+
+	test("a negative count drags the previous word forward and lands on its end", () => {
+		// The `t` branch: `(goto-char (+ (car pos2) (- (cdr pos1) (car pos1))))`
+		// (`simple.el:8914-8919`), whose second term is the current word's length.
+		const e = editor("foo bar", 7);
+		e.press("-", M);
+		expect(e.press("t", M)).toBe(true);
+		expect(e.state.text).toBe("bar foo");
+		expect(e.state.cursor).toBe(3);
+	});
+
+	test("the span is this engine's word rule, as M-f measures it", () => {
+		// `_` is a symbol here, not a word character, so `foo_bar` is two units; uemacs's
+		// `inword` (`word.c:356`) is letters and digits only and would split it the same way,
+		// while the script-boundary half of the rule is this engine's (see `#caseWord`).
+		const e = editor("foo_bar baz", 3);
+		expect(e.press("t", M)).toBe(true);
+		expect(e.state.text).toBe("bar_foo baz");
+		expect(e.state.cursor).toBe(7);
+	});
+
+	test("with a zero argument the words at point and mark are exchanged", () => {
+		// `(= arg 0)`: `save-excursion` collects the word at point, `goto-char (mark)` collects
+		// the one at mark, transposes, and exchanges point and mark (`simple.el:8902-8908`).
+		// The positions are marker positions rather than integers — `transpose-subr-1` is a
+		// four-step insert/delete sequence chosen to move markers with their text
+		// (`simple.el:8930-8945`) — so the fixture puts point *inside* the second word, where a
+		// plain replaced-span adjustment of the mark would give a different answer.
+		const e = editor("foo bar baz", 0);
+		e.press(" ", C); // mark at 0
+		e.state.cursor = 5; // inside "bar"; mark stays at 0
+		e.press("0", M);
+		expect(e.press("t", M)).toBe(true);
+		expect(e.state.text).toBe("bar foo baz");
+		expect(e.state.cursor).toBe(0); // the old mark
+		expect(e.engine.mark).toBe(7); // the old point, moved with the insert/delete sequence
+		expect(e.engine.markActive).toBe(true);
+		expect(e.engine.lastCommand).toBe("transpose-words");
+	});
+
+	test("zero with no mark, and two spans that cannot be separated, run nothing", () => {
+		// `(or (mark) (error "No mark set in this buffer"))` (`simple.el:8905`) and
+		// `(error "Don't have two things to transpose")` (`simple.el:8929`) both leave the buffer
+		// and `last-command` alone; a signed command that signals does not reach the loop tail.
+		const noMark = editor("foo bar", 0);
+		noMark.press("0", M);
+		expect(noMark.press("t", M)).toBe(true);
+		expect(noMark.state.text).toBe("foo bar");
+		expect(noMark.state.cursor).toBe(0);
+		expect(noMark.engine.lastCommand).toBeNull();
+		expect(noMark.undoDepth()).toBe(0);
+
+		const overlap = editor("foo", 0);
+		expect(overlap.press("t", M)).toBe(true);
+		expect(overlap.state.text).toBe("foo");
+		expect(overlap.state.cursor).toBe(0);
+		expect(overlap.engine.lastCommand).toBeNull();
+		expect(overlap.undoDepth()).toBe(0);
+	});
+});
+
+describe("emacs: M-o transposes characters, uemacs's command", () => {
+	// uemacs's `cmd_transpose_characters` (`random.c:191`), the command it binds to
+	// `CONTROL | 'T'` (`ebind.h:39`). `C-t` is not usable here: the REPL's watch panel also owns
+	// it (`shortcuts.ts` says so, and `watch-panel.test.tsx` measures it), and a bound key that
+	// the engine claims while another hook receives it is exactly the double dispatch the survey
+	// called out. `M-o` is globally free in this GNU tree — the reserved row that used to say
+	// `split-line (bindings.el:1229)` was reading the `esc-map "\C-o"` binding, which is `C-M-o`,
+	// not `M-o` — so the uemacs command moves to the free key and the divergence is recorded.
+	//
+	// The behaviour is the reference's, not GNU's: the swap is bounded by the line
+	// (`random.c:202-209`), the count is ignored (the function's `f`/`n` are unread), and point
+	// does not move. GNU's `transpose-chars` honors the count, crosses lines at end of line and
+	// moves point forward one character (`simple.el:8787-8796`); none of that is done here.
+
+	test("M-o swaps the characters around point and leaves point where it was", () => {
+		const e = editor("abc", 1);
+		expect(e.press("o", M)).toBe(true);
+		expect(e.state.text).toBe("bac");
+		expect(e.state.cursor).toBe(1);
+		expect(e.engine.lastCommand).toBe("transpose-chars");
+		expect(e.undoDepth()).toBe(1);
+	});
+
+	test("at end of line the last two characters are swapped", () => {
+		const e = editor("abc", 3);
+		expect(e.press("o", M)).toBe(true);
+		expect(e.state.text).toBe("acb");
+		expect(e.state.cursor).toBe(3);
+	});
+
+	test("at beginning of line, or on a one-character line, it signals", () => {
+		// `if (--doto < 0) return FALSE` (`random.c:205-206`): there is no character before point
+		// to swap with. The key is still consumed, and the signal leaves `last-command` as it was.
+		const bol = editor("abc", 0);
+		bol.press("f", C);
+		bol.state.cursor = 0;
+		expect(bol.press("o", M)).toBe(true);
+		expect(bol.state.text).toBe("abc");
+		expect(bol.state.cursor).toBe(0);
+		expect(bol.engine.lastCommand).toBe("forward-char");
+		expect(bol.undoDepth()).toBe(0);
+
+		const one = editor("a\nb", 1);
+		expect(one.press("o", M)).toBe(true);
+		expect(one.state.text).toBe("a\nb");
+		expect(one.engine.lastCommand).toBeNull();
+	});
+
+	test("the swap never crosses a line break", () => {
+		const middle = editor("ab\ncd", 4);
+		expect(middle.press("o", M)).toBe(true);
+		expect(middle.state.text).toBe("ab\ndc");
+		expect(middle.state.cursor).toBe(4);
+
+		const bol = editor("ab\ncd", 3);
+		expect(bol.press("o", M)).toBe(true);
+		expect(bol.state.text).toBe("ab\ncd");
+		expect(bol.state.cursor).toBe(3);
+	});
+
+	test("a prefix count is ignored", () => {
+		const e = editor("abcd", 2);
+		e.press("3", M);
+		expect(e.press("o", M)).toBe(true);
+		expect(e.state.text).toBe("acbd");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("a surrogate pair is one character to swap", () => {
+		const atEnd = editor("a\u{1F600}", 3);
+		expect(atEnd.press("o", M)).toBe(true);
+		expect(atEnd.state.text).toBe("\u{1F600}a");
+		expect(atEnd.state.cursor).toBe(3);
+
+		const middle = editor("\u{1F600}ab", 2);
+		expect(middle.press("o", M)).toBe(true);
+		expect(middle.state.text).toBe("a\u{1F600}b");
+		expect(middle.state.cursor).toBe(2);
 	});
 });
 

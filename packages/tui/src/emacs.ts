@@ -66,10 +66,11 @@
  *   - **Cursor-only moves use `EmacsOps.setCursor` and are not undoable**, exactly as in
  *     `VimEngine`.
  *
- * Out of scope, deliberately: rectangle mode, `M-z` / `M-h`, transpose, `C-o` (`open-line`),
- * incremental search, `C-q`, and the rest of `ctl-x-map`. Their keys are listed in
- * {@link RESERVED_KEYS} and consumed without effect, so that they are *this engine's* and
- * cannot fall through to the host as something else.
+ * Out of scope, deliberately: rectangle mode, `M-z` / `M-h`, the two GNU transpose keys this
+ * port leaves alone (`C-t`, `C-M-t`), `C-o` (`open-line`), incremental search, `C-q`, and the
+ * rest of `ctl-x-map`. Their keys are listed in {@link RESERVED_KEYS} and consumed without
+ * effect, so that they are *this engine's* and cannot fall through to the host as something
+ * else.
  *
  *   - **What `undo` does not do here**, in four places, each with the citation that says what
  *     Emacs does instead. None of them is a decision taken for convenience; two of them are one
@@ -225,6 +226,9 @@ const CMD = {
 	upcaseRegion: "upcase-region",
 	downcaseRegion: "downcase-region",
 	deleteBlankLines: "delete-blank-lines",
+	gotoMatchingFence: "goto-matching-fence",
+	transposeWords: "transpose-words",
+	transposeChars: "transpose-chars",
 	undo: "undo",
 } as const;
 
@@ -785,11 +789,9 @@ export function emacsCasify(text: string, action: EmacsCaseAction): string {
  */
 export const RESERVED_KEYS: ReadonlyArray<readonly [string, string]> = [
 	["C-t", "transpose-chars (bindings.el:1596)"],
-	["M-t", "transpose-words (bindings.el:1597)"],
 	["C-M-t", "transpose-sexps (bindings.el:1598)"],
 	["C-q", "quoted-insert (bindings.el:1230)"],
 	["C-o", "open-line (bindings.el:1228)"],
-	["M-o", "split-line (bindings.el:1229)"],
 	["C-g", "keyboard-quit (bindings.el:1221)"],
 	["M-z", "zap-to-char (bindings.el:1236)"],
 	["M-h", "mark-paragraph (bindings.el:1710)"],
@@ -1322,6 +1324,17 @@ export class EmacsEngine {
 				this.#killWord(-emacsPrefixValue(this.#prefixArg));
 				return true;
 			}
+			if (input === "f") {
+				// uemacs's `cmd_goto_matching_fence` (`random.c:921`), on `M-C-F` (`ebind.h:99`).
+				// GNU binds the same key to `forward-sexp` (`bindings.el:1651`); the compat batch
+				// takes it, and {@link #gotoMatchingFence} records the divergence and the one
+				// deliberate departure in the scan. The host would otherwise read the key as
+				// `M-f`: `PromptInput.tsx:696` tests `key.meta` without a ctrl guard, which is
+				// also why the engine claiming it first is the whole fix.
+				this.#beginCommand(CMD.gotoMatchingFence);
+				this.#gotoMatchingFence();
+				return true;
+			}
 			return false;
 		}
 		switch (input) {
@@ -1380,6 +1393,19 @@ export class EmacsEngine {
 			case "c":
 				this.#beginCommand(CMD.capitalizeWord);
 				this.#caseWord("capitalize");
+				return true;
+			case "t":
+				// `transpose-words` (`bindings.el:1597`). uemacs has no `M-t`; the key is GNU's,
+				// and {@link #transposeWords} says why the two references do not collide here.
+				this.#beginCommand(CMD.transposeWords);
+				this.#transposeWords(emacsPrefixValue(this.#prefixArg));
+				return true;
+			case "o":
+				// uemacs's `cmd_transpose_characters` (`random.c:191`, `ebind.h:39`), moved off
+				// the host-contested `C-t`. {@link #transposeChars} records the move and the
+				// difference from GNU's command of the same name.
+				this.#beginCommand(CMD.transposeChars);
+				this.#transposeChars();
 				return true;
 			// `M-SPC` and `M-.`, uemacs's two `cmd_set_mark` keys against GNU's one
 			// (`basic.c:431`; `ebind.h:111` and `:113`). Both trees are recorded because both
@@ -2439,6 +2465,288 @@ export class EmacsEngine {
 		const to = nthLineStart(text, lp1 + 1 + nld);
 		this.#write(text.slice(0, from) + text.slice(to), from);
 		return true;
+	}
+
+	// -- uemacs batch 2a: the fence jump and the two transposes ---------------
+
+	/**
+	 * `goto-matching-fence`: uemacs's `cmd_goto_matching_fence` (`random.c:921`), bound to
+	 * `META | CONTROL | 'F'` (`ebind.h:99`). GNU binds `C-M-f` to `forward-sexp`
+	 * (`bindings.el:1651`) — same key, different command — so the key is taken and the
+	 * divergence recorded rather than hidden.
+	 *
+	 * The scan is characters, not syntax (`random.c:935-995`). Only `()[]{}` are fences; an
+	 * opener scans forward for its closer and a closer scans backward for its opener
+	 * (`:942-970`); every character of the same kind increments `count` and every character of
+	 * the opposite kind decrements it (`:985-988`), so nesting of the same kind is counted and
+	 * the other fence families are simply stepped over. That last point is why `([)]` matches
+	 * the `)` under point with the `(` two characters back: uemacs has no parser and neither
+	 * does this. A fence inside a string is still a fence.
+	 *
+	 * End of line is the character `'\n'` (`:936-939`, `:981-984`), which no arm of the fence
+	 * switch accepts; point off a fence therefore signals, as it does at the end of a line.
+	 * The prefix argument is ignored: the reference marks `f` and `n` "not used"
+	 * (`:917-919`).
+	 *
+	 * Failure restores the saved position and beeps (`:1007-1011`); here it leaves point and
+	 * `last-command` untouched by clearing `#commit`, because a signal never reaches
+	 * `command_loop_1`'s tail (`src/keyboard.c:1579-1580`). Success moves point to the fence.
+	 *
+	 * **One deliberate departure.** uemacs steps before it reads and checks `at_buffer_end`
+	 * *after* the step (`random.c:989-994`; `search.c:988-998`), so a backward scan stops when
+	 * it reaches offset 0 without ever reading the character there: in the reference, `(foo)`
+	 * with point on the `)` fails. This port reads position 0 and only then decides the scan is
+	 * over, because the reference's behaviour is a visible no-op on the commonest two-character
+	 * form, not a property anyone would want. Every other step, including the line-bounded
+	 * newline and the ignored fence families, is the reference's.
+	 */
+	#gotoMatchingFence(): void {
+		const text = this.#text();
+		const pos = this.#ops.getCursor();
+		const ch = pos >= lineEndExclusive(text, pos) ? "\n" : text[pos];
+		let ofence: string;
+		let dir: 1 | -1;
+		switch (ch) {
+			case "(":
+				ofence = ")";
+				dir = 1;
+				break;
+			case "{":
+				ofence = "}";
+				dir = 1;
+				break;
+			case "[":
+				ofence = "]";
+				dir = 1;
+				break;
+			case ")":
+				ofence = "(";
+				dir = -1;
+				break;
+			case "}":
+				ofence = "{";
+				dir = -1;
+				break;
+			case "]":
+				ofence = "[";
+				dir = -1;
+				break;
+			default:
+				this.#commit = false;
+				return;
+		}
+		let count = 1;
+		let at = dir === 1 ? advance(text, pos) : retreat(text, pos);
+		let match: number | null = null;
+		while (count > 0) {
+			// The forward half stops at the end without reading past it. The backward half reads
+			// position 0 and only then gives up when it cannot retreat further; that is the
+			// departure named above.
+			if (dir === 1 && at >= text.length) break;
+			const c = at >= lineEndExclusive(text, at) ? "\n" : text[at];
+			if (c === ch) count++;
+			if (c === ofence) count--;
+			if (count === 0) {
+				match = at;
+				break;
+			}
+			const next = dir === 1 ? advance(text, at) : retreat(text, at);
+			if (next === at) break;
+			at = next;
+		}
+		if (match === null) {
+			this.#commit = false;
+			return;
+		}
+		this.#ops.setCursor(match);
+	}
+
+	/**
+	 * `transpose-words` (`bindings.el:1597`, `simple.el:8798`), the command GNU puts on `M-t`.
+	 * uemacs binds no `M-t` at all: its only transpose command is `transpose-chars` on `C-t`
+	 * (`random.c:191`, `ebind.h:39`), and that key is contested by the host's watch panel (see
+	 * {@link #transposeChars}). The key therefore keeps its GNU meaning, and the uemacs
+	 * transpose moves to `M-o`.
+	 *
+	 * The body is `transpose-subr` (`simple.el:8885-8919`) with `forward-word` as the mover.
+	 * `aux(x)` is the pair "point after moving x words, point after moving back"
+	 * (`simple.el:8896-8899`); the word rule is this engine's `#forwardWord` / `#backwardWord`,
+	 * which is `emacsWordForward` / `emacsWordBackward` — the syntax table plus a script test,
+	 * with `_` a symbol (see `#caseWord` for the full rule and its uemacs divergences).
+	 *
+	 * The three argument cases are the `cond` at `simple.el:8901-8919`:
+	 *
+	 *   - **positive**: the word at point is dragged past `n` following words; point ends at
+	 *     the forward endpoint collected from the original point (`(car pos2)`, `:8913`),
+	 *     which is the end of the transposed run;
+	 *   - **negative**: the current word is dragged forward past `n` preceding words; point is
+	 *     `(car pos2) + (cdr pos1) - (car pos1)` (`:8919`), the same end of the run;
+	 *   - **zero**: the word at point and the word at mark are exchanged, then point and mark
+	 *     are exchanged (`:8902-8908`). No mark signals (`:8905`).
+	 *
+	 * `transpose-subr-1` normalizes each pair, orders the two spans, and refuses to work when
+	 * the first span ends after the second starts (`simple.el:8921-8929`) — "Don't have two
+	 * things to transpose". That refusal, like the missing mark, leaves the buffer and
+	 * `last-command` alone because it is a signal.
+	 *
+	 * The swap is one `#write` and one host undo entry. The zero-argument branch replays the
+	 * reference's four-step insert/delete sequence (`simple.el:8930-8945`) on point and mark,
+	 * because that sequence is chosen to move markers with the text and a single replaced-span
+	 * adjustment would put the mark in a different place; see {@link #markerThroughSwap}.
+	 */
+	#transposeWords(n: number): void {
+		const text = this.#text();
+		const pos = this.#ops.getCursor();
+		const move = (from: number, words: number): number =>
+			this.#clamp(words >= 0 ? emacsWordForward(text, from, words) : emacsWordBackward(text, from, -words));
+		const aux = (from: number, x: number): [number, number] => {
+			const forward = move(from, x);
+			return [forward, move(forward, -x)];
+		};
+		if (n === 0) {
+			if (this.mark === null) {
+				this.#commit = false;
+				return;
+			}
+			const pos1 = aux(pos, 1);
+			const markPos = this.mark;
+			const pos2 = aux(markPos, 1);
+			const swap = this.#transposeSpans(text, pos1, pos2);
+			if (swap === null) {
+				this.#commit = false;
+				return;
+			}
+			const [a, b] = swap.p1;
+			const [c, d] = swap.p2;
+			const pointAfter = this.#markerThroughSwap(pos, a, b, c, d);
+			const markAfter = this.#markerThroughSwap(markPos, a, b, c, d);
+			this.#write(swap.text, pointAfter);
+			// `exchange-point-and-mark` (`simple.el:8908`): point takes the mark's adjusted
+			// position and the mark takes point's, and the mark is reactivated (`simple.el:7579`).
+			this.mark = pointAfter;
+			this.markActive = true;
+			this.#ops.setCursor(markAfter);
+			return;
+		}
+		const pos1 = aux(pos, -1);
+		const pos2 = n > 0 ? aux(pos, n) : aux(pos1[0], n);
+		const swap = this.#transposeSpans(text, pos1, pos2);
+		if (swap === null) {
+			this.#commit = false;
+			return;
+		}
+		const cursor = n > 0 ? pos2[0] : pos2[0] + (pos1[1] - pos1[0]);
+		this.#write(swap.text, this.#clamp(cursor));
+	}
+
+	/**
+	 * `transpose-subr-1`'s normalization and text: `[a,b)` and `[c,d)` are the two spans in
+	 * buffer order, `cdr pos1` may not pass `car pos2` (`simple.el:8924-8929`), and the new
+	 * buffer is `prefix + span2 + middle + span1 + suffix` — what the insert/delete sequence
+	 * at `simple.el:8937-8944` leaves behind. `null` is the signal.
+	 */
+	#transposeSpans(
+		text: string,
+		pos1: readonly [number, number],
+		pos2: readonly [number, number],
+	): { text: string; p1: readonly [number, number]; p2: readonly [number, number] } | null {
+		const norm = ([x, y]: readonly [number, number]): [number, number] => (x <= y ? [x, y] : [y, x]);
+		let p1 = norm(pos1);
+		let p2 = norm(pos2);
+		if (p1[0] > p2[0]) [p1, p2] = [p2, p1];
+		if (p1[1] > p2[0]) return null;
+		const [a, b] = p1;
+		const [c, d] = p2;
+		return {
+			text: text.slice(0, a) + text.slice(c, d) + text.slice(b, c) + text.slice(a, b) + text.slice(d),
+			p1,
+			p2,
+		};
+	}
+
+	/**
+	 * The four edits of `transpose-subr-1` (`simple.el:8937-8944`), replayed on one position:
+	 *
+	 *   1. `(goto-char (cdr pos1))` then `(insert-before-markers word)` — markers at or after
+	 *      the insertion move past the inserted span2 (`:8938-8939`);
+	 *   2. `(delete-and-extract-region (car pos1) (+ (car pos1) len1))` — a marker inside the
+	 *      deleted span collapses to its start, and one at its end shifts there too (`:8940`);
+	 *   3. `(goto-char boundary)` then `(insert word)` — a **plain** insert, so a marker at the
+	 *      insertion point stays before the text (`:8941-8942`);
+	 *   4. `(delete-region (point) (+ (point) len2))` at `boundary + len1` (`:8943-8944`).
+	 *
+	 * `boundary` is itself a marker (`:8937`), so it is replayed the same way. The whole point
+	 * of the sequence is the comment above it: "attempts to preserve marker positions at the
+	 * start and end of the transposed objects" (`:8931-8932`).
+	 */
+	#markerThroughSwap(p: number, a: number, b: number, c: number, d: number): number {
+		const len1 = b - a;
+		const len2 = d - c;
+		const insertBeforeMarkers = (m: number, at: number, len: number) => (m >= at ? m + len : m);
+		const insert = (m: number, at: number, len: number) => (m > at ? m + len : m);
+		const remove = (m: number, from: number, to: number) => (m <= from ? m : m < to ? from : m - (to - from));
+		let boundary = c;
+		let m = p;
+		m = insertBeforeMarkers(m, b, len2);
+		boundary = insertBeforeMarkers(boundary, b, len2);
+		m = remove(m, a, b);
+		boundary = remove(boundary, a, b);
+		m = insert(m, boundary, len1);
+		// A plain insert at `boundary` leaves the boundary marker where it was.
+		return remove(m, boundary + len1, boundary + len1 + len2);
+	}
+
+	/**
+	 * uemacs's `cmd_transpose_characters` (`random.c:191`), on `CONTROL | 'T'` in the reference
+	 * (`ebind.h:39`). It runs here on `M-o`, and both halves of that sentence need a reason.
+	 *
+	 * **Why not `C-t`**: the REPL's watch panel claims it (`shortcuts.ts` documents the
+	 * double dispatch, `watch-panel.test.tsx` measures it), and the engine cannot suppress
+	 * another `useInput` hook. A command on that key would either never run or run twice; the
+	 * survey's conflict table says not to take it. `M-o` is globally free in this GNU tree —
+	 * the reserved row that used to stand for it, `split-line (bindings.el:1229)`, was reading
+	 * `(define-key esc-map "\C-o" ...)`, which is `C-M-o`, so the row was mis-keyed — and that
+	 * makes it the free home for the uemacs command. The key is not where uemacs puts it, and
+	 * that divergence is the price of the host's own binding.
+	 *
+	 * **Why the semantics are uemacs's, not GNU's**: GNU's `transpose-chars`
+	 * (`simple.el:8787-8796`) honors a prefix count, moves point forward one character, and at
+	 * end of line backs up before running `transpose-subr`, which can cross lines. uemacs swaps
+	 * the character before point with the one after it **within the line** (`random.c:202-209`),
+	 * ignores `f` and `n`, and leaves point alone. This is a uemacs compat batch, so the in-line
+	 * swap is what runs: at end of line the two characters before it are swapped (`:202`), and
+	 * at beginning of line — or on a line with fewer than two characters — the command returns
+	 * FALSE (`:203`, `:205-206`), which this port turns into "consume the key, change nothing,
+	 * leave `last-command` alone".
+	 *
+	 * The swap is by code point (`advance` / `retreat`), so a surrogate pair is one character;
+	 * uemacs's own UTF-8 helpers (`basic.c:61-121`) also step whole sequences.
+	 */
+	#transposeChars(): void {
+		const text = this.#text();
+		const pos = this.#ops.getCursor();
+		const start = lineStart(text, pos);
+		const end = lineEndExclusive(text, pos);
+		let p = pos;
+		if (p >= end) {
+			// `if (doto == line_length (dotp) && --doto < 0) return FALSE;` (`random.c:202-203`):
+			// at end of line back up over the last character, and fail on an empty line.
+			if (end === start) {
+				this.#commit = false;
+				return;
+			}
+			p = retreat(text, end);
+		}
+		// `if (--doto < 0) return FALSE;` (`random.c:205-206`): there must be a previous
+		// character *on this line*, which `p <= start` is in this buffer's coordinates.
+		if (p <= start) {
+			this.#commit = false;
+			return;
+		}
+		const prev = retreat(text, p);
+		const next = advance(text, p);
+		const swapped = text.slice(0, prev) + text.slice(p, next) + text.slice(prev, p) + text.slice(next);
+		this.#write(swapped, pos);
 	}
 
 	// -- deletion ------------------------------------------------------------
