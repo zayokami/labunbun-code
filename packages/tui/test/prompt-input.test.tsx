@@ -531,6 +531,160 @@ describe("slash commands under vim", () => {
 });
 
 /**
+ * GNU incremental search (C-s / C-r). The engine owns every key while a search
+ * is running — printable characters extend the query, Enter and Escape accept,
+ * C-g cancels — so these tests are about the host's half of the contract: draw
+ * the frozen `isearch` snapshot, and do not submit the prompt when the search
+ * consumes Enter.
+ */
+describe("emacs incremental search", () => {
+	test("C-s starts forward and typed characters are the query, not the buffer", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} emacs />));
+		await delay(30);
+		stdin.write("ab");
+		await delay(30);
+		stdin.write("\x01"); // C-a: put point before the text, where the match is
+		await delay(30);
+
+		stdin.write("\x13"); // C-s
+		await delay(30);
+		stdin.write("a");
+		stdin.write("b");
+		await delay(30);
+		const frame = flat(lastFrame());
+		expect(frame).toContain("I-search: ab");
+		expect(submitted).toEqual([]);
+
+		// The query never entered the buffer. Accepting leaves point at the end of
+		// the match, so "!" lands after "ab": a buffer that had swallowed the
+		// search text would submit something longer or in another place.
+		stdin.write("\r");
+		await delay(30);
+		stdin.write("!");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["ab!"]);
+		unmount();
+	});
+
+	test("a failing query says Failing I-search", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} emacs />));
+		await delay(30);
+		stdin.write("abc");
+		await delay(30);
+		stdin.write("\x13"); // C-s
+		await delay(30);
+		// Forward from the end of "abc": there is no "z" to find.
+		stdin.write("z");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("Failing I-search: z");
+		unmount();
+	});
+
+	test("C-r starts backward and the label says so", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} emacs />));
+		await delay(30);
+		stdin.write("abc abc");
+		await delay(30);
+		stdin.write("\x12"); // C-r
+		await delay(30);
+		stdin.write("b");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("I-search backward: b");
+		unmount();
+	});
+
+	test("Enter accepts without submitting, and the buffer is untouched", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} emacs />));
+		await delay(30);
+		stdin.write("abc");
+		await delay(30);
+		stdin.write("\x01"); // C-a
+		await delay(30);
+		stdin.write("\x13"); // C-s
+		await delay(30);
+		stdin.write("b");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("I-search: b");
+
+		// Enter belongs to the search: it accepts at the match and must not reach
+		// the prompt's submit path.
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual([]);
+		expect(flat(lastFrame())).not.toContain("I-search");
+		expect(flat(lastFrame())).toContain("abc");
+
+		// Point sits at the end of the match (between "b" and "c"), so "!" proves
+		// the accepted search changed neither the text nor the caret beyond that.
+		stdin.write("!");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["ab!c"]);
+		unmount();
+	});
+
+	test("C-g cancels: the line disappears and point returns to the activation point", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} emacs />));
+		await delay(30);
+		stdin.write("abc abc");
+		await delay(30);
+		stdin.write("\x12"); // C-r: activated at the end, point 7
+		await delay(30);
+		stdin.write("b");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("I-search backward: b");
+
+		stdin.write("\x07"); // C-g on a successful search cancels to the origin
+		await delay(30);
+		expect(flat(lastFrame())).not.toContain("I-search");
+
+		// The caret returned to the activation point (the end), so "!" appends to
+		// the original buffer instead of landing on the match at point 5.
+		stdin.write("!");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["abc abc!"]);
+		unmount();
+	});
+
+	test("Escape accepts the search and normal editing works afterwards", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} emacs />));
+		await delay(30);
+		stdin.write("abc");
+		await delay(30);
+		stdin.write("\x01"); // C-a
+		await delay(30);
+		stdin.write("\x13"); // C-s
+		await delay(30);
+		stdin.write("b");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("I-search: b");
+
+		// A single Escape is unbound in `isearch-mode-map`, so it accepts at point
+		// rather than cancelling; the host must not treat it as an interrupt.
+		stdin.write("\x1b");
+		await delay(30);
+		expect(flat(lastFrame())).not.toContain("I-search");
+
+		// Point is at the end of the match; typing flows into the buffer again.
+		stdin.write("!");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["ab!c"]);
+		unmount();
+	});
+});
+
+/**
  * Ctrl+R. The rule about vim is not re-implemented here — the vim engine claims
  * Ctrl+R for redo in normal and visual mode before this component sees it, and
  * that is the whole rule.

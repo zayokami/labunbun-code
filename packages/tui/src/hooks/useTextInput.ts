@@ -11,7 +11,7 @@
 import type { Key } from "ink";
 import { useCallback, useRef, useState } from "react";
 import type { EditorKind } from "../editing-mode.ts";
-import { EmacsEngine } from "../emacs.ts";
+import { EmacsEngine, type EmacsIsearchState } from "../emacs.ts";
 import { nextChar, prevChar, snapToChar, VimEngine, type VimMode } from "../vim.ts";
 
 /**
@@ -364,7 +364,12 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 			// Emacs is modeless, so there is no mode to compare and no selection the
 			// engine keeps: the region is read off the mark. Anything that changes
 			// the region without moving the cursor still needs the repaint, so the
-			// before/after pair is the mark pair rather than the mode.
+			// mark pair is watched rather than the mode. The isearch snapshot rides
+			// along for the same reason vim's search line does: keys that only
+			// extend or fail the query touch neither the mark nor the cursor (the
+			// first `C-s`, or a failing character that leaves point at the base),
+			// and a tick watching only the mark pair would leave the status line
+			// frozen at whatever it showed before the search started.
 			const engine = current.engine as EmacsEngine;
 			// `[C-backspace]` and `[M-DEL]` are the same command in Emacs
 			// (`backward-kill-word`, `bindings.el:1634` and `:1613`), and a terminal
@@ -375,9 +380,10 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 			// which kills the word into a different buffer and so breaks the chain
 			// the emacs kill ring is for.
 			const backspaceKey = key.backspace === true && key.meta === true;
-			const before = `${engine.mark}:${engine.markActive}`;
+			const shape = (e: EmacsEngine) => `${e.mark}:${e.markActive}:${JSON.stringify(e.isearch)}`;
+			const before = shape(engine);
 			const consumed = engine.handleKey(input, { ...shared, ctrlBackspace: backspaceKey });
-			if (consumed && `${engine.mark}:${engine.markActive}` !== before) setRenderTick((t) => t + 1);
+			if (consumed && shape(engine) !== before) setRenderTick((t) => t + 1);
 			return consumed;
 		}
 		const engine = current.engine as VimEngine;
@@ -411,6 +417,12 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 	 * what Emacs does with it.
 	 */
 	const emacsEngine = engineRef.current?.kind === "emacs" ? (engineRef.current.engine as EmacsEngine) : null;
+	/**
+	 * The running incremental search, for the prompt to draw — the emacs twin of
+	 * `vimSearch`. A pure snapshot, so it is read per render; null while no
+	 * search is running and while another editor is up.
+	 */
+	const emacsSearch: EmacsIsearchState | null = emacsEngine ? emacsEngine.isearch : null;
 	const selection: { start: number; end: number } | null = vimEngine
 		? vimEngine.selection
 		: emacsRegion(emacsEngine, stateRef.current.cursor);
@@ -431,6 +443,7 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 		getHistory,
 		vimMode,
 		vimSearch,
+		emacsSearch,
 		handleEditorKey,
 		selection,
 	};

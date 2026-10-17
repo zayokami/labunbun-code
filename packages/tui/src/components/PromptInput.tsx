@@ -225,6 +225,7 @@ export function PromptInput({
 		getHistory,
 		vimMode,
 		vimSearch,
+		emacsSearch,
 		handleEditorKey,
 		selection,
 	} = useTextInput(history, editor.mode);
@@ -876,6 +877,23 @@ export function PromptInput({
 						{vimSearch.text}
 						<Text inverse> </Text>
 						<Text dimColor> Enter search · Esc cancel</Text>
+					</Text>
+				)}
+				{editor.mode === "emacs" && emacsSearch && (
+					// GNU's echo-area message, at the same place and in the same shape as
+					// vim's search line: `I-search` for a forward search, `I-search
+					// backward` for the other direction, and `Failing ` in front when the
+					// last search found nothing (`isearch-message` keys the label off
+					// `isearch-forward` and the prefix off `isearch-success`, the same two
+					// fields the engine's `isearch` getter projects). The empty query is a
+					// real state — just after `C-s` — and draws with the caret right after
+					// the colon. No `Wrapped` suffix and no hint: the frozen state carries
+					// no wrap flag, and Enter, Escape and `C-g` already belong to the
+					// engine while it runs.
+					<Text color={theme.text}>
+						{emacsSearch.failed ? "Failing " : ""}
+						I-search{emacsSearch.direction === "backward" ? " backward" : ""}: {emacsSearch.query}
+						<Text inverse> </Text>
 					</Text>
 				)}
 				{/* A plain wrapper with styled children rather than a dim Text with a
