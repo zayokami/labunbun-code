@@ -22,6 +22,7 @@ import {
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import type { SubscriptionSignIns } from "./credential-presence.ts";
 import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
+import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
 import { networkAxisFrom, type Settings } from "./settings.ts";
 import { loadThemeFiles, resolveTheme } from "./theme-file.ts";
 
@@ -188,6 +189,42 @@ export async function runDoctorChecks(
 		status: found.length > 0 ? "ok" : "warn",
 		detail: found.length > 0 ? found.join(", ") : "no settings files (all defaults)",
 	});
+
+	// Output style: `settings.outputStyle` names a file, so a name that matches
+	// nothing injects nothing — a typo that is invisible until the prompt fails to
+	// change. This row is where it becomes visible, the same way the Theme row
+	// reports a name that resolves to no theme.
+	//
+	// Read through `loadOutputStyles`, not by listing the directory here: that
+	// loader is where the project tier is held behind the one-time trust decision,
+	// so a row that enumerated files itself could call a repository's style
+	// "found" in a session that would never load it.
+	const styles = loadOutputStyles(cwd, home);
+	const styleName = settings.outputStyle;
+	if (!styleName) {
+		checks.push({ name: "Output style", status: "ok", detail: "none selected" });
+	} else {
+		const style = resolveOutputStyle(styleName, styles);
+		checks.push(
+			style
+				? {
+						name: "Output style",
+						status: "ok",
+						detail: `${style.name} (${style.source}) — ${style.sourcePath}`,
+					}
+				: {
+						name: "Output style",
+						status: "warn",
+						detail:
+							styles.length > 0
+								? `no style named "${styleName}" (available: ${styles
+										.map((s) => s.name)
+										.sort()
+										.join(", ")})`
+								: `no style named "${styleName}" (no styles in ~/.labunbun/output-styles)`,
+					},
+		);
+	}
 
 	// The network axis, and specifically whether this machine can back it up.
 	//

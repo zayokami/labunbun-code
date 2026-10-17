@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describeSandboxBackend, type SandboxBackend } from "@labunbun/tools";
 import { COMMAND_PATHS_WITHOUT_SANDBOX, formatDoctorReport, runDoctorChecks } from "../src/doctor.ts";
 import { padConfigFrom } from "../src/gamepad-runtime.ts";
+import { approveProjectDefinitions } from "../src/project-trust.ts";
 import { SettingsSchema } from "../src/settings.ts";
 
 /** This package's `src`, for the guards that read a call site out of a sibling. */
@@ -41,6 +42,11 @@ function makeDirs() {
 /** The Theme row's detail; every theme assertion is about this one line. */
 function themeDetail(checks: Awaited<ReturnType<typeof runDoctorChecks>>): string {
 	return checks.find((c) => c.name === "Theme")?.detail ?? "";
+}
+
+/** The Output style row's detail; a name that resolves to nothing has no other symptom. */
+function styleDetail(checks: Awaited<ReturnType<typeof runDoctorChecks>>): string {
+	return checks.find((c) => c.name === "Output style")?.detail ?? "";
 }
 
 /** The Gamepad row, which is two lines when a binding could not be read. */
@@ -162,6 +168,69 @@ describe("runDoctorChecks", () => {
 		const theme = checks.find((c) => c.name === "Theme");
 		expect(theme?.status).toBe("warn");
 		expect(theme?.detail).toContain("broken.json");
+	});
+});
+
+/**
+ * The Output style row: `settings.outputStyle` names a file, and a name that
+ * matches nothing injects nothing — no error, no change on screen. This row is
+ * where the typo becomes visible, read through the same loader the session uses
+ * so the project tier stays behind its trust decision.
+ */
+describe("the Output style row", () => {
+	test("unset is ok and selects nothing", async () => {
+		const { home, cwd } = makeDirs();
+		const checks = await runDoctorChecks(SettingsSchema.parse({}), cwd, home);
+		expect(checks.find((c) => c.name === "Output style")?.status).toBe("ok");
+		expect(styleDetail(checks)).toBe("none selected");
+	});
+
+	test("an unknown name warns with the typo and the names that do exist", async () => {
+		const { home, cwd } = makeDirs();
+		const dir = join(home, ".labunbun", "output-styles");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "concise.md"), "Be brief.");
+		const checks = await runDoctorChecks(SettingsSchema.parse({ outputStyle: "consise" }), cwd, home);
+		const row = checks.find((c) => c.name === "Output style");
+		expect(row?.status).toBe("warn");
+		expect(row?.detail).toContain('no style named "consise"');
+		expect(row?.detail).toContain("available: concise");
+	});
+
+	test("a user-tier style is found, with its tier and path", async () => {
+		const { home, cwd } = makeDirs();
+		const dir = join(home, ".labunbun", "output-styles");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "concise.md"), "Be brief.");
+		const checks = await runDoctorChecks(SettingsSchema.parse({ outputStyle: "concise" }), cwd, home);
+		const row = checks.find((c) => c.name === "Output style");
+		expect(row?.status).toBe("ok");
+		expect(row?.detail).toContain("concise (user)");
+		expect(row?.detail).toContain(join(dir, "concise.md"));
+	});
+
+	test("an untrusted project's style is not reported as found", async () => {
+		// The row reads through `loadOutputStyles`, so the project tier stays
+		// behind the same one-time decision the session applies. Before approval
+		// the style is withheld, and the row reports it the only way a withheld
+		// style can be: absent. The approval at the end is the control — same
+		// file, same setting, and the row flips only once the gate opens, so a
+		// path this test never sees cannot pass it.
+		const { home, cwd } = makeDirs();
+		const dir = join(cwd, ".labunbun", "output-styles");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "loud.md"), "LOUD.");
+		const settings = SettingsSchema.parse({ outputStyle: "loud" });
+
+		const before = (await runDoctorChecks(settings, cwd, home)).find((c) => c.name === "Output style");
+		expect(before?.status).toBe("warn");
+		expect(before?.detail).toContain('no style named "loud"');
+		expect(before?.detail).toContain("no styles in ~/.labunbun/output-styles");
+
+		approveProjectDefinitions(cwd, ["styles"], home);
+		const after = (await runDoctorChecks(settings, cwd, home)).find((c) => c.name === "Output style");
+		expect(after?.status).toBe("ok");
+		expect(after?.detail).toContain("loud (project)");
 	});
 });
 
