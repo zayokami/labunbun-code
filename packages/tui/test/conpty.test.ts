@@ -162,20 +162,25 @@ describe("chunkWritesForConPTY", () => {
 	});
 
 	test("the pure subpaths stay pure", () => {
-		// The startup paths that only need these two files import them through
-		// their own exports so they never execute the barrel's ink/react graph.
-		// Two regressions are cheap to make and invisible here until startup
-		// slows again: a value import added to conpty.ts (which then needs the
-		// module graph on a path that only wanted string functions), and an
+		// The startup paths that only need these files import them through their
+		// own exports so they never execute the barrel's ink/react graph. Two
+		// regressions are cheap to make and invisible here until startup slows
+		// again: a value import added to a pure file (which then needs the
+		// module graph on a path that only wanted string helpers), and an
 		// export re-pointed at ./src/index.ts. `import type` is allowed because
 		// it is erased; any other import, a dynamic import or a require is not.
-		const source = readFileSync(new URL("../src/conpty.ts", import.meta.url), "utf8")
-			.replace(/\/\*[\s\S]*?\*\//g, "")
-			.replace(/\/\/.*$/gm, "");
-		const imports = source.match(/^\s*import\b.*$/gm) ?? [];
-		expect(imports.filter((line) => !/^\s*import\s+type\b/.test(line))).toEqual([]);
-		expect(source).not.toMatch(/\bimport\s*\(/);
-		expect(source).not.toMatch(/\brequire\s*\(/);
+		for (const file of ["conpty.ts", "format.ts"]) {
+			const source = readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8")
+				.replace(/\/\*[\s\S]*?\*\//g, "")
+				.replace(/\/\/.*$/gm, "");
+			const imports = source.match(/^\s*import\b.*$/gm) ?? [];
+			const valueImports = imports
+				.filter((line) => !/^\s*import\s+type\b/.test(line))
+				.map((line) => `${file}: ${line}`);
+			expect(valueImports).toEqual([]);
+			expect(source).not.toMatch(/\bimport\s*\(/);
+			expect(source).not.toMatch(/\brequire\s*\(/);
+		}
 
 		const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
 			exports: Record<string, string>;
@@ -183,6 +188,7 @@ describe("chunkWritesForConPTY", () => {
 		expect(manifest.exports).toMatchObject({
 			".": "./src/index.ts",
 			"./conpty": "./src/conpty.ts",
+			"./format": "./src/format.ts",
 			"./permission-options": "./src/permission-options.ts",
 		});
 	});

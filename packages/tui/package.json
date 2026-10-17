@@ -6,6 +6,7 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./conpty": "./src/conpty.ts",
+		"./format": "./src/format.ts",
 		"./permission-options": "./src/permission-options.ts"
 	},
 	"dependencies": {

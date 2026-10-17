@@ -14,7 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import type { CompactionTrigger, ContextBreakdown, PreservedFile } from "@labunbun/agent";
-import { formatTokens } from "@labunbun/tui";
+import { formatTokens } from "@labunbun/tui/format";
 
 const LOW_CONTEXT_WARN_FRACTION = 0.8;
 
