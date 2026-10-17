@@ -13,19 +13,19 @@ Bare `labunbun` enters at `packages/coding-agent/src/main.ts:511-513`, parses ar
 The interactive path prints one line and hands over:
 
 - `main.ts:498` — `labunbun 0.1.0 — starting interactive mode…`. This is the first thing a new user sees on any platform.
-- `main.ts:499-508` → `runInteractive` (`packages/coding-agent/src/interactive.ts:386`).
+- `main.ts:499-508` → `runInteractive` (`packages/coding-agent/src/interactive.ts:418`).
 
 `runInteractive` then does, in order:
 
 | Step | Where | What it means for a new user |
 | --- | --- | --- |
-| First-run wizard | `interactive.ts:399`, gated by `shouldRunWizard` (`packages/coding-agent/src/wizard.ts:53-57`) | Runs only when stdin is a TTY **and** `~/.labunbun/settings.json` does not exist |
-| Settings load | `interactive.ts:402`, `loadSettings` (`packages/coding-agent/src/settings.ts:583-622`) | Four file tiers, no file is fine — everything falls back to defaults |
-| Env from settings | `interactive.ts:412`, `applySettingsEnv` (`settings.ts:705-713`) | A key stored by the wizard becomes a real environment variable here; a real env var always wins |
-| Model resolution | `interactive.ts:447-461` | `--model`, else `settings.model`, else the main role, else `anthropic/claude-sonnet-5` |
-| Key warning (was a gate) | `interactive.ts:466-471`; the notice at `:2001-2007` | Batch 1 removed the gate: no exit. A model the machine cannot run gets one info line naming the fix before anything is typed |
-| Credential providers | `interactive.ts:715-717` | The subscription stores are constructed here; the startup notice reads them only when the environment answers nothing |
-| REPL mount | `interactive.ts:1720` | First frame: empty transcript, status line, prompt |
+| First-run wizard | `interactive.ts:431`, gated by `shouldRunWizard` (`packages/coding-agent/src/wizard.ts:53-57`) | Runs only when stdin is a TTY **and** `~/.labunbun/settings.json` does not exist |
+| Settings load | `interactive.ts:434-435`, `loadSettings` (`packages/coding-agent/src/settings.ts:583-622`) | Four file tiers, no file is fine — everything falls back to defaults |
+| Env from settings | `interactive.ts:444`, `applySettingsEnv` (`settings.ts:705-713`) | A key stored by the wizard becomes a real environment variable here; a real env var always wins |
+| Model resolution | `interactive.ts:479-481` | `--model`, else `settings.model`, else the main role, else `anthropic/claude-sonnet-5` |
+| Key warning (was a gate) | `interactive.ts:498-503`; the notice at `:2267-2273` | Batch 1 removed the gate: no exit. A model the machine cannot run gets one info line naming the fix before anything is typed |
+| Credential providers | `interactive.ts:770-772` | The subscription stores are constructed here; the startup notice reads them only when the environment answers nothing |
+| REPL mount | `interactive.ts:1954` | First frame: empty transcript, status line, prompt |
 
 ### What the wizard asks — as batch 2 extended it
 
@@ -50,29 +50,29 @@ Missing API key for anthropic: set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in 
 Example: export ANTHROPIC_API_KEY=sk-...
 ```
 
-Exit code 1, and the identical run repeated forever because the wizard is TTY-gated (`wizard.ts:55-56`), so no settings file was written. The gate is gone (`interactive.ts:466-471`): the run proceeds to mount, and the transcript carries one line naming the fix (`interactive.ts:2001-2007`). A non-TTY editor or CI shell no longer meets a startup refusal: the miss — if it remains one — surfaces at request time, where the error names the variable, exactly as it always did for `-p` runs and ACP.
+Exit code 1, and the identical run repeated forever because the wizard is TTY-gated (`wizard.ts:55-56`), so no settings file was written. The gate is gone (`interactive.ts:498-503`): the run proceeds to mount, and the transcript carries one line naming the fix (`interactive.ts:2267-2273`). A non-TTY editor or CI shell no longer meets a startup refusal: the miss — if it remains one — surfaces at request time, where the error names the variable, exactly as it always did for `-p` runs and ACP.
 
 **(b) Wizard cancelled.** The empty `{}` file disables the wizard permanently (`wizard.ts:56`, asserted in `packages/coding-agent/test/wizard.test.ts`) and the next run used to land in (a)'s exit — it now starts. Nothing re-offers setup: the condition-driven trigger sketched for batch 2 was not built (the gate is sync, runs before settings load, and the wizard's write is a whole-file write, so re-offering over an existing file needs a merge story this note does not have — recorded as a deviation in §6). What batch 2 changed here is the repair text: it now names `/login` and `/yoshi` and says the session starts anyway (`wizard.ts:565-566`), instead of telling the user to delete the file the app just wrote.
 
-**(c) A Claude-subscription-only machine cannot start the REPL — fixed in batch 1.** `labunbun login` stores a credential (`packages/coding-agent/src/claude-auth.ts:104-151`) and writes nothing else; the tree's only writer of `ANTHROPIC_API_KEY` is the wizard's own `settings.env` (`wizard.ts:121`). The old gate called `missingApiKey(model)` with the default `subscription = false` (`packages/ai/src/index.ts:300-312`), which asks `resolveApiKey` — an environment lookup only (`packages/ai/src/model.ts:1624-1630`) — so it reported "missing" even when the machine is signed in. The request-time rule is the opposite: `packages/ai/src/index.ts:341` passes `subscription = true` for anthropic, so a request from a signed-in user is allowed to proceed. The README documents the subscription as a supported substitute for the key ("You can use a Claude subscription in place of an Anthropic API key"), `headless.ts` has no pre-gate at all, and `acp.ts` has none either — only the interactive path refused to open. Batch 1 replays the request-time rule synchronously (`credential-presence.ts`'s `modelMayRun`, reading the sign-ins the caller already probed) with the stores constructed at `interactive.ts:715`.
+**(c) A Claude-subscription-only machine cannot start the REPL — fixed in batch 1.** `labunbun login` stores a credential (`packages/coding-agent/src/claude-auth.ts:104-151`) and writes nothing else; the tree's only writer of `ANTHROPIC_API_KEY` is the wizard's own `settings.env` (`wizard.ts:121`). The old gate called `missingApiKey(model)` with the default `subscription = false` (`packages/ai/src/index.ts:300-312`), which asks `resolveApiKey` — an environment lookup only (`packages/ai/src/model.ts:1624-1630`) — so it reported "missing" even when the machine is signed in. The request-time rule is the opposite: `packages/ai/src/index.ts:341` passes `subscription = true` for anthropic, so a request from a signed-in user is allowed to proceed. The README documents the subscription as a supported substitute for the key ("You can use a Claude subscription in place of an Anthropic API key"), `headless.ts` has no pre-gate at all, and `acp.ts` has none either — only the interactive path refused to open. Batch 1 replays the request-time rule synchronously (`credential-presence.ts`'s `modelMayRun`, reading the sign-ins the caller already probed) with the stores constructed at `interactive.ts:770-772`.
 
-**(d) A ChatGPT-subscription-only machine lands in (c) too — fixed in batch 1 the same way.** `labunbun login chatgpt` stores its credential (`packages/coding-agent/src/chatgpt-login.ts:124-166`) and writes no setting, so the model stays `anthropic/claude-sonnet-5` (`interactive.ts:447`). (ChatGPT rows themselves are always offered — they name no env var, and `missingApiKey` reads an empty name list as "nothing to miss", `packages/ai/src/index.ts:309`.) The machine now starts; the notice says what is missing, and batch 2 added decision 3: a ChatGPT sign-in through the wizard writes `chatgpt/gpt-6-astra` as the model (`wizard.ts:94`, `wizard.ts:97-142`).
+**(d) A ChatGPT-subscription-only machine lands in (c) too — fixed in batch 1 the same way.** `labunbun login chatgpt` stores its credential (`packages/coding-agent/src/chatgpt-login.ts:124-166`) and writes no setting, so the model stays `anthropic/claude-sonnet-5` (`interactive.ts:479-481`). (ChatGPT rows themselves are always offered — they name no env var, and `missingApiKey` reads an empty name list as "nothing to miss", `packages/ai/src/index.ts:309`.) The machine now starts; the notice says what is missing, and batch 2 added decision 3: a ChatGPT sign-in through the wizard writes `chatgpt/gpt-6-astra` as the model (`wizard.ts:94`, `wizard.ts:97-142`).
 
-**(e) The same env-only answer was printed in two more places — all four surfaces agree now (batch 1).** `/doctor`'s Auth row used to mark the machine `fail` and print `none of … set` for a signed-in user; it now names each subscription (`doctor.ts:148-163`). `/model`'s picker annotates an unrunnable row by wire — `— no API key or sign-in` for anthropic, `— no ChatGPT sign-in`, `— no API key` elsewhere (`interactive.ts:3145-3158`) — and the band's `canRunModel` uses the identical rule (`interactive.ts:1682-1686`). Before batch 1 these three surfaces disagreed with the request path; now no two of the four disagree.
+**(e) The same env-only answer was printed in two more places — all four surfaces agree now (batch 1).** `/doctor`'s Auth row used to mark the machine `fail` and print `none of … set` for a signed-in user; it now names each subscription (`doctor.ts:148-163`). `/model`'s picker annotates an unrunnable row by wire — `— no API key or sign-in` for anthropic, `— no ChatGPT sign-in`, `— no API key` elsewhere (`interactive.ts:3611-3622`) — and the band's `canRunModel` uses the identical rule (`interactive.ts:1890-1894`). Before batch 1 these three surfaces disagreed with the request path; now no two of the four disagree.
 
 ### The first frame, once a key resolves
 
-Nothing is drawn for a new user's benefit. All startup text goes to stderr through `console.error` before the frame (`interactive.ts:408-590`), and the in-transcript startup lines are the withheld-project-definitions notice, one line per unloaded skill folder, and MCP config errors (`interactive.ts:1976-1993`), the credential notice when the model cannot run (`:2001-2007`, batch 1), and a gamepad failure line (`:2014-2020`), all via `pushInfo`. The first frame is then: empty transcript, status line, and the prompt with the placeholder `Try "fix the failing test" — / for commands` (`packages/tui/src/components/PromptInput.tsx:163`). The terminal title reads `labunbun — <dirName>` (`packages/tui/src/components/TerminalTitle.tsx:61`). There is no banner, no version line, and no "here is what to do next" line.
+Nothing is drawn for a new user's benefit. All startup text goes to stderr through `console.error` before the frame (`interactive.ts:581-622`), and the in-transcript startup lines are the withheld-project-definitions notice, one line per unloaded skill folder, and MCP config errors (`interactive.ts:2242-2259`), the credential notice when the model cannot run (`:2267-2273`, batch 1), and a gamepad failure line (`:2280-2285`), all via `pushInfo`. The first frame is then: empty transcript, status line, and the prompt with the placeholder `Try "fix the failing test" — / for commands` (`packages/tui/src/components/PromptInput.tsx:163`). The terminal title reads `labunbun — <dirName>` (`packages/tui/src/components/TerminalTitle.tsx:61`). There is no banner, no version line, and no "here is what to do next" line.
 
 ### What already exists for a new user
 
 Nothing below is speculative; each is a mechanism the first-run flow can reuse:
 
-- **20 migration sources** — `MIGRATION_SOURCE_IDS` (`packages/coding-agent/src/migrate-types.ts:58-79`) with labels (`:82-103`); `detectSources(home)` answers "which of these has content here" by looking inside the trees, not at directory existence (`migrate-types.ts:225-236`). The REPL flow is `/yoshi` (`packages/coding-agent/src/commands.ts:154-183` → `runMigrationWizard`, `packages/coding-agent/src/migrate-wizard.ts:250-317`), the CLI spelling is `labunbun yoshi` (`main.ts:321-349`), and the default is a dry run with the report printed.
-- **Two subscription sign-ins** — `/login [claude|chatgpt]` (`interactive.ts:2762-2765`; handler at the `/login` case, `interactive.ts:3960`) and the CLI (`main.ts:355-364`). The Claude flow prints a URL, opens a browser, and falls back to a pasted `code#state` when the loopback port is taken (`packages/coding-agent/src/claude-login.ts:161-210`); the ChatGPT flow falls back to a device code instead (`packages/coding-agent/src/chatgpt-login.ts:124-166`). Both are console-capable and take injected `askCode`/`listen`/`openBrowser`, so a wizard can drive them.
-- **A diagnostics surface** — `/doctor` (`interactive.ts:2721`, checks in `doctor.ts:80+`).
-- **Project-tier trust** for repo-shipped agents and skills, held back until approved, with a notice that names the command to review it (`packages/coding-agent/src/project-trust.ts:1-29`, `:90-108`; printed at `interactive.ts:1977-1984`).
-- **A startup line that reaches the transcript** — `pushInfo` (`interactive.ts:1976-1993`), including the precedent of printing nothing when nothing is wrong (`interactive.ts:2017-2019`).
+- **20 migration sources** — `MIGRATION_SOURCE_IDS` (`packages/coding-agent/src/migrate-types.ts:58-79`) with labels (`:82-103`); `detectSources(home)` answers "which of these has content here" by looking inside the trees, not at directory existence (`migrate-types.ts:225-236`). The REPL flow is `/yoshi` (`packages/coding-agent/src/commands.ts:190-225` → `runMigrationWizard`, `packages/coding-agent/src/migrate-wizard.ts:250-317`), the CLI spelling is `labunbun yoshi` (`main.ts:321-349`), and the default is a dry run with the report printed.
+- **Two subscription sign-ins** — `/login [claude|chatgpt]` (`interactive.ts:3203-3206`; handler at the `/login` case, `interactive.ts:4560`) and the CLI (`main.ts:355-364`). The Claude flow prints a URL, opens a browser, and falls back to a pasted `code#state` when the loopback port is taken (`packages/coding-agent/src/claude-login.ts:161-210`); the ChatGPT flow falls back to a device code instead (`packages/coding-agent/src/chatgpt-login.ts:124-166`). Both are console-capable and take injected `askCode`/`listen`/`openBrowser`, so a wizard can drive them.
+- **A diagnostics surface** — `/doctor` (`interactive.ts:3198`, checks in `doctor.ts:80+`).
+- **Project-tier trust** for repo-shipped agents and skills, held back until approved, with a notice that names the command to review it (`packages/coding-agent/src/project-trust.ts:1-29`, `:90-108`; printed at `interactive.ts:2243-2250`).
+- **A startup line that reaches the transcript** — `pushInfo` (`interactive.ts:2242-2259`), including the precedent of printing nothing when nothing is wrong (`interactive.ts:2283-2285`).
 - **Background terminal probing** — the `theme: "auto"` probe (`packages/tui/src/detect-appearance.ts:1-13`).
 - **Advice lines are test-held** — `help-commands.test.ts` asserts that every command named in a startup notice and every row of `/help` actually dispatches.
 
@@ -255,7 +255,7 @@ On a remote or headless machine? Use `codex login --device-auth` instead.
 | When the setup screen appears | Only when `~/.labunbun/settings.json` is absent, and only on a TTY (`wizard.ts:53-57`) | Whenever no credential resolves; no persisted "done" flag (`lib.rs:2362-2386`) | **Partly copied (batch 2)**: the file check stays as the whole trigger; the condition half is not built — the gate is sync and pre-settings-load, and the wizard's write is whole-file, so a re-offer over an existing file needs a merge story (§6). A cancelled or signed-out user gets Screen F's notice, not the wizard |
 | Sign-in in the first flow | Absent from the wizard; only `/login` inside the REPL or `labunbun login` on the command line | First-class, option 1, highlighted by default when allowed (`onboarding_screen.rs:169-175`) | **Copy** |
 | Env-key pre-detection | **Copied (batch 2)**: row `3` detects a set anthropic variable and skips the paste (`wizard.ts:484-493`) | Detects the variable and pre-fills, clears on first keystroke (`auth.rs:710-718`, `:786-796`) | **Copied**; the names come from the registry, not a copy (`presentEnvKeys`, `wizard.ts:302-305`) |
-| A machine with a subscription and nothing else | **Fixed in batch 1** (`interactive.ts:466-471`, notice at `:2001-2007`): the session mounts and names what is missing | Signed in is a normal state; onboarding simply hides | **Copied (batch 1)** — this was the largest single gap |
+| A machine with a subscription and nothing else | **Fixed in batch 1** (`interactive.ts:498-503`, notice at `:2267-2273`): the session mounts and names what is missing | Signed in is a normal state; onboarding simply hides | **Copied (batch 1)** — this was the largest single gap |
 | Import from another agent | 20 sources, a full dry-run report, and a question-by-question wizard — but only behind `/yoshi` / `labunbun yoshi` | `/import` on explicit command only, never auto-offered; one startup tip is the only advertisement (`slash_dispatch.rs:538-541`; §7) | **Copy the discovery idea, go one step further**: offer the import directly in the first-run wizard, keep our engine |
 | What the first frame says | Empty transcript and a placeholder (`PromptInput.tsx:163`); a credential-less start now gets the one Screen F line (batch 1) | Welcome line, then one rotating tip under a whole-corpus asset | **Copy the idea, not the volume** — see below |
 | Project trust | Repo-shipped agents/skills held back with a notice naming `/agents` (`project-trust.ts:90-108`), and — inside a repository — naming the root above the decision's reach (`:125-135`) | A blocking per-directory question with a git-root rule (`trust_directory.rs:69-152`) | **Partly copied (batch 4)**: the notice gained Codex's git-root sentence, adapted to this app's cwd-scoped trust; the blocking prompt still is not copied, and our scope stays narrower (see below) |
@@ -291,7 +291,7 @@ Found on this machine:
 
 - Sources and labels: `detectSources(home)` + `MIGRATION_SOURCE_LABELS` (`migrate-types.ts:82-103`, `:234-236`); counts per source already exist in `listHistory` / the raw reads the plan uses.
 - The `Environ` row is `/doctor`'s computation, hoisted (`doctor.ts:128-144`) — batch 1 extended it to the credential stores, which is what keeps it from reporting "nothing" on the machine this flow exists for.
-- The block is printed only when it is non-empty; silence is the app's existing habit (`interactive.ts:2017-2019`).
+- The block is printed only when it is non-empty; silence is the app's existing habit (`interactive.ts:2283-2285`).
 
 ### Screen B — how do you want to pay for it (question 1, replaces the current provider question) — implemented (batch 2)
 
@@ -333,16 +333,16 @@ Theme and editing model stay as they are (`wizard.ts:513-517`), with the change 
 
 ### Screen F — the first REPL frame — implemented (batch 1)
 
-The frame starts empty (`interactive.ts:1720`, `PromptInput.tsx:163`). Batch 1 adds one `pushInfo` line when — and only when — the session starts without a usable credential for its model:
+The frame starts empty (`interactive.ts:1954`, `PromptInput.tsx:163`). Batch 1 adds one `pushInfo` line when — and only when — the session starts without a usable credential for its model:
 
 ```
 No credential for anthropic/claude-sonnet-5 yet — the first prompt will fail. /login to sign in, or /yoshi to import a setup.
 ```
 
-- `pushInfo` is the existing in-transcript startup channel (`interactive.ts:1976-1993`); the notice lands at `interactive.ts:2001-2007`, and the store probe runs only when the environment cannot already answer.
+- `pushInfo` is the existing in-transcript startup channel (`interactive.ts:2242-2259`); the notice lands at `interactive.ts:2267-2273`, and the store probe runs only when the environment cannot already answer.
 - The line names two commands; batch 3 added it to `help-commands.test.ts`'s advice list, so that test now holds it (both wires that draw on a login, anthropic and ChatGPT).
-- When a credential resolves, say nothing. The app's rule is already "an unasked-for line on every startup is how a feature becomes noise" (`interactive.ts:2017-2019`).
-- The gate is gone — it lived at `interactive.ts:433-436` before batch 1; `:466-471` is the comment in its place. The session mounts and warns instead of exiting. Headless and ACP keep failing fast — a `-p` run has no transcript to warn into, and the request-time error already names the variable.
+- When a credential resolves, say nothing. The app's rule is already "an unasked-for line on every startup is how a feature becomes noise" (`interactive.ts:2283-2285`).
+- The gate is gone — `interactive.ts:498-503` is the comment in its place. The session mounts and warns instead of exiting. Headless and ACP keep failing fast — a `-p` run has no transcript to warn into, and the request-time error already names the variable.
 
 ### Screen G — the one-shot record — implemented (batch 3)
 
@@ -353,12 +353,12 @@ One deviation from this sketch, noted because it reverses it: the record is **wr
 ## 5. Open decisions
 
 1. **Where the first-run flow lives.** Keep it in the pre-REPL console wizard, or move it into the mounted REPL where `askUser` / `pickFromList` dialogs exist (`migrate-wizard.ts:37-42`)?
-   *Recommendation:* keep it pre-REPL. It must run before `loadSettings` (`interactive.ts:399-402`) because it writes the file those settings come from, and a mounted REPL would need a session with no model. *Tradeoff:* the wizard is a second UI that cannot reuse ink, so it stays plain-text and has to be tested by driving readline.
+   *Recommendation:* keep it pre-REPL. It must run before `loadSettings` (`interactive.ts:431-435`) because it writes the file those settings come from, and a mounted REPL would need a session with no model. *Tradeoff:* the wizard is a second UI that cannot reuse ink, so it stays plain-text and has to be tested by driving readline.
 2. **Does a missing key still stop the interactive start?**
    *Recommendation:* no. Mount, warn once (Screen F), let `/login`, `/model` and `/yoshi` work. *Tradeoff:* a typo in `--model` now costs a failed first prompt instead of an early exit — but the early exit is currently the first thing a paying subscriber sees.
-3. **Should a sign-in write `model`?** A ChatGPT sign-in with the default `anthropic/claude-sonnet-5` (`interactive.ts:447`) still fails on the first prompt.
+3. **Should a sign-in write `model`?** A ChatGPT sign-in with the default `anthropic/claude-sonnet-5` (`interactive.ts:479-481`) still fails on the first prompt.
    *Recommendation:* yes, for the ChatGPT flow only — write a chatgpt row, because that credential is useless with any other model. *Tradeoff:* `login` starts editing settings, which is a new side effect for a command whose whole job was the credential; the alternative is a louder Screen F that tells the user to run `/model`.
-   *Landed so far:* the wizard half, in batch 2 — the first-run ChatGPT row puts `chatgpt/gpt-6-astra` in the file it writes. The in-session `/login chatgpt` still does not touch `model` (no login flow calls `persistModelChoice`, whose only caller is `/model` at `interactive.ts:1583`), so a default-model session that signs in this way still fails its first prompt until `/model`. A residual gap, here so it is not rediscovered as a bug.
+   *Landed so far:* the wizard half, in batch 2 — the first-run ChatGPT row puts `chatgpt/gpt-6-astra` in the file it writes. The in-session `/login chatgpt` still does not touch `model` (no login flow calls `persistModelChoice`, whose only caller is `/model` at `interactive.ts:1817`), so a default-model session that signs in this way still fails its first prompt until `/model`. A residual gap, here so it is not rediscovered as a bug.
 4. **How far may the first-run import go on its own?**
    *Recommendation:* dry run always, then one confirm over the whole plan, `settings` + `assets` only, `--force` off. *Tradeoff:* more keystrokes than Codex's checkbox screen, and a user who says yes still has to read a report before anything lands. The alternative — auto-apply when exactly one source is detected — is the one path that can silently change a working configuration.
 5. **Project trust: prompt or notice?** We hold back repo-shipped agents/skills and say so (`project-trust.ts:90-108`); Codex blocks with a question and a git-root rule (`trust_directory.rs:69-152`).
@@ -371,9 +371,9 @@ Four batches. Line counts are rough, and no batch should be started before the d
 ### Batch 1 — a machine with a subscription is a working machine — implemented (`149c620`; ~245 lines + ~275 test)
 
 - New `packages/coding-agent/src/credential-presence.ts`: one rule answering "may this model run here" — `modelMayRun`, the sync mirror of the request path's check (the sign-ins arrive as values because the beetle band spawns in its constructor and cannot await) — consulting the environment (`resolveApiKey`, `packages/ai/src/model.ts:1624-1630`), the two credential stores (`claude-auth.ts:104-151`, `chatgpt-auth.ts`), and the empty-env-var rule (`packages/ai/src/index.ts:305-310`); plus the wording it drives, `unrunnableSuffix` per wire and `missingCredentialNotice`, and `requestPathPermits` — the request path's own `missingApiKey` call as a boolean — which `/model`'s switch guard and the band's `canRunModel` both read, so neither can drift from the shape a request sends. The store probe (`detectSubscriptionSignIns`) is async, because the keychain read is.
-- `interactive.ts:466-471`: the gate is gone; the notice lands at `:2001-2007` — this is Screen F, landed early.
+- `interactive.ts:498-503`: the gate is gone; the notice lands at `:2267-2273` — this is Screen F, landed early.
 - `doctor.ts:148-163`: the Auth row reports a sign-in by name (never the value).
-- `interactive.ts:3145-3158` and `:1682-1686`, and the beetle picker (`beetle.ts`, `beetle-commands.ts`): all annotate through the same helper.
+- `interactive.ts:3611-3622` and `:1890-1894`, and the beetle picker (`beetle.ts`, `beetle-commands.ts`): all annotate through the same helper.
 - Tests: `credential-presence.test.ts` pins the rule matrix and the notice wording; `startup-credential-notice.test.ts` mounts the real REPL in a subprocess with the provider environment stripped (exit 0 plus the exact line); `doctor.test.ts` gains the signed-in Auth rows. The seams — `InteractiveOptions.signIns`, `PickBeetleModelsOptions.signIns`, `runDoctorChecks`' tail parameter — keep every test off the real keychain.
 
 ### Batch 2 — the wizard grows up — implemented (`9403213`; ~300 lines + ~90 test)

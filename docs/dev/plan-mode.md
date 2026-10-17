@@ -28,8 +28,8 @@ The plan seat is described in "The plan seat" below.
 
 There are two user doors, and neither goes through `enterPlanMode`:
 
-- `/mode plan`, by argument or by picker. The host records the pair *before* moving the session: the pair to restore is the one the session is in now, not `plan` itself (`packages/coding-agent/src/interactive.ts:4030-4037`, `:4066-4077`). Re-selecting `plan` while already in plan mode records nothing (`:4034`, `:4074`).
-- Shift+Tab. The REPL owns the key and moves both axes before the app layer hears about it, so the host passes the pair it left as `previous` (`interactive.ts:1935-1946`). `recordPlanEntry(previous)` stores that pair and the model that is live now; it does not move the model, because this callback records rather than enters (`plan-mode.ts:199-213`).
+- `/mode plan`, by argument or by picker. The host records the pair *before* moving the session: the pair to restore is the one the session is in now, not `plan` itself (`packages/coding-agent/src/interactive.ts:4160-4167`, `:4196-4207`). Re-selecting `plan` while already in plan mode records nothing (`:4164-4166`, `:4204-4206`).
+- Shift+Tab. The REPL owns the key and moves both axes before the app layer hears about it, so the host passes the pair it left as `previous` (`interactive.ts:2019-2030`). `recordPlanEntry(previous)` stores that pair and the model that is live now; it does not move the model, because this callback records rather than enters (`plan-mode.ts:199-213`).
 
 Both doors therefore produce the same state as a model-driven entry, minus the model swap: a saved pair that an approval can restore.
 
@@ -39,7 +39,7 @@ Both doors therefore produce the same state as a model-driven entry, minus the m
 
 Three surfaces can answer:
 
-1. A host with a review surface gets `requestPlanReview`, which can carry feedback (`:228-234`). The REPL wires this to the plan review dialog (`packages/coding-agent/src/interactive.ts:1192-1195`).
+1. A host with a review surface gets `requestPlanReview`, which can carry feedback (`:228-234`). The REPL wires this to the plan review dialog (`packages/coding-agent/src/interactive.ts:1261-1264`).
 2. A host with only a permission dialog gets `requestPermission("ExitPlanMode", …)` and a boolean answer (`plan-mode.ts:232-236`).
 3. A missing session or a missing UI answers a rejection with the text "No interactive session to approve the plan" (`:218-222`).
 
@@ -54,7 +54,7 @@ The possible endings:
 
 The rejection path deliberately does not restore anything. The session stays in plan mode and keeps the plan model, because the cycle is not over; only an approval ends it (`:246-282`).
 
-In the REPL the wait also races the run's abort a second time at the wiring layer: the signal is passed into the review slot, and a dialog whose slot missed the abort is still cleared when the wait ends (`interactive.ts:2474-2515`). The callbacks report that null as "canceled" (`plan-mode.ts:240-245`).
+In the REPL the wait also races the run's abort a second time at the wiring layer: the signal is passed into the review slot, and a dialog whose slot missed the abort is still cleared when the wait ends (`interactive.ts:2603-2644`). The callbacks report that null as "canceled" (`plan-mode.ts:240-245`).
 
 ## `ExitPlanMode` and the optional steps
 
@@ -78,7 +78,7 @@ The last case is the honest boundary: a tool must not promise a board it cannot 
 
 ## The step-to-board bridge
 
-`createPlanTasks` is the function the REPL passes as `createTasks` (`packages/coding-agent/src/interactive.ts:1232-1236`; `plan-mode.ts:288-317`). Its rules:
+`createPlanTasks` is the function the REPL passes as `createTasks` (`packages/coding-agent/src/interactive.ts:1301-1305`; `plan-mode.ts:288-317`). Its rules:
 
 - Every step becomes a task with status `pending`, which is the default of `TaskStore.create` (`plan-mode.ts:292-293`, `:310`; `packages/tools/src/tasks.ts:40-61`).
 - A step whose subject already names an *unfinished* task is skipped (`plan-mode.ts:301-306`). A completed task with that subject is history, not an obstacle (`:294-296`).
@@ -98,10 +98,10 @@ A plan is kept in the session file so that a later `EnterPlanMode` can put the e
 - **Shape.** `{ plan, steps?, approved, at }`: the full text the user was shown, the ordered steps, whether the state is a proposal or an approval, and an ISO timestamp (`:36-45`). `PlanStep` is the task board's shape without the board's ids (`:30-34`).
 - **Write.** Best effort: a session file that cannot be appended to must not fail the turn (`:57-66`). A snapshot equal to the newest one is skipped (`:60-61`, comparison at `:119-129`). An absent session is a no-op (`:58`).
 - **Read.** The newest *valid* snapshot on the active chain, walking backwards and checking each candidate (`:77-86`, validation at `:131-155`). The active chain is the point: a plan abandoned by a branch is not resurrected (`:68-75`). A non-boolean `approved` or a blank `plan` is rejected rather than trusted (`:131-155`).
-- **Compaction.** A compaction hangs its boundary off the chain's root, so the snapshot above it leaves the active chain. The REPL reads the plan when the pass announces `preparing` and writes it back when the pass is `done` (`packages/coding-agent/src/interactive.ts:799-803`, `:847-857`); `reanchorPlanSnapshot` is the write-back, and `writePlanSnapshot`'s de-duplication keeps a pass that did not re-root from growing the file (`plan-snapshot.ts:88-102`; `interactive.ts:852-856`). A failed pass clears the held snapshot so a stale plan is not written later (`interactive.ts:874-877`).
+- **Compaction.** A compaction hangs its boundary off the chain's root, so the snapshot above it leaves the active chain. The REPL reads the plan when the pass announces `preparing` and writes it back when the pass is `done` (`packages/coding-agent/src/interactive.ts:835`, `:898`); `reanchorPlanSnapshot` is the write-back, and `writePlanSnapshot`'s de-duplication keeps a pass that did not re-root from growing the file (`plan-snapshot.ts:88-102`; `interactive.ts:898`). A failed pass clears the held snapshot so a stale plan is not written later (`interactive.ts:919`).
 - **Injection cap.** A re-entering `EnterPlanMode` injects the saved plan under a short header (`plan-mode.ts:360-373`). The body is bounded to `MAX_INJECTED_PLAN_CHARS = 8000`, and the cut is marked with the exact number of characters dropped (`plan-snapshot.ts:20-28`, `:104-117`). The bound exists because a session can enter plan mode many times, and every re-entry would otherwise carry every earlier plan (`:20-27`).
 
-`/plan` prints the full body, not the bounded copy: the cap exists for what goes back into a turn, and the user asked to read it (`interactive.ts:4109-4114`).
+`/plan` prints the full body, not the bounded copy: the cap exists for what goes back into a turn, and the user asked to read it (`interactive.ts:4239-4244`).
 
 ## The review surface
 
@@ -120,10 +120,10 @@ Hosts without this surface fall back to the boolean permission dialog, which can
 
 ## `/plan` and `/todo`
 
-Both are app commands, so `/help` lists them: the help text is generated from `appCommandTable` (`packages/coding-agent/src/interactive.ts:3052-3099`), and `/plan` and `/todo` are entries there (`:3086`, `:3096`).
+Both are app commands, so `/help` lists them: the help text is generated from `appCommandTable` (`packages/coding-agent/src/interactive.ts:3182-3229`), and `/plan` and `/todo` are entries there (`:3216`, `:3226`).
 
-- `/plan` takes no arguments and refuses extra ones with a usage line (`interactive.ts:4093-4097`). It reads the live session store, so after an in-app `/resume` it prints the incoming conversation's plan (`:4098-4102`). With no snapshot it says so (`:4103-4106`). Otherwise it prints the state (`approved` or `proposed`), the step count, the save time, and the full text (`:4107-4115`).
-- `/todo` reads the live task board at dispatch, for the same resume reason (`interactive.ts:4117-4121`). An empty board has its own line (`:4122-4125`). Each task prints its id, status, subject, and, when present, the owner, the active form, the blockers, and the description (`:4126-4134`). The board comes through `taskSnapshot`, which the host wires to `taskStore.snapshot()` (`:2096`).
+- `/plan` takes no arguments and refuses extra ones with a usage line (`interactive.ts:4223-4227`). It reads the live session store, so after an in-app `/resume` it prints the incoming conversation's plan (`:4228-4232`). With no snapshot it says so (`:4233-4236`). Otherwise it prints the state (`approved` or `proposed`), the step count, the save time, and the full text (`:4237-4245`).
+- `/todo` reads the live task board at dispatch, for the same resume reason (`interactive.ts:4247-4251`). An empty board has its own line (`:4252-4255`). Each task prints its id, status, subject, and, when present, the owner, the active form, the blockers, and the description (`:4256-4264`). The board comes through `taskSnapshot`, which the host wires to `taskStore.snapshot()` (`:2148`).
 
 ## Reminders
 
@@ -133,20 +133,20 @@ The board reminders are an interactive-host feature (`packages/coding-agent/src/
 - **Stale board, ten turns.** Two counters run: turns since the last board-tool call and turns since the last reminder. A reminder fires only when both reach `TASK_NUDGE_THRESHOLD = 10`, and firing restarts both, so the next turn cannot repeat it (`:19-20`, `:105-108`, `:137-154`). Any of the four board tools restarts the write counter, reads included: a model that keeps consulting the board has not forgotten it (`:166-173`).
 - **Long planning, ten turns.** `turn_end` events observed while the session is in plan mode advance a separate counter; at 10 the model is reminded that `ExitPlanMode` hands the plan over, and the counter restarts. A turn outside plan mode resets it (`:109-110`, `:141-142`, `:160-163`).
 - **Completion follow-up.** Only `agent_end` with reason `completed` qualifies (`:175-176`). It fires at most once per run, at most `MAX_COMPLETION_NUDGES = 3` times per attached session, only when the run touched a board tool, and only when a task is still `in_progress` (`:22-28`, `:111-121`, `:175-192`). The once-per-run gate resets at `agent_start` (`:128`).
-- **Stop hook.** When the Stop hook resumes the run, `onStopHookContinued` marks it and the completion reminder is skipped: the host's own continuation is already the reason to keep going (`:177-179`, `:194-197`; `interactive.ts:1587-1600`).
+- **Stop hook.** When the Stop hook resumes the run, `onStopHookContinued` marks it and the completion reminder is skipped: the host's own continuation is already the reason to keep going (`:177-179`, `:194-197`; `interactive.ts:1668-1681`).
 - **Abort and error.** Any end reason other than `completed` leaves the board alone (`task-nudges.ts:176`).
 - **Delivery.** Reminders steer a live run and follow up after it ends (`task-nudges.ts:12-14`, `:33-34`).
 - **Switch.** `LBB_TASK_REMINDER=off` turns every reminder off for the attached session; the value is read once at construction (`:36-40`, `:100-102`).
 
-The REPL builds one controller per attached session, so a hot swap starts from fresh counters and the incoming conversation's own plan-mode state (`interactive.ts:1492-1504`). It is wired into `agent_start`, `tool_execution_end`, `turn_end`, and `agent_end` (`:1510`, `:1520`, `:1525`, `:1590-1600`).
+The REPL builds one controller per attached session, so a hot swap starts from fresh counters and the incoming conversation's own plan-mode state (`interactive.ts:1573-1585`). It is wired into `agent_start`, `tool_execution_end`, `turn_end`, and `agent_end` (`:1591`, `:1601`, `:1606`, `:1676-1681`).
 
 ## Hosts
 
 | Host | Plan tools and review | Plan snapshot | Task board |
 | --- | --- | --- | --- |
-| Interactive REPL | `EnterPlanMode` and `ExitPlanMode`, review dialog, abort race (`interactive.ts:1192-1195`, `:1238`, `:2474-2515`) | Written, read, re-anchored, and injected (`interactive.ts:799-803`, `:1232-1236`, `:847-857`) | One store bound to the live session, restored on `/resume` (`interactive.ts:609-613`, `:1678`) |
-| Headless `-p` | None: no plan tools and no plan order (`headless.ts:478-486`) | Neither written nor read | One store bound to the run's session; `--no-session` keeps it in memory (`headless.ts:306-312`, `:378-384`) |
-| ACP editor | None. The connection advertises the `plan` permission mode and `session/set_mode` can select it, but there is no plan tool, no review dialog, and no way to approve a plan (`acp.ts:516-529`, `:680-691`, `:1076-1077`) | Neither written nor read | One store per live session, bound to that session's store, re-saved after a compaction (`acp.ts:974-975`, `:997-1002`, `:1128-1133`) |
+| Interactive REPL | `EnterPlanMode` and `ExitPlanMode`, review dialog, abort race (`interactive.ts:1261-1264`, `:1307`, `:2525-2566`) | Written, read, re-anchored, and injected (`interactive.ts:835`, `:1301-1305`, `:898`) | One store bound to the live session, restored on `/resume` (`interactive.ts:625-629`, `:1762`) |
+| Headless `-p` | None: no plan tools and no plan order (`headless.ts:491-492`) | Neither written nor read | One store bound to the run's session; `--no-session` keeps it in memory (`headless.ts:306-312`, `:378-384`) |
+| ACP editor | None. The connection advertises the `plan` permission mode and `session/set_mode` can select it, but there is no plan tool, no review dialog, and no way to approve a plan (`acp.ts:516-529`, `:680-691`, `:1076-1077`) | Neither written nor read | One store per live session, bound to that session's store, re-saved after a compaction (`acp.ts:974-975`, `:997-1002`, `acp.ts:1159-1167`) |
 
 A headless run can still be started in the plan permission mode through `--permission-mode` (`packages/coding-agent/src/main.ts:189-190`, `headless.ts:413-423`). There it is only the gate: every non-read-only call is denied, and nothing exists to present or lift a plan.
 
@@ -156,10 +156,10 @@ The ACP host's task board is part of the same tool set assembly as the other two
 
 `settings.roles.plan` names the model the planning cycle runs on (`packages/coding-agent/src/model-roles.ts:9`). The `PlanModelSwap` contract is read at the call: `planModel()` returns the resolved seat or `undefined`, and `undefined` means the session keeps its model (`plan-mode.ts:95-112`).
 
-- **Model-driven entry swaps.** If the seat resolves and differs from the session model, `enterPlanMode` sets it and calls `onModelSwapped` (`plan-mode.ts:192-196`). The host rebuilds everything that binds to a model — the compaction wiring, the threshold, and the status row (`interactive.ts:1199-1216`).
+- **Model-driven entry swaps.** If the seat resolves and differs from the session model, `enterPlanMode` sets it and calls `onModelSwapped` (`plan-mode.ts:192-196`). The host rebuilds everything that binds to a model — the compaction wiring, the threshold, and the status row (`interactive.ts:1268-1285`).
 - **Approval restores, with a guard.** The previous model is restored only when the seat is what is in effect: a `/model` switch made mid-plan is the user's own choice and outranks the restore (`plan-mode.ts:265-279`).
 - **No persistence.** Entering and leaving plan mode is a cycle, not a model choice, so nothing is written to the user's settings (`plan-mode.ts:103-105`).
-- **The user door does not swap.** `/mode plan` typed at the prompt sets the mode without starting a planning task, and it keeps the session's model; the seat is for the cycle the tools drive (`plan-mode.ts:105-107`; `interactive.ts:4019-4047`).
+- **The user door does not swap.** `/mode plan` typed at the prompt sets the mode without starting a planning task, and it keeps the session's model; the seat is for the cycle the tools drive (`plan-mode.ts:105-107`; `interactive.ts:4149-4177`).
 - **Rejection keeps the seat.** The pair and the model stay saved and live while the session remains in plan mode; the restore happens only on approval (`plan-mode.ts:246-282`).
 
 ## Tests that hold these claims

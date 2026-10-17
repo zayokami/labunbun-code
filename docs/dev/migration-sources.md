@@ -453,7 +453,7 @@ MiMo Code is an unminified TypeScript tree, so every path claim carries a line n
 
 **Subagent turns**
 
-- The `agent_id` column has a `notNull` default of `main` (`session/session.sql.ts:94`), and both of the product's own readers filter on it (`session/session.ts:964` and `session/message-v2.ts:1217`).
+- The `agent_id` column has a `notNull` default of `main` (`session/session.sql.ts:94`), and both of the product's own readers filter on it (`session/session.ts:969` and `session/message-v2.ts:1217`).
 - A subagent's tool calls and answers are written into the same session's `message` and `part` tables under a different `agent_id`. A reader that takes every row gets the user's turn followed by the whole of a task the agent ran on their behalf. The report then says the user asked for it. So this source reads only the `main` rows.
 
 **Managed configuration, report only**
