@@ -11,8 +11,7 @@ import type { AgentSession, CompactionManager, CompactionTrigger } from "@labunb
 import { estimateContextUsage } from "@labunbun/agent";
 import { compactionReceiptLines } from "./compaction-wiring.ts";
 import { playDaisyBell } from "./daisy-bell.ts";
-import { runMigration } from "./migrate.ts";
-import { type MigrationDialogBridge, runMigrationWizard } from "./migrate-wizard.ts";
+import type { MigrationDialogBridge } from "./migrate-wizard.ts";
 
 export interface CommandBase {
 	name: string;
@@ -172,8 +171,12 @@ export function builtInCommands(): Command[] {
 			call: async (ctx, args) => {
 				const tokens = args.split(/\s+/).filter(Boolean);
 				// Bare `/yoshi` in a REPL asks the same questions the flags below
-				// spell out, and ends in the same runMigration call.
+				// spell out, and ends in the same runMigration call. The migration
+				// modules are imported here rather than at the top of this file:
+				// they carry every source reader, and neither an ordinary REPL nor
+				// a `-p` run should pay for them until this command is used.
 				if (tokens.length === 0 && ctx.dialog) {
+					const { runMigrationWizard } = await import("./migrate-wizard.ts");
 					return runMigrationWizard({
 						dialog: ctx.dialog,
 						cwd: ctx.cwd,
@@ -182,6 +185,7 @@ export function builtInCommands(): Command[] {
 					});
 				}
 				const fromIndex = tokens.indexOf("--from");
+				const { runMigration } = await import("./migrate.ts");
 				const result = runMigration({
 					from: fromIndex === -1 ? undefined : tokens[fromIndex + 1],
 					apply: tokens.includes("--apply"),

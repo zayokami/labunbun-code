@@ -157,6 +157,10 @@ import {
 	type PendingClaudeLogin,
 	signedInLine,
 } from "./claude-login.ts";
+// The constant lives in the module with no other imports: `./index.ts`
+// re-exports the migration graph, and a REPL start must not pull every source
+// reader in just to print a name.
+import { CLI_NAME } from "./cli-constants.ts";
 import {
 	builtInCommands,
 	type Command,
@@ -214,7 +218,6 @@ import {
 } from "./gemini-login.ts";
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
-import { CLI_NAME } from "./index.ts";
 import { createMcpToolRefreshHandler } from "./mcp-tool-refresh.ts";
 import { loadMemoryFiles, userMemoryPath, userRulesDir, withheldProjectMemoryFiles } from "./memory.ts";
 import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";

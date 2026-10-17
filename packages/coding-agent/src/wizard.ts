@@ -36,14 +36,12 @@ import { AUTO_THEME_NAME, BUILT_IN_THEME_NAMES } from "@labunbun/tui";
 import { runChatGptLoginCli } from "./chatgpt-login.ts";
 import { runClaudeLoginCli } from "./claude-login.ts";
 import { detectSubscriptionSignIns, type SubscriptionSignIns } from "./credential-presence.ts";
-import {
-	detectSources,
-	MIGRATION_SOURCE_LABELS,
-	type MigrationSourceId,
-	type RunMigrationOptions,
-	runMigration,
-} from "./migrate.ts";
-import { SOURCE_ROOTS } from "./migrate-types.ts";
+// Only the type is taken from `./migrate.ts`; the value is imported where the
+// import offer actually runs. `interactive.ts` imports this module on every
+// REPL start, and a static value import here would pull every migration source
+// reader into a start that mostly exists to reach the REPL.
+import type { RunMigrationOptions } from "./migrate.ts";
+import { detectSources, MIGRATION_SOURCE_LABELS, type MigrationSourceId, SOURCE_ROOTS } from "./migrate-types.ts";
 import { writeUserSettingsPatch } from "./user-settings.ts";
 
 export function userSettingsPath(home = homedir()): string {
@@ -335,6 +333,7 @@ async function offerImport(
 	if (!question) return false;
 	if ((await askChoice(ask, question, ["y", "n"], "y", "Y/n")) !== "y") return false;
 
+	const { runMigration } = await import("./migrate.ts");
 	const options: RunMigrationOptions = {
 		home: opts.home,
 		cwd: opts.cwd,
