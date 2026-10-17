@@ -19,6 +19,8 @@
 - `newEntryId` joins three parts: `Date.now()` in base 36, a counter that wraps at `0xffff` with a four-digit pad, and four random characters (`packages/agent/src/session-store.ts:102`).
 - Entry types are `header`, `message`, `compaction`, and `custom` (`packages/agent/src/session-store.ts:18`).
 
+Two `custom` kinds carry state rather than transcript. Kind `tasks` holds the task board (`packages/coding-agent/src/task-snapshot.ts:18`), and kind `plan` holds the last plan with its steps, approval flag, and timestamp (`packages/coding-agent/src/plan-snapshot.ts:18`, `plan-snapshot.ts:36-45`). Both read the newest *valid* entry on the active chain, walking backwards past anything else (`task-snapshot.ts:74-82`, `plan-snapshot.ts:77-86`), and both write best effort (`task-snapshot.ts:91-97`, `plan-snapshot.ts:57-66`). A compaction re-roots the chain above them, so the hosts re-save after a pass ends: the board at `done` (`packages/coding-agent/src/interactive.ts:848`, `packages/coding-agent/src/headless.ts:678`, `packages/coding-agent/src/acp.ts:1133`), and the plan through `reanchorPlanSnapshot` (`interactive.ts:856`, `plan-snapshot.ts:96-102`).
+
 ### Appends
 
 - `append` pushes the entry into the in-memory array, moves the leaf, drops the cached walk, and writes one JSON line to the file (`packages/agent/src/session-store.ts:215`).

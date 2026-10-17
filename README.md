@@ -33,10 +33,10 @@ LaBunbun Code reads files, changes files, and runs commands. It sends your reque
 | `InspectSourceMap` | Report what a source map file holds, and whether its VLQ mappings decode. |
 | `WebFetch` | Get one page from the network. |
 | `WebSearch` | Search the network. |
-| `TaskCreate` | Make a task. |
+| `TaskCreate` | Make a task. A task can name the tasks that block it. |
 | `TaskList` | List the tasks. |
 | `TaskGet` | Read one task. |
-| `TaskUpdate` | Change the status or the owner of a task. |
+| `TaskUpdate` | Change the status, the owner, or the blockers of a task. |
 | `Task` | Start a subagent. |
 | `SendMessage` | Send a message to a subagent. |
 | `TaskStop` | Stop a subagent. |
@@ -240,7 +240,19 @@ Put a skill in `~/.labunbun/skills/` or in `<project>/.labunbun/skills/`.
 
 ### Plan mode
 
-Plan mode reads the code first. Plan mode does not change files. The tool then shows you a plan. The tool waits for your approval. The tool then applies the plan.
+Plan mode reads the code first. Plan mode does not change files. The tool then shows you a plan for review.
+
+The plan dialog has three answers: approve the plan, keep planning, or send feedback to the planner. Feedback goes back to the model, and the model can submit a revised plan.
+
+An approved plan is saved in the session. Run `/plan` to read it again: the state, the steps, and the full text.
+
+The plan can carry ordered steps. When you approve the plan, each step becomes a pending task on the task board. A step with the subject of an unfinished task is not added again. The tool tells the model how many tasks it made.
+
+The task board is saved in the session file. It survives a restart, a resume, and a compaction. Run `/todo` to show every task with its status, owner, blockers, and description.
+
+The tool reminds the model about the task board: once at startup, after 10 turns without a board change, and after 10 turns in plan mode. A run that used the board and ends with a task in progress gets one reminder, and a session gets at most three. Set `LBB_TASK_REMINDER=off` to turn these reminders off.
+
+Plan mode is interactive. A headless run and an editor session have no plan tools and no review dialog. An editor session can select the `plan` permission mode, which only refuses changes.
 
 The tool restores the two axes that were in force before you entered plan mode.
 
@@ -524,6 +536,7 @@ Use these commands in the terminal.
 | `/logout [claude\|chatgpt\|gemini]` | Sign out of a subscription. |
 | `/mode [mode]` | Show the permission mode, or change it. |
 | `/permissions` | Show the permission mode and the rules. |
+| `/plan` | Show the plan recorded in this session: its state, its steps, and the full text. |
 | `/doctor` | Check the environment, the settings, and the provider. |
 | `/cost` | Show the cost of this session, then of this project. |
 | `/context` | Show what the context window contains. |
@@ -542,6 +555,7 @@ Use these commands in the terminal.
 | `/ps` | List the background shells. Show what one has printed. |
 | `/stop [id]` | Stop a background shell. This includes a shell that a previous run left running. |
 | `/tasks` | Show the task tree. The tree shows this session, its subagents, and its background shells. |
+| `/todo` | Show the full task board: every task, its status, owner, blockers, and description. |
 | `/mcp [approve <name>\|prompts <server>\|prompt <server> <name>\|resources <server>\|resource <server> <uri>]` | List the MCP servers, approve one, or read a prompt or a resource. |
 | `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
 | `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |
