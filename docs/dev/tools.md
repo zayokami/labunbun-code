@@ -552,15 +552,17 @@ The task board is a shared in-memory store (`TaskStore`) plus four tools: TaskCr
 
 `TASK_BOARD_TOOL_NAMES` holds the four names in one place, because the band filters the tool tables by them.
 
-A task has `id`, `subject`, `description`, `status`, `activeForm`, `owner`, `blockedBy`, and `createdAt`. The status is `pending`, `in_progress`, or `completed`. `activeForm` is the progress label that the UI shows. `owner` is who is on the hook, free form, and in band use it is the name of a band member.
+A task has `id`, `subject`, `description`, `status`, `activeForm`, `owner`, `blockedBy`, and `createdAt`. The status is `pending`, `in_progress`, or `completed`. `activeForm` is the progress label that the UI shows. `owner` is who is on the hook, free form, and in band use it is the name of a band member. A task starts pending with an empty `blockedBy`. `create` takes the blockers as an optional last argument, copies the list, and drops duplicates.
 
-`create` gives the next number from the counter. `list` sorts by numeric id. `update` applies a patch and adds dependencies without duplicates. `summary` is the snapshot for the UI strip, and `snapshot` copies every field of every task for a save.
+`create` gives the next number from the counter. `list` sorts by numeric id. `update` applies a patch, removes the dependencies in `removeBlockedBy`, then adds the ones in `addBlockedBy` without duplicates. Removal runs first, so an id that appears in both lists is absent when the patch starts and present when it ends. Removing an id that is not there is a no-op. `summary` is the snapshot for the UI strip, and `snapshot` copies every field of every task for a save.
 
 `restore` replaces the whole list with a saved one. Ids come from the saved list and not from `create`, because a restored task is the same task. The conversation can already say "task two is in progress", and a new number then quietly means something else. The counter moves past the highest restored id, so the next new task gets a new number. The store keeps a copy, so a later `update` cannot change the array of the caller, which is the contents of a session file.
 
-`blockedHint` is the note appended to a successful TaskUpdate, and it is never a refusal. The tool allows a move of a blocked task to in_progress, and the answer names the open dependencies. A dependency id with no task behind it counts as open on purpose, so the note is also the first sign of a typo.
+`blockedHint` is the note appended to a successful TaskUpdate, and it is never a refusal. The tool allows a move of a blocked task to in_progress, and the answer names the open dependencies. A dependency id with no task behind it counts as open on purpose, so the note is also the first sign of a typo. The note appears only when the update leaves the task in_progress. A retitle, a move to pending, or a change to the dependency list alone does not produce it.
 
-TaskCreate and TaskUpdate are not concurrency safe. TaskList and TaskGet are read-only and concurrency safe. The TaskCreate prompt tells the model to create tasks before multi-step work starts. It says to mark a task in_progress before it starts, and to mark it completed as soon as it finishes. Only one task is in progress at a time. The TaskUpdate description says to mark tasks completed as soon as they finish and not to batch the updates.
+TaskCreate and TaskUpdate are not concurrency safe. TaskList and TaskGet are read-only and concurrency safe. TaskCreate takes the optional `blockedBy` list. TaskUpdate takes the optional `activeForm` and `removeBlockedBy` fields in addition to `addBlockedBy`.
+
+The TaskCreate prompt tells the model to create tasks before multi-step work starts, to keep exactly one task in progress while the work is underway, and to mark a task completed right after it finishes and only when the work is actually done and verified. The TaskUpdate prompt says to update the board as the work goes and never to mark a task completed with failing tests, partial work, or unresolved issues. The TaskUpdate description says to mark tasks completed as soon as they finish and not to batch the updates.
 
 ### Tool set assembly
 

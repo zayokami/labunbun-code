@@ -119,6 +119,73 @@ describe("task tools", () => {
 		expect((moved.content[0] as any).text).toContain("Note: blocked by #99");
 	});
 
+	test("create seeds blockedBy, deduped and copied", async () => {
+		const store = new TaskStore();
+		store.create("first", "d1");
+		store.create("second", "d2");
+		const seed = ["1", "2", "1"];
+		await toolByName("TaskCreate", store).call({ subject: "third", description: "d3", blockedBy: seed }, NO_CTX);
+		expect(store.get("3")?.blockedBy).toEqual(["1", "2"]);
+
+		// The store keeps its own copy: a later push to the input cannot reach it.
+		seed.push("99");
+		expect(store.get("3")?.blockedBy).toEqual(["1", "2"]);
+
+		const listed = await toolByName("TaskList", store).call({}, NO_CTX);
+		expect((listed.content[0] as any).text).toContain("blocked by: 1, 2");
+	});
+
+	test("update sets activeForm", async () => {
+		const store = new TaskStore();
+		store.create("first", "d1");
+		await toolByName("TaskUpdate", store).call({ taskId: "1", activeForm: "Doing first" }, NO_CTX);
+		expect(store.get("1")?.activeForm).toBe("Doing first");
+		expect(store.summary()[0]?.activeForm).toBe("Doing first");
+	});
+
+	test("removeBlockedBy drops listed ids and ignores absent ones", async () => {
+		const store = new TaskStore();
+		store.create("first", "d1");
+		store.create("second", "d2");
+		store.create("third", "d3");
+		await toolByName("TaskUpdate", store).call({ taskId: "3", addBlockedBy: ["1", "2"] }, NO_CTX);
+
+		await toolByName("TaskUpdate", store).call({ taskId: "3", removeBlockedBy: ["1"] }, NO_CTX);
+		expect(store.get("3")?.blockedBy).toEqual(["2"]);
+
+		// An id that is not there is a no-op, not an error.
+		const removed = await toolByName("TaskUpdate", store).call({ taskId: "3", removeBlockedBy: ["99"] }, NO_CTX);
+		expect(removed.isError).toBeFalsy();
+		expect(store.get("3")?.blockedBy).toEqual(["2"]);
+	});
+
+	test("add and remove in one patch: removal runs first, so an id in both ends present", async () => {
+		const store = new TaskStore();
+		store.create("first", "d1");
+		store.create("second", "d2");
+		store.create("third", "d3");
+		await toolByName("TaskUpdate", store).call({ taskId: "3", addBlockedBy: ["1", "2"] }, NO_CTX);
+
+		await toolByName("TaskUpdate", store).call(
+			{ taskId: "3", removeBlockedBy: ["1", "2"], addBlockedBy: ["1", "2", "2"] },
+			NO_CTX,
+		);
+		expect(store.get("3")?.blockedBy).toEqual(["1", "2"]);
+	});
+
+	test("the task prompts state the board rules", () => {
+		const store = new TaskStore();
+		const createPrompt = toolByName("TaskCreate", store).prompt ?? "";
+		expect(createPrompt).toContain("Create tasks BEFORE starting multi-step work");
+		expect(createPrompt).toContain("exactly one task in_progress while work is underway");
+		expect(createPrompt).toContain("only when the work is actually done and verified");
+
+		const updatePrompt = toolByName("TaskUpdate", store).prompt ?? "";
+		expect(updatePrompt).toContain("Update the board as you go");
+		expect(updatePrompt).toContain("never mark a task completed with failing tests, partial work");
+		expect(updatePrompt).toContain("or unresolved issues");
+	});
+
 	test("the board tool names match the tools actually built", () => {
 		const names = createTaskTools(new TaskStore())
 			.map((t) => t.name)

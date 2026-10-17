@@ -37,7 +37,13 @@ export class TaskStore {
 		for (const listener of this.#listeners) listener();
 	}
 
-	create(subject: string, description: string, activeForm?: string, owner?: string): AgentTask {
+	create(
+		subject: string,
+		description: string,
+		activeForm?: string,
+		owner?: string,
+		blockedBy: string[] = [],
+	): AgentTask {
 		this.#counter += 1;
 		const task: AgentTask = {
 			id: String(this.#counter),
@@ -46,7 +52,7 @@ export class TaskStore {
 			status: "pending",
 			activeForm,
 			owner,
-			blockedBy: [],
+			blockedBy: [...new Set(blockedBy)],
 			createdAt: Date.now(),
 		};
 		this.#tasks.set(task.id, task);
@@ -66,6 +72,7 @@ export class TaskStore {
 		id: string,
 		patch: Partial<Pick<AgentTask, "subject" | "description" | "status" | "activeForm" | "owner">> & {
 			addBlockedBy?: string[];
+			removeBlockedBy?: string[];
 		},
 	): AgentTask | undefined {
 		const task = this.#tasks.get(id);
@@ -75,6 +82,11 @@ export class TaskStore {
 		if (patch.status !== undefined) task.status = patch.status;
 		if (patch.activeForm !== undefined) task.activeForm = patch.activeForm;
 		if (patch.owner !== undefined) task.owner = patch.owner;
+		// Removal runs before addition, so an id named in both lists ends present.
+		if (patch.removeBlockedBy) {
+			const remove = new Set(patch.removeBlockedBy);
+			task.blockedBy = task.blockedBy.filter((dep) => !remove.has(dep));
+		}
 		if (patch.addBlockedBy) {
 			for (const dep of patch.addBlockedBy) {
 				if (!task.blockedBy.includes(dep)) task.blockedBy.push(dep);
@@ -150,13 +162,14 @@ export function createTaskTools(store: TaskStore): AnyTool[] {
 			description: z.string().describe("What needs to be done, with enough context to act on"),
 			activeForm: z.string().optional().describe("Present-continuous form shown while running, e.g. 'Running tests'"),
 			owner: z.string().optional().describe("Who is on the hook for this task, e.g. a band member's name"),
+			blockedBy: z.array(z.string()).optional().describe("Task ids that must complete before this one"),
 		}),
 		prompt:
-			"- Create tasks BEFORE starting multi-step work; mark in_progress BEFORE each task;\n" +
-			"  mark completed IMMEDIATELY after finishing it. Only one task in_progress at a time.",
+			"- Create tasks BEFORE starting multi-step work; keep exactly one task in_progress while work is underway;\n" +
+			"  mark a task completed IMMEDIATELY after finishing, and only when the work is actually done and verified.",
 		isConcurrencySafe: () => false,
 		call: async (input) => {
-			const task = store.create(input.subject, input.description, input.activeForm, input.owner);
+			const task = store.create(input.subject, input.description, input.activeForm, input.owner, input.blockedBy);
 			return { content: [textContent(`Created task #${task.id}: ${task.subject}`)] };
 		},
 	});
@@ -192,20 +205,25 @@ export function createTaskTools(store: TaskStore): AnyTool[] {
 	const update = buildTool({
 		name: "TaskUpdate",
 		description:
-			"Update a task: change status (pending/in_progress/completed), retitle, or add dependencies. " +
-			"Mark tasks completed as soon as they are done — do not batch.",
+			"Update a task: change status (pending/in_progress/completed), retitle, set the active form or " +
+			"owner, or change dependencies. Mark tasks completed as soon as they are done — do not batch.",
 		inputSchema: z.object({
 			taskId: z.string(),
 			status: z.enum(["pending", "in_progress", "completed"]).optional(),
 			subject: z.string().optional(),
 			description: z.string().optional(),
+			activeForm: z.string().optional().describe("Present-continuous form shown while running, e.g. 'Running tests'"),
 			owner: z.string().optional().describe("Reassign the task to this owner"),
 			addBlockedBy: z.array(z.string()).optional().describe("Task ids that must complete before this one"),
+			removeBlockedBy: z.array(z.string()).optional().describe("Task ids to remove from this task's dependencies"),
 		}),
+		prompt:
+			"- Update the board as you go; never mark a task completed with failing tests, partial work,\n" +
+			"  or unresolved issues.",
 		isConcurrencySafe: () => false,
 		call: async (input) => {
-			const { taskId, addBlockedBy, ...patch } = input;
-			const task = store.update(taskId, { ...patch, addBlockedBy });
+			const { taskId, addBlockedBy, removeBlockedBy, ...patch } = input;
+			const task = store.update(taskId, { ...patch, addBlockedBy, removeBlockedBy });
 			if (!task) {
 				return { content: [textContent(`Task #${taskId} not found`)], isError: true };
 			}
