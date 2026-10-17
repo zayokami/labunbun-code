@@ -46,11 +46,11 @@ export function escapeHint(editor: EditorKind, vimMode: VimMode): string {
  */
 export function hintLine(columns: number, opts: { editor: EditorKind; vimMode: VimMode }): string {
 	const esc = escapeHint(opts.editor, opts.vimMode);
-	// Under emacs the engine claims `C-r` as reserved isearch, so the key never
-	// reaches history search — the overlay's Ctrl+R row says so at length, and the
-	// hint must not say the opposite in the smaller font. The other two editors
-	// keep the clause: with no editor the host owns the key, and with vim it is
-	// search in insert mode (redo lives in the overlay's Vim group).
+	// Under emacs `C-r` starts an incremental search backward, not history
+	// search — the overlay's Ctrl+R row names the search the key starts, and the
+	// hint must not claim the history clause in the smaller font. The other two
+	// editors keep the clause: with no editor the host owns the key, and with vim
+	// it is search in insert mode (redo lives in the overlay's Vim group).
 	const search = opts.editor === "emacs" ? "" : " · ctrl+r search";
 	if (columns >= HINT_FULL_MIN_COLUMNS) {
 		return `Enter send · Shift+Enter newline · ↑↓ history${search} · ${esc} · /help`;
@@ -78,19 +78,13 @@ export function shortcutGroups(opts: {
 				["Enter", "send"],
 				["Shift+Enter", "newline"],
 				["↑ / ↓", "history"],
-				// Three editors, three different answers, and the third is the one this
-				// row used to get wrong. `EmacsEngine` *claims* `C-r` — it is in its
-				// reserved table, so isearch is swallowed rather than passed through — which
-				// means "search history" is false under emacs, not merely unavailable. A row
-				// that names a command the key cannot reach is the failure this file's header
-				// is about.
+				// Three editors, three different answers. Under emacs `C-r` is
+				// `isearch-backward`, so "search history" is false there — the row
+				// names the search the key actually starts. A row that names a command
+				// the key cannot reach is the failure this file's header is about.
 				[
 					"Ctrl+R",
-					vim
-						? "search history (redo in vim normal)"
-						: emacs
-							? "taken — incremental search is not in this build"
-							: "search history",
+					vim ? "search history (redo in vim normal)" : emacs ? "incremental search backward" : "search history",
 				],
 				["Esc", escapeHint(opts.editor, opts.vimMode ?? "insert")],
 				// "insert mode" was the mode name when there was one editor and
@@ -113,9 +107,8 @@ export function shortcutGroups(opts: {
 				// REPL from receiving the keys (ink hands every key to every active
 				// hook separately, `node_modules/ink/build/hooks/use-input.js:115-123`),
 				// and the engine no longer declares them, so the rows name the host
-				// action plainly. (The `Ctrl+R` row above is the case where "taken"
-				// *is* the truth, because history search is a prompt-level branch and
-				// that is the one the engine suppresses.)
+				// action plainly. (The `Ctrl+R` row above is the case where the key is
+				// the engine's and the row names the command it runs.)
 				["Ctrl+O", "transcript"],
 				["Ctrl+T", "watch panel"],
 				// The one host key neither engine contests — vim's ctrl block
@@ -164,6 +157,10 @@ export function shortcutGroups(opts: {
 				["C-a / C-e", "start / end of line"],
 				["C-f / C-b", "character forward / back"],
 				["C-n / C-p", "line down / up"],
+				// `C-s` and `C-r` were reserved keys until isearch landed; they are
+				// commands now, and the rows name the direction each one searches.
+				["C-s", "incremental search forward"],
+				["C-r", "incremental search backward"],
 				["M-f / M-b", "word forward / back"],
 				// uemacs's `goto-matching-fence`; GNU gives the key to `forward-sexp`. The
 				// divergence is named on the command in `emacs.ts`, where the key is taken.

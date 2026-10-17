@@ -322,6 +322,8 @@ The Emacs editor has no mode line. Use these keys.
 | `C-a`, `C-e` | Go to the start or the end of the line. |
 | `C-f`, `C-b` | Move one character forward or back. |
 | `C-n`, `C-p` | Move one line down or up. |
+| `C-s` | Start an incremental search forward. Enter accepts the match. `C-g` cancels. |
+| `C-r` | Start an incremental search backward. Enter accepts the match. `C-g` cancels. |
 | `M-f`, `M-b` | Move one word forward or back. |
 | `M-C-F` | Jump to the matching bracket. |
 | `M-u`, `M-l`, `M-c` | Upcase, downcase, or capitalize one word. |
@@ -351,7 +353,7 @@ The kill ring has these rules:
 
 The engine uses the Emacs rule for words. A boundary is a change of script. `M-f` stops inside CJK text. `foo-bar` is 3 words.
 
-The engine takes these keys and does not use them: `M-z`, `C-s`, `C-r`. The engine uses them for nothing. They do not reach the terminal as characters. `C-r` does history search everywhere except in this editor. `C-t` and `C-o` are the host's keys: they open the watch panel and the transcript.
+The engine takes this key and does not use it: `M-z`. The engine uses it for nothing. It does not reach the terminal as a character. `C-r` does history search in the other editors; in this editor it starts an incremental search backward, and `C-s` starts one forward. `C-t` and `C-o` are the host's keys: they open the watch panel and the transcript.
 
 ### DualShock 4 controller
 

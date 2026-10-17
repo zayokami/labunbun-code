@@ -37,10 +37,10 @@ describe("hintLine", () => {
 	});
 
 	// The overlay's Ctrl+R row had the bug first, and the hint is the same lie in
-	// a smaller font: under emacs the engine claims `C-r` as reserved isearch, so
-	// the host never sees the key and history search is unreachable. The other two
-	// editors keep the clause, because for them the key does reach the host.
-	test("drops ctrl+r under emacs, where the engine eats the key", () => {
+	// a smaller font: under emacs `C-r` starts an incremental search instead of
+	// history search, so the history clause stays out. The other two editors keep
+	// the clause, because for them the key is history search.
+	test("drops ctrl+r under emacs, where the key is incremental search", () => {
 		for (const columns of [120, HINT_SHORT_MIN_COLUMNS]) {
 			expect(hintLine(columns, { editor: "emacs", vimMode: "insert" })).not.toContain("ctrl+r");
 		}
@@ -103,7 +103,7 @@ describe("shortcutGroups", () => {
 		expect(titles("emacs")).toEqual(["Prompt", "Emacs"]);
 	});
 
-	test("the emacs group names keys the engine runs, and the Prompt row admits C-r is eaten", () => {
+	test("the emacs group names keys the engine runs, and the Prompt row names the search C-r starts", () => {
 		const groups = shortcutGroups({ editor: "emacs", vimMode: "normal" });
 		const emacs = groups.find((g) => g.title === "Emacs");
 		const keys = emacs?.rows.map(([k]) => k) ?? [];
@@ -135,17 +135,28 @@ describe("shortcutGroups", () => {
 		// list until the case commands landed; it is one of the rows above now.
 		expect(keys).not.toContain("C-t");
 		expect(keys).not.toContain("M-z");
-		expect(keys).not.toContain("C-s");
-		// And the Prompt row cannot still promise history search: `EmacsEngine` claims
-		// `C-r` as reserved isearch, so the host never sees it. The other two editors keep
-		// the wording they had.
+		// `C-s` and `C-r` were on this list while isearch was a reserved command;
+		// they are commands now and the Emacs group names both directions.
+		expect(keys).toContain("C-s");
+		expect(keys).toContain("C-r");
+		// And the Prompt row cannot still promise history search under emacs: there
+		// `C-r` runs `isearch-backward`, so the row names that search instead. The
+		// other two editors keep the wording they had.
 		const ctrlR = (editor: "none" | "vim" | "emacs") =>
 			shortcutGroups({ editor, vimMode: "normal" })
 				.find((g) => g.title === "Prompt")
 				?.rows.find(([k]) => k === "Ctrl+R")?.[1];
-		expect(ctrlR("emacs")).toContain("taken");
+		expect(ctrlR("emacs")).toBe("incremental search backward");
+		expect(ctrlR("emacs")).not.toContain("taken");
 		expect(ctrlR("vim")).toContain("redo");
 		expect(ctrlR("none")).toBe("search history");
+	});
+
+	test("the Emacs group names both incremental search directions", () => {
+		const rows = shortcutGroups({ editor: "emacs", vimMode: "normal" }).find((g) => g.title === "Emacs")?.rows;
+		const what = (keys: string) => rows?.find(([k]) => k === keys)?.[1];
+		expect(what("C-s")).toBe("incremental search forward");
+		expect(what("C-r")).toBe("incremental search backward");
 	});
 
 	test("the Ctrl+T row names the watch panel under every editor", () => {
