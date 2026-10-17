@@ -8,7 +8,19 @@ import { nextSpillPath } from "./output-capture.ts";
 
 const MAX_RESULTS = 200;
 
-export const GLOB_SKIP_DIRS = ["node_modules", ".git", "dist", "build", ".next", "coverage"] as const;
+export const GLOB_SKIP_DIRS = [
+	"node_modules",
+	".git",
+	".svn",
+	".hg",
+	".bzr",
+	".jj",
+	".sl",
+	"dist",
+	"build",
+	".next",
+	"coverage",
+] as const;
 const MAX_DEPTH = 15;
 
 /**

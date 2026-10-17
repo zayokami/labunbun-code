@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { resolveCanonical } from "../src/containment.ts";
-import { type FileWalkerOps, walkProjectFiles } from "../src/glob.ts";
+import { type FileWalkerOps, GLOB_SKIP_DIRS, walkProjectFiles } from "../src/glob.ts";
+import { type GrepMatch, renderGrepResult } from "../src/grep.ts";
 import {
 	createAllTools,
 	createEditTool,
@@ -442,6 +443,12 @@ function pathsOf(text: string): string[] {
 		.sort();
 }
 
+/** One file of `count` matching lines, numbered so pages can be told apart. */
+function numberedMatches(dir: string, count: number, name = "many.txt"): void {
+	const lines = Array.from({ length: count }, (_, i) => `TOKEN line ${i + 1}`);
+	writeFileSync(join(dir, name), `${lines.join("\n")}\n`);
+}
+
 describe("Grep tool", () => {
 	test("finds pattern with line numbers, skips node_modules", async () => {
 		const dir = tempDir();
@@ -593,10 +600,149 @@ describe("Grep tool", () => {
 		expect((result.content[0] as any).text).toContain("a.log:1: TOKEN in a log");
 	});
 
+	test("the default head limit shows 250 matches and names the next offset", async () => {
+		const dir = tempDir();
+		numberedMatches(dir, 300);
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		const lines = ((result.content[0] as any).text as string).split("\n");
+		// The header is the first line and carries the shown count, the total and
+		// where the next page starts.
+		expect(lines[0]).toBe("250 of 300 match(es) shown; next offset 250:");
+		expect(lines).toHaveLength(251);
+		expect(lines[1]).toBe("many.txt:1: TOKEN line 1");
+		expect(lines[250]).toBe("many.txt:250: TOKEN line 250");
+	});
+
+	test("offset pages through the matches without overlap", async () => {
+		const dir = tempDir();
+		numberedMatches(dir, 300);
+		const tool = createGrepTool(dir, defaultOperations());
+		const first = ((await call(tool, { pattern: "TOKEN" })).content[0] as any).text as string;
+		const second = ((await call(tool, { pattern: "TOKEN", offset: 250 })).content[0] as any).text as string;
+		const secondLines = second.split("\n");
+		expect(secondLines[0]).toBe("50 of 300 match(es) shown:");
+		expect(secondLines).toHaveLength(51);
+		expect(secondLines[1]).toBe("many.txt:251: TOKEN line 251");
+		expect(secondLines[50]).toBe("many.txt:300: TOKEN line 300");
+		const numbered = [...first.split("\n").slice(1), ...secondLines.slice(1)].map((line) =>
+			Number(/^many\.txt:(\d+):/.exec(line)?.[1]),
+		);
+		// Two pages, every match once: no row shown on both pages and none lost.
+		expect(numbered).toHaveLength(300);
+		expect(new Set(numbered).size).toBe(300);
+		expect(Math.min(...numbered)).toBe(1);
+		expect(Math.max(...numbered)).toBe(300);
+	});
+
+	test("an offset past the last match reports zero shown and the true total", async () => {
+		const dir = tempDir();
+		numberedMatches(dir, 300);
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN", offset: 500 });
+		// A total above zero is worth saying even when the page is empty.
+		expect((result.content[0] as any).text).toBe("0 of 300 match(es) shown:");
+	});
+
+	test("a search with no matches still says so", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "a.ts"), "nothing here\n");
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		expect((result.content[0] as any).text).toBe("No matches found.");
+	});
+
+	test("head_limit 0 removes the display limit", async () => {
+		const dir = tempDir();
+		numberedMatches(dir, 300);
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN", head_limit: 0 });
+		const lines = ((result.content[0] as any).text as string).split("\n");
+		expect(lines[0]).toBe("300 of 300 match(es) shown:");
+		expect(lines).toHaveLength(301);
+		expect(lines[300]).toBe("many.txt:300: TOKEN line 300");
+	});
+
+	test("the safety cap header says the total is not exact, and is not ordinary paging", () => {
+		// The cap is 10000 matches, which is not worth a fixture on disk; the
+		// rendering takes the collected rows directly, so the capped branch is
+		// reachable here with in-memory rows.
+		const rows: GrepMatch[] = Array.from({ length: 10_000 }, (_, i) => ({
+			path: "big.txt",
+			lineNumber: i + 1,
+			text: "TOKEN",
+		}));
+		const page = renderGrepResult(rows, { offset: 9_990, headLimit: 5, maxColumns: 500, safetyCapped: true });
+		expect(page.split("\n")[0]).toBe(
+			"5 of at least 10000 match(es) shown; search stopped at the 10000-match safety cap, so the total is not exact; next offset 9995:",
+		);
+		const lastPage = renderGrepResult(rows, { offset: 9_995, headLimit: 5, maxColumns: 500, safetyCapped: true });
+		// No next offset once the collected rows are exhausted, but the cap is
+		// still named: the search stopped, so more may exist beyond it.
+		expect(lastPage.split("\n")[0]).toBe(
+			"5 of at least 10000 match(es) shown; search stopped at the 10000-match safety cap, so the total is not exact:",
+		);
+	});
+
+	test("max_columns cuts the displayed line and counts the omitted characters", async () => {
+		const dir = tempDir();
+		const long = `TOKEN ${"x".repeat(600)}`; // 606 characters
+		const exact = `TOKEN ${"x".repeat(494)}`; // exactly 500
+		writeFileSync(join(dir, "long.txt"), `${long}\n`);
+		writeFileSync(join(dir, "exact.txt"), `${exact}\n`);
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		const text = (result.content[0] as any).text as string;
+		const kept = long.slice(0, 500);
+		// The row keeps its `path:line:` prefix; only the line content is cut, and
+		// the placeholder counts the characters it left out. A line exactly at the
+		// limit is not cut.
+		expect(text).toContain(`long.txt:1: ${kept}… (line truncated, ${long.length - 500} more chars)`);
+		expect(text).not.toContain(long);
+		expect(text).toContain(`exact.txt:1: ${exact}`);
+		// Truncation is display only: the header counts the match once.
+		expect(text.split("\n")[0]).toBe("2 of 2 match(es) shown:");
+	});
+
+	test("max_columns 0 leaves a long line whole", async () => {
+		const dir = tempDir();
+		const long = `TOKEN ${"y".repeat(600)}`;
+		writeFileSync(join(dir, "long.txt"), `${long}\n`);
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN", max_columns: 0 });
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain(`long.txt:1: ${long}`);
+		expect(text).not.toContain("line truncated");
+	});
+
+	test("a cut CRLF line carries no carriage return", async () => {
+		const dir = tempDir();
+		const long = `TOKEN ${"z".repeat(600)}`;
+		writeFileSync(join(dir, "crlf-long.txt"), `${long}\r\n`);
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain(`crlf-long.txt:1: ${long.slice(0, 500)}… (line truncated, 106 more chars)`);
+		expect(JSON.stringify(text)).not.toContain("\\r");
+	});
+
+	test.each([".svn", ".hg", ".bzr", ".jj", ".sl"])("skips the %s directory", async (dirName) => {
+		const dir = tempDir();
+		mkdirSync(join(dir, dirName), { recursive: true });
+		writeFileSync(join(dir, dirName, "hidden.txt"), "TOKEN away\n");
+		writeFileSync(join(dir, "kept.txt"), "TOKEN here\n");
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain("kept.txt:1:");
+		expect(text).not.toContain(dirName);
+	});
+
 	test("the description claims the subset that is implemented, not ripgrep", () => {
 		const tool = createGrepTool(process.cwd(), defaultOperations());
 		expect(tool.description).toContain(".gitignore");
 		expect(tool.description).not.toContain("ripgrep");
+		for (const dirName of GLOB_SKIP_DIRS) expect(tool.description).toContain(dirName);
 	});
 });
 
