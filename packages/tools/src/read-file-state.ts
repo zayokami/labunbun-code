@@ -33,6 +33,14 @@ export interface RecordReadInput {
 	/** The `limit` the read was called with, if any. Present means paged. */
 	limit?: number;
 	/**
+	 * Whether the model was asked to see the whole file. Defaults to `false` when
+	 * `offset` or `limit` is present and to the previous entry's value otherwise:
+	 * a caller that re-records after an edit knows the new content but not what
+	 * else the model was shown. Read states it on every call because it is the
+	 * only caller that knows whether it paged.
+	 */
+	fullRead?: boolean;
+	/**
 	 * Defaults to the previous entry's value for a path already tracked, and to
 	 * `false` otherwise. Pass it explicitly to widen a record or to clear one.
 	 */
@@ -73,7 +81,7 @@ export class ReadFileState {
 			content: view.content,
 			timestamp: Date.now(),
 			mtime: view.mtime ?? previous?.mtime,
-			fullRead: paged ? false : (previous?.fullRead ?? true),
+			fullRead: view.fullRead ?? (paged ? false : (previous?.fullRead ?? true)),
 			partialView: view.partialView ?? previous?.partialView ?? false,
 		};
 		this.#reads.set(key, tracked);

@@ -155,6 +155,16 @@ describe("re-recording after an edit", () => {
 		expect(entry?.partialView).toBe(false);
 	});
 
+	test("an explicit fullRead widens a page", () => {
+		// What a later full Read of the same path states. Without it the page's
+		// `fullRead: false` would ride along forever, and Edit/Write would keep
+		// refusing a file the model has since been shown in full.
+		const state = new ReadFileState();
+		state.record("/tmp/x.ts", { content: "line 10", offset: 10, limit: 1 });
+		state.record("/tmp/x.ts", { content: "whole file", fullRead: true });
+		expect(state.getState("/tmp/x.ts")?.fullRead).toBe(true);
+	});
+
 	test("an mtime is carried the same way — a content-only re-record does not clear it", () => {
 		// Same safe direction as the flags above: a caller that only knows the new
 		// content must not silently drop the baseline the staleness check compares
@@ -206,6 +216,26 @@ describe("what Read records", () => {
 			// Paging is what the model asked for, so it is not a partial view.
 			expect(entry?.partialView).toBe(false);
 		});
+	});
+
+	test("a full read after a paged read is recorded as a full read", async () => {
+		// Read states `fullRead` on every call. Left to inheritance, the page's
+		// `false` would survive the later full read, and both Edit and Write would
+		// keep refusing a file the model has now seen end to end.
+		const dir = tempDir();
+		const file = join(dir, "sample.ts");
+		const body = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n");
+		writeFileSync(file, body);
+		const state = new ReadFileState();
+		const tool = readToolFor(dir, state);
+
+		await call(tool, { file_path: file, offset: 11, limit: 5 });
+		expect(state.getState(keyOf(file, dir))?.fullRead).toBe(false);
+
+		await call(tool, { file_path: file });
+		const entry = state.getState(keyOf(file, dir));
+		expect(entry?.fullRead).toBe(true);
+		expect(entry?.content).toBe(body);
 	});
 
 	test("the recorded text is what a gate can match an old_string against", () => {

@@ -326,7 +326,7 @@ The code cut a line at the per-line cap of Read. The default 2000-line window cu
 
 The result is longer than `maxResultSizeChars`, and the pipeline cuts its middle before the model sees it. In the last case the recorded string is longer than what reached the model. This flag is the only thing between a gate and an `old_string` taken from the middle that is gone.
 
-`record` replaces any earlier entry and does not add to it. The content is stored without the gutter and the notice. A re-record refreshes the content and the timestamp. It keeps `fullRead` and `partialView` unless the call states them. That is the safe direction to be wrong in.
+`record` replaces any earlier entry and does not add to it. The content is stored without the gutter and the notice. A re-record refreshes the content and the timestamp. It keeps `fullRead` and `partialView` unless the call states them. That is the safe direction to be wrong in. Read states `fullRead` on every call, because only Read knows whether that call paged, and a full read after a page has to widen the record. Write states it too: the file it just wrote is whole, so the next Edit must not inherit a page's `false`.
 
 An edit tool that re-records after a successful edit knows the new content. It does not know what the model saw of the rest of the file. A call that carries only `{ content }` must not hand out a whole-file badge on top of a ranged read. To say otherwise, pass `offset` or `limit` or an explicit `partialView`. A record over a path that was never read means that the model authored the content, which is a Write of a new file.
 

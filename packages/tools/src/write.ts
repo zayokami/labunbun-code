@@ -89,7 +89,16 @@ export function createWriteTool(
 				try {
 					writtenAt = (await ops.stat(path)).mtimeMs;
 				} catch {}
-				readState?.record(path, { content: input.content, mtime: writtenAt });
+				// The model just authored the whole file, so this is a full view even
+				// when the record it replaces was a page or a cut read (the file
+				// vanished, and this call recreated it), and the next Edit must pass
+				// the gate.
+				readState?.record(path, {
+					content: input.content,
+					fullRead: true,
+					partialView: false,
+					mtime: writtenAt,
+				});
 				return {
 					content: [{ type: "text", text: `Wrote ${input.content.length} chars to ${path}` }],
 				};

@@ -124,6 +124,9 @@ export function createReadTool(
 				content: shownLines.join("\n"),
 				offset: input.offset,
 				limit: input.limit,
+				// Stated on every call: only Read knows whether this call asked for
+				// a page, and a full read has to widen an earlier page's record.
+				fullRead: input.offset === undefined && input.limit === undefined,
 				partialView: cutUnasked || cutLine || cutByResultLimit,
 				mtime,
 			});

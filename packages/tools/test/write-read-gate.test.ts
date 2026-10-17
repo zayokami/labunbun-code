@@ -184,6 +184,49 @@ describe("Write's read gate", () => {
 		expect(readFileSync(file, "utf8")).toBe("new content\n");
 	});
 
+	test("a file that vanished after a paged read may still be created again", async () => {
+		// The gate allows the create because stat says ENOENT. The record that
+		// replaces the page has to state `fullRead`, or the next Edit would be
+		// refused for a file this very call wrote in full.
+		const dir = tempDir();
+		const body = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
+		const file = existingFile(dir, "gone-paged.txt", body);
+		const { read, write, edit, state } = toolsFor(dir);
+		await call(read, { file_path: file, offset: 1, limit: 5 });
+		rmSync(file);
+
+		const result = await call(write, { file_path: file, content: "new content\n" });
+		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
+		const key = resolveCanonical(file, dir);
+		expect(state.getState(key)?.fullRead).toBe(true);
+		expect(state.getState(key)?.content).toBe("new content\n");
+
+		const edited = await call(edit, { file_path: file, old_string: "new content", new_string: "edited" });
+		expect(edited.isError, edited.isError ? textOf(edited) : undefined).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe("edited\n");
+	});
+
+	test("a file that vanished after a cut read may still be created again", async () => {
+		// Same edge as the paged case, plus the other carried flag: the cut read
+		// was partial, but the file this call writes is exactly what the model
+		// authored, so the record must not inherit the cut.
+		const dir = tempDir();
+		const file = existingFile(dir, "gone-cut.txt", overTheReadWindow());
+		const { read, write, edit, state } = toolsFor(dir);
+		await call(read, { file_path: file });
+		const key = resolveCanonical(file, dir);
+		expect(state.getState(key)?.partialView).toBe(true);
+		rmSync(file);
+
+		const result = await call(write, { file_path: file, content: "new content\n" });
+		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
+		expect(state.getState(key)?.fullRead).toBe(true);
+		expect(state.getState(key)?.partialView).toBe(false);
+
+		const edited = await call(edit, { file_path: file, old_string: "new content", new_string: "edited" });
+		expect(edited.isError, edited.isError ? textOf(edited) : undefined).toBeUndefined();
+	});
+
 	test("without a readState, Write keeps its old behavior", async () => {
 		// The two-argument factory is what a bare embedder or a unit test builds.
 		// The gate is opt-in through the store, so this call must overwrite an
