@@ -17,6 +17,8 @@ import {
 	type CompactionPhase,
 	type CompactionTrigger,
 	SessionStore,
+	type SpillRequest,
+	type SpillWriter,
 	SUMMARY_SECTIONS,
 } from "@labunbun/agent";
 import {
@@ -67,7 +69,7 @@ interface Harness {
 	check: (
 		context: { systemPrompt: string; messages: AgentMessage[] },
 		options?: { force?: boolean },
-	) => Promise<{ action: string } | null>;
+	) => Promise<{ action: string; context?: { systemPrompt: string; messages: AgentMessage[] } } | null>;
 	runPreCompact: (
 		trigger: CompactionTrigger,
 		customInstructions?: string,
@@ -90,6 +92,7 @@ function wiring(
 		tuning?: CompactionTuning;
 		store?: SessionStore;
 		phases?: CompactionPhase[];
+		spillOutput?: SpillWriter;
 	} = {},
 ): Harness {
 	let summaries = 0;
@@ -112,6 +115,7 @@ function wiring(
 		trimOldToolResults: options.trimOldToolResults,
 		preCompact: options.preCompact,
 		tuning: options.tuning,
+		spillOutput: options.spillOutput,
 		noteRewrite: (cause) => causes.push(cause),
 		onContextReduced: () => reducedClears++,
 		onPhase: options.phases ? (phase) => options.phases?.push(phase) : undefined,
@@ -166,6 +170,32 @@ describe("which rung runs at the threshold", () => {
 		expect(decision?.action).toBe("reduced");
 		expect(harness.summaries()).toBe(0);
 		expect(harness.reports.join("\n")).toContain("old tool results replaced by previews");
+	});
+
+	test("the previews point at the files the full text was written to", async () => {
+		// The cheap rung is lossy in context; this is what keeps it recoverable.
+		// The writer is the tools' own, handed in by the entry point — the wiring's
+		// job is only to get it to the manager the previews are made by.
+		const calls: SpillRequest[] = [];
+		const harness = wiring({
+			spillOutput: (request) => {
+				calls.push(request);
+				return `/tmp/${request.callId}.txt`;
+			},
+		});
+
+		const decision = await harness.check({ systemPrompt: "", messages: overThreshold() });
+
+		expect(decision?.action).toBe("reduced");
+		expect(calls.map((call) => call.callId)).toEqual(["call_0", "call_1"]); // keep-last-three
+		expect(calls[0]?.toolName).toBe("Read");
+		expect(calls[0]?.text).toBe("x".repeat(20_000));
+		const preview = decision?.context?.messages[1];
+		if (preview?.role !== "toolResult") throw new Error("expected a tool result");
+		const block = preview.content[0];
+		expect(
+			block?.type === "text" ? block.text.startsWith("[full output: 20000 chars → /tmp/call_0.txt]\n") : false,
+		).toBe(true);
 	});
 
 	test("a settings value of false goes straight to the summary", async () => {

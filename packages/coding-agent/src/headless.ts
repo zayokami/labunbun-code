@@ -670,6 +670,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		tuning: compactionTuning,
 		report: (text) => console.error(text),
 		readFile: readFileOrNull,
+		// The same writer the tools use: a preview points the model at the file
+		// its full text landed in, rather than at a session file it cannot open.
+		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 		noteRewrite: (cause) => transport.tracker?.note(cause),
 		// The cheap rung replaces old tool results with previews, so the bytes the
 		// model was shown are gone from its context and the read record goes too.

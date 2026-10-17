@@ -21,6 +21,7 @@ import {
 	type CompactionTrigger,
 	type CompactionVerification,
 	type SessionStore,
+	type SpillWriter,
 	SUMMARY_SECTIONS,
 } from "@labunbun/agent";
 import { type Model, missingApiKey, resolveModel, type StreamFn } from "@labunbun/ai";
@@ -258,6 +259,12 @@ export interface CompactionWiringOptions {
 	tuning?: CompactionTuning;
 	readFile?: (path: string) => string | null;
 	/**
+	 * The same writer the tools use. Previews of old results get a pointer to the
+	 * file the full text landed in, so the cheap rung is lossy in context and
+	 * still recoverable by the model that reads the preview.
+	 */
+	spillOutput?: SpillWriter;
+	/**
 	 * The `PreCompact` hook, when the app has one. A veto defers a pass the
 	 * estimate asked for; it cannot defer one the provider already refused — the
 	 * next request would be the same request and get the same refusal. The
@@ -357,6 +364,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				store: forStore,
 				summarizerModel: options.tuning?.summarizerModel ?? forModel,
 				readFile: options.readFile,
+				spillOutput: options.spillOutput,
 				onPhase: phase,
 				// The summary goes out over the session's own prefix, so the cache
 				// report reads it as a step of that conversation — but a pass that ran

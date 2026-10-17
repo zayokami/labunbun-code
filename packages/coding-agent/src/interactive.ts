@@ -917,6 +917,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// below, one rung earlier.
 		onContextReduced: () => readState.clear(),
 		readFile: readFileOrNull,
+		// The same writer the tools use, read through the holder so a /resume's
+		// spills land in the session that is live when the preview is made.
+		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId: sessionIdHolder.current, home }),
 		preCompact: async (trigger, customInstructions) => {
 			if (!hooksRuntime.has("PreCompact")) return { blocked: false };
 			const outcome = await hooksRuntime.run("PreCompact", {

@@ -42,6 +42,7 @@ import {
 	SUMMARY_SECTIONS,
 	stripAnalysis,
 } from "../src/compaction.ts";
+import type { SpillRequest, SpillWriter } from "../src/output-limits.ts";
 import { SessionStore } from "../src/session-store.ts";
 
 const CONFIG = { contextWindow: 100_000, maxOutputTokens: 32_000 };
@@ -327,6 +328,153 @@ describe("microcompact", () => {
 		expect(textOf(once, "t1").length).toBeLessThanOrEqual(2_000);
 		expect(textOf(twice, "t1")).toBe(textOf(once, "t1"));
 		expect(textOf(twice, "t3")).toBe(textOf(once, "t3"));
+	});
+});
+
+describe("the cheap rung's spill pointer", () => {
+	const BUDGET = 2_000;
+	const MARKER = "[... truncated by microcompact ...]";
+	const big = (id: string, text = "z".repeat(5_000), toolName = "Bash"): AgentMessage =>
+		toolResultMessage(id, toolName, [{ type: "text", text }]);
+	const textOf = (messages: AgentMessage[], id: string): string =>
+		(
+			messages.find((m) => m.role === "toolResult" && m.toolCallId === id) as {
+				content: { text: string }[];
+			}
+		).content[0]?.text ?? "";
+	/** Four old-enough results relative to a keep-last-two line. */
+	const four = (): AgentMessage[] => [big("t1"), big("t2"), big("t3"), big("t4")];
+
+	test("one write per old oversized result, carrying the whole text, and a preview that points at it", () => {
+		// The model reads the preview, not the session file. Without this line the
+		// text is gone from its context and there is no way back to it but re-running
+		// the tool.
+		const calls: SpillRequest[] = [];
+		const spill: SpillWriter = (request) => {
+			calls.push(request);
+			return "/tmp/x.txt";
+		};
+
+		const compacted = microcompact(four(), 2, BUDGET, spill);
+
+		expect(calls.map((call) => call.callId)).toEqual(["t1", "t2"]);
+		expect(calls[0]).toEqual({ callId: "t1", toolName: "Bash", text: "z".repeat(5_000) });
+		const preview = textOf(compacted, "t1");
+		expect(preview.startsWith("[full output: 5000 chars → /tmp/x.txt]\n")).toBe(true);
+		expect(preview.endsWith(MARKER)).toBe(true);
+		expect(preview.length).toBeLessThanOrEqual(BUDGET);
+		expect(textOf(compacted, "t3")).toBe("z".repeat(5_000)); // within keep-last-N
+	});
+
+	test("a writer that returns null or throws degrades to the plain preview", () => {
+		// A spill is a convenience. The compaction it decorates is the thing that
+		// keeps the session alive, so a disk error must cost the pointer and nothing
+		// else — same bytes as no writer at all.
+		const plain = microcompact(four(), 2, BUDGET);
+		const nullWriter = microcompact(four(), 2, BUDGET, () => null);
+		const thrower = microcompact(four(), 2, BUDGET, () => {
+			throw new Error("disk full");
+		});
+
+		expect(textOf(nullWriter, "t1")).toBe(textOf(plain, "t1"));
+		expect(textOf(thrower, "t1")).toBe(textOf(plain, "t1"));
+		expect(textOf(thrower, "t1")).not.toContain("[full output:");
+	});
+
+	test("kept and small results are never written", () => {
+		// The newest results are the turn's working set and stay whole, so a writer
+		// call for them would be a file nobody needs. The same goes for an old result
+		// that already fits: nothing was replaced, so there is nothing to point at.
+		let calls = 0;
+		const spill: SpillWriter = () => {
+			calls++;
+			return "/tmp/x.txt";
+		};
+
+		const kept = four();
+		expect(microcompact(kept, 4, BUDGET, spill)).toBe(kept);
+		expect(calls).toBe(0);
+
+		const small = toolResultMessage("t0", "Bash", [{ type: "text", text: "ok" }]);
+		const messages = [small, big("t1"), big("t2"), big("t3")];
+		const compacted = microcompact(messages, 2, BUDGET, spill);
+		expect(calls).toBe(1); // t1 only — t0 fits, t2/t3 are kept
+		expect(compacted[0]).toBe(small);
+	});
+
+	test("a result that already opens with a spill header is not spilled again", () => {
+		// Rung-two migration: a result the tools already spilled carries its own
+		// pointer. Writing a second file would duplicate bytes and give the model two
+		// paths for one text.
+		const already = `[full output: 9000 chars → /tmp/first.txt]\n${"z".repeat(5_000)}`;
+		let calls = 0;
+		const spill: SpillWriter = () => {
+			calls++;
+			return "/tmp/second.txt";
+		};
+
+		const compacted = microcompact([big("t1", already), big("t2")], 1, BUDGET, spill);
+
+		expect(calls).toBe(0);
+		const preview = textOf(compacted, "t1");
+		expect(preview.startsWith("[full output: 9000 chars → /tmp/first.txt]\n")).toBe(true);
+		expect(preview).not.toContain("/tmp/second.txt");
+		expect(preview.length).toBeLessThanOrEqual(BUDGET);
+	});
+
+	test("two oversized blocks in one result get one write, joined, with the header once", () => {
+		// One result is one file, whatever it is made of. The blocks are the same
+		// output in pieces, and a file per block would be a file per layout detail.
+		const calls: SpillRequest[] = [];
+		const spill: SpillWriter = (request) => {
+			calls.push(request);
+			return "/tmp/two.txt";
+		};
+		const messages: AgentMessage[] = [
+			toolResultMessage("t1", "Read", [textContent("a".repeat(5_000)), textContent("b".repeat(5_000))]),
+			big("t2"),
+			big("t3"),
+		];
+
+		const compacted = microcompact(messages, 2, BUDGET, spill);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.text).toBe(`${"a".repeat(5_000)}\n${"b".repeat(5_000)}`);
+		const blocks = (compacted[0] as { content: { type: string; text: string }[] }).content;
+		expect(blocks).toHaveLength(2);
+		expect(blocks[0]?.text.startsWith("[full output: 10001 chars → /tmp/two.txt]\n")).toBe(true);
+		expect(blocks[1]?.text.startsWith("[full output:")).toBe(false);
+		expect(blocks[1]?.text.endsWith(MARKER)).toBe(true);
+		for (const block of blocks) expect(block.text.length).toBeLessThanOrEqual(BUDGET);
+		expect(`${blocks[0]?.text}${blocks[1]?.text}`.match(/\[full output:/g)).toHaveLength(1);
+	});
+
+	test("trim passes the writer through, and the spilled previews are not cut again", () => {
+		// The manager is the real door the threshold and idle rungs use, and its
+		// second pass over its own output is what makes one trim per gap a property
+		// of the previews rather than a rule someone has to remember.
+		const calls: SpillRequest[] = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "unused" }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			spillOutput: (request) => {
+				calls.push(request);
+				return "/tmp/trim.txt";
+			},
+		});
+		const context: Context = {
+			systemPrompt: "",
+			messages: [big("t1"), big("t2"), big("t3"), big("t4"), big("t5")],
+		};
+
+		const first = manager.trim(context);
+
+		expect(first).not.toBeNull();
+		expect(calls.map((call) => call.callId)).toEqual(["t1", "t2"]); // keep-last-three
+		if (!first) throw new Error("expected a trim");
+		expect(textOf(first.context.messages, "t1").startsWith("[full output: 5000 chars → /tmp/trim.txt]\n")).toBe(true);
+		expect(manager.trim(first.context)).toBeNull();
+		expect(calls).toHaveLength(2); // the second pass had nothing left to cut or spill
 	});
 });
 

@@ -1126,6 +1126,9 @@ class AcpAgent implements acp.Agent {
 					return null;
 				}
 			},
+			// The same writer the tools use: a preview points the model at the file
+			// its full text landed in, rather than at a session file it cannot open.
+			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId, home }),
 			noteRewrite: (cause) => transport.tracker?.note(cause),
 			// The cheap rung replaces old tool results with previews, so the bytes
 			// the model was shown are gone from its context and the record goes too.

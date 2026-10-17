@@ -37,6 +37,11 @@ export function formatSpillHeader(path: string, chars: number): string {
 	return `[full output: ${chars} chars → ${path}]\n`;
 }
 
+/** Whether a result already opens with a spill header, so a second pass must not spill it again. */
+export function hasSpillHeader(text: string): boolean {
+	return SPILL_HEADER.test(text);
+}
+
 // Long-form design notes: docs/dev/output-limits.md
 /** The notice a cut leaves at the point where it cut, carrying how many characters are not shown. */
 const CUT_MARKER = /\n\.\.\. \[truncated (\d+) chars of output\](?:\n|$)/;

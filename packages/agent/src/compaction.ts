@@ -31,6 +31,7 @@
 import { createHash } from "node:crypto";
 import type { AgentMessage, AssistantMessage, Context, Model, StreamFn, Usage, UserMessage } from "@labunbun/ai";
 import { textContent, userMessage } from "@labunbun/ai";
+import { formatSpillHeader, hasSpillHeader, type SpillWriter } from "./output-limits.ts";
 import type { CompactionTrigger, PreservedFile, SessionStore } from "./session-store.ts";
 import type { CompactionCheck, TrimmedToolResults } from "./types.ts";
 
@@ -712,6 +713,12 @@ export interface CompactionManagerDeps {
 	store?: SessionStore;
 	readFile?: (path: string) => string | null;
 	/**
+	 * Where the cheap rung writes the full text of a tool result before it replaces
+	 * the result with a preview. Without one the preview is what it always was —
+	 * the full text stays in the session file but the model has no pointer to it.
+	 */
+	spillOutput?: SpillWriter;
+	/**
 	 * The model that writes summaries. The credential and the endpoint are
 	 * resolved from it at request time, so it must be a real registry entry —
 	 * the session's own model. A synthesized stand-in has an empty `apiKeyEnv`
@@ -905,7 +912,7 @@ export class CompactionManager {
 	 * whole, since nothing is forcing the cut it makes.
 	 */
 	trim(context: Context, keepLastN = TRIM_KEEP_LAST_RESULTS): { context: Context; cleared: TrimmedToolResults } | null {
-		const trimmed = microcompact(context.messages, keepLastN);
+		const trimmed = microcompact(context.messages, keepLastN, TRIM_PER_RESULT_BUDGET, this.#deps.spillOutput);
 		if (trimmed === context.messages) return null;
 		let results = 0;
 		let chars = 0;
@@ -1357,11 +1364,18 @@ const MICROCOMPACT_MARKER = "\n[... truncated by microcompact ...]";
  * bounds what the preview costs and not merely the text it keeps: a caller that
  * sizes a request by it — the round cap, or anything deciding what fits — can
  * rely on it, and a second pass finds nothing left over to cut.
+ *
+ * With a `spill`, the text a preview replaces goes to disk first and the first
+ * preview line points at it. The write is one per result and carries every one
+ * of its text blocks, so a multi-block result gets one file rather than a file
+ * per block. A failed spill degrades to the plain preview: the pointer is a
+ * convenience, and it must never be a failed compaction.
  */
 export function microcompact(
 	messages: AgentMessage[],
 	keepLastN = TRIM_KEEP_LAST_RESULTS,
 	perResultBudget = TRIM_PER_RESULT_BUDGET,
+	spill?: SpillWriter,
 ): AgentMessage[] {
 	const toolResultIndices: number[] = [];
 	messages.forEach((m, i) => {
@@ -1373,11 +1387,34 @@ export function microcompact(
 	const room = Math.max(0, perResultBudget - MICROCOMPACT_MARKER.length);
 	return messages.map((message, i) => {
 		if (cutoff.has(i) || message.role !== "toolResult") return message;
-		const content = message.content.map((block) =>
-			block.type === "text" && block.text.length > perResultBudget
-				? textContent(`${block.text.slice(0, room)}${MICROCOMPACT_MARKER}`)
-				: block,
-		);
+		if (!message.content.some((block) => block.type === "text" && block.text.length > perResultBudget)) return message;
+		let header = "";
+		const firstText = message.content.find((block) => block.type === "text");
+		if (spill && firstText?.type === "text" && !hasSpillHeader(firstText.text)) {
+			const parts: string[] = [];
+			for (const block of message.content) if (block.type === "text") parts.push(block.text);
+			const fullText = parts.join("\n");
+			// The same promise `cutText` makes: whatever goes wrong on the way to
+			// disk, the caller gets a result rather than an exception.
+			let path: string | null = null;
+			try {
+				path = spill({ callId: message.toolCallId, toolName: message.toolName, text: fullText });
+			} catch {
+				path = null;
+			}
+			if (path) header = formatSpillHeader(path, fullText.length);
+		}
+		const roomWithHeader = Math.max(0, perResultBudget - MICROCOMPACT_MARKER.length - header.length);
+		let headed = false;
+		const content = message.content.map((block) => {
+			if (block.type !== "text" || block.text.length <= perResultBudget) return block;
+			// The header appears once, on the first block actually rewritten — a
+			// later block is still part of the same file.
+			const lead = headed ? "" : header;
+			headed = true;
+			const kept = lead ? roomWithHeader : room;
+			return textContent(`${lead}${block.text.slice(0, kept)}${MICROCOMPACT_MARKER}`);
+		});
 		return { ...message, content };
 	});
 }
