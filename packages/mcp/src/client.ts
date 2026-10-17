@@ -7,14 +7,13 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { type AnyTool, buildTool, sanitizeCwd, type ToolResult } from "@labunbun/agent";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import {
-	PromptListChangedNotificationSchema,
-	ResourceListChangedNotificationSchema,
-	ToolListChangedNotificationSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+// Type-only on purpose: these erase at compile time. The SDK's *values* are
+// imported lazily by the functions that connect (see `httpTransport`,
+// `stdioTransport` and `connectMcpServer`), so importing this package does not
+// execute the SDK for a host that has no MCP server configured.
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 
 export const McpServerConfigSchema = z.union([
@@ -624,16 +623,30 @@ async function listToolsFrom(
 }
 
 /**
+ * The StreamableHTTP transport for one config. The SDK is loaded here, at the
+ * moment a server is actually connected, rather than when this module is
+ * imported: a host with no MCP server configured never executes it.
+ */
+async function httpTransport(url: string, headers?: Record<string, string>): Promise<StreamableHTTPClientTransport> {
+	const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+	return new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } });
+}
+
+/**
  * The stdio transport for one config, through the host's confiner when one is
  * wired. The confiner's answer is what opens — for the REPL that is the
  * sandbox wrapper around the command, plus the policy's proxy variables as an
  * env increment the transport merges over its own whitelist. A rejection here
  * fails this server's connect (the caller catches), not the session.
+ *
+ * The SDK is imported here, not at module scope: this path only runs when a
+ * stdio server is actually configured.
  */
 async function stdioTransport(
 	params: { command: string; args: string[]; env?: Record<string, string>; cwd?: string },
 	confine: McpSpawnConfiner | undefined,
 ): Promise<StdioClientTransport> {
+	const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
 	const spawn: McpStdioSpawn = confine
 		? await confine({ command: params.command, args: params.args, env: params.env, cwd: params.cwd })
 		: { command: params.command, args: params.args, env: params.env, cwd: params.cwd };
@@ -664,14 +677,13 @@ export async function connectMcpServer(
 	try {
 		const transport =
 			"type" in parsed.data && parsed.data.type === "http"
-				? new StreamableHTTPClientTransport(new URL(parsed.data.url), {
-						requestInit: { headers: parsed.data.headers },
-					})
+				? await httpTransport(parsed.data.url, parsed.data.headers)
 				: await stdioTransport(
 						parsed.data as { command: string; args: string[]; env?: Record<string, string>; cwd?: string },
 						options?.confine,
 					);
 
+		const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 		const client = new Client({ name: "labunbun", version: "0.1.0" });
 		opened = client;
 		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
@@ -746,6 +758,17 @@ export async function connectMcpServer(
 		await withTimeout(
 			(async () => {
 				await client.connect(transport);
+
+				// The notification schemas are values, so they are loaded with the
+				// connection rather than when this package is imported. `Client` has
+				// already pulled in the module that defines them, so this reads the
+				// cache — and they are the same objects a static import would have
+				// bound, not copies.
+				const {
+					PromptListChangedNotificationSchema,
+					ResourceListChangedNotificationSchema,
+					ToolListChangedNotificationSchema,
+				} = await import("@modelcontextprotocol/sdk/types.js");
 
 				// A server that adds, removes or replaces a tool mid-session says so on
 				// the wire, and the SDK drops a notification that has no handler — there
