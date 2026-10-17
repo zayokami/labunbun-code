@@ -273,6 +273,14 @@ export interface CompactionWiringOptions {
 	/** Register a rewrite of the prefix with the cache tracker. */
 	noteRewrite?: (cause: string) => void;
 	/**
+	 * Called when the cheap rung (threshold or idle) replaces old tool results
+	 * with previews. The session's read evidence describes bytes the model can no
+	 * longer see, so a host that keeps a `ReadFileState` has to clear it here. A
+	 * full compaction is not this door: that one ends in `done`, which the entry
+	 * points handle themselves.
+	 */
+	onContextReduced?: () => void;
+	/**
 	 * Watch a summarization happen, for an app with somewhere better to put it
 	 * than a line — the REPL paints a status row while the call is in flight.
 	 * Without one, each phase is reported through `report` as text, which is what
@@ -408,6 +416,9 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 							`(${decision.cleared.chars.toLocaleString()} characters freed, no summarization needed). ` +
 							"The full text is still in the session file.",
 					);
+					// The previews replaced bytes the model can no longer see, so the
+					// read evidence has to go with them.
+					options.onContextReduced?.();
 				}
 				// The breaker has no other way to be seen. Silent, it looks like the
 				// session simply stopped managing its context — until the run ends with

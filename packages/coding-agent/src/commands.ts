@@ -62,6 +62,16 @@ export interface LocalCommandContext {
 	 * rather than flagging it as an unexplained change. See `/compact` and `/trim`.
 	 */
 	noteCacheRewrite?(cause: string): void;
+	/**
+	 * Drop the Edit gate's record of what Read has shown this session. `/trim`
+	 * replaces old tool results with previews, so the bytes the model was shown
+	 * are gone from its context while the record still holds them; without this
+	 * an Edit would proceed on content the model can no longer see. `/compact`
+	 * needs no call here: a finished compaction clears the record in its `done`
+	 * phase, which every entry point runs. Optional because a context built by
+	 * hand — a test, an embedder — may have no tool set behind it.
+	 */
+	clearReads?(): void;
 }
 
 export interface LocalCommand extends CommandBase {
@@ -246,6 +256,9 @@ export function builtInCommands(): Command[] {
 				// would explain away the next genuine miss.
 				ctx.noteCacheRewrite?.("trim");
 				ctx.session.applyCompaction(trimmed.context);
+				// The full results are now previews in the conversation: the model can no
+				// longer see what the read record says it saw, so the record goes too.
+				ctx.clearReads?.();
 				ctx.refreshContext?.();
 				const after = estimateContextUsage(trimmed.context);
 				const freed = Math.max(0, before - after);

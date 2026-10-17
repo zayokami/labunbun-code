@@ -912,6 +912,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// pass that never ended from being written by anything later.
 			if (phase.kind === "failed") planAtPassStart = null;
 		},
+		// The cheap rung's previews replace text the model was shown, so the
+		// Edit gate's records go with them — the same reason as the `done` clear
+		// below, one rung earlier.
+		onContextReduced: () => readState.clear(),
 		readFile: readFileOrNull,
 		preCompact: async (trigger, customInstructions) => {
 			if (!hooksRuntime.has("PreCompact")) return { blocked: false };
@@ -2116,6 +2120,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// consults inside the wiring, asked here because `/compact` runs its
 				// summary through the manager itself.
 				preCompact: (trigger, customInstructions) => compactionWiring.runPreCompact(trigger, customInstructions),
+				// `/trim` adopts previews the model can see in place of the bytes it was
+				// shown, so the read record has to go with them — the same clear the
+				// automatic reduced rung and a compaction's `done` phase make.
+				clearReads: () => readState.clear(),
 				// `/autocompact` applies the change to this session, not only the
 				// file: the manager reads its switch from the config the wiring
 				// builds, so one rebuild after the flip is what makes the next
@@ -2932,6 +2940,14 @@ interface AppCommandContext {
 	 * Optional because a context assembled by hand has no wiring to rebuild.
 	 */
 	applyCompactionSettings?(patch: { enabled?: boolean; thresholdPercent?: number }): void;
+	/**
+	 * Drop the Edit gate's record of what Read has shown this session. `/trim`
+	 * replaces old tool results with previews, so the bytes the model was shown
+	 * are gone from its context even though the record still holds them, and an
+	 * Edit through that record would rewrite content the model can no longer
+	 * see. Optional because a context built by hand has no tool set behind it.
+	 */
+	clearReads?(): void;
 	mcpConnections: McpConnection[];
 	/**
 	 * The tool-list-change handler the startup connections carry (see
@@ -3028,6 +3044,9 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			// `/compact` and `/trim` both replace part of the transcript, and the
 			// cache report reads better naming them than flagging them.
 			noteCacheRewrite: (cause) => ctx.cache?.note?.(cause),
+			// The read evidence describes the full results `/trim` just replaced
+			// with previews, so it must not outlive them.
+			clearReads: () => ctx.clearReads?.(),
 		};
 		void Promise.resolve(command.call(localCtx, args))
 			.then((result) => {

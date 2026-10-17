@@ -10,7 +10,7 @@
  * The transport is scripted, so there is no network, no key and nothing billed.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
@@ -44,7 +44,11 @@ const OVERFLOW = {
 /** Run with a throwaway home and a captured stdout, and put both back afterwards. */
 async function runCaptured(
 	f: Fixture,
-	options: { streamFn: ReturnType<typeof fauxProvider>["streamFn"]; noSession?: boolean },
+	options: {
+		streamFn: ReturnType<typeof fauxProvider>["streamFn"];
+		noSession?: boolean;
+		outputFormat?: "json" | "stream-json";
+	},
 ): Promise<{ code: number; stdout: string }> {
 	const chunks: string[] = [];
 	const write = process.stdout.write.bind(process.stdout);
@@ -58,7 +62,7 @@ async function runCaptured(
 			modelRef: "anthropic/claude-haiku-4-5",
 			cwd: f.cwd,
 			noSession: options.noSession ?? true,
-			outputFormat: "json",
+			outputFormat: options.outputFormat ?? "json",
 			streamFn: options.streamFn,
 			home: f.home,
 		});
@@ -137,6 +141,44 @@ describe("a `-p` run that runs out of room", () => {
 		const retried = JSON.stringify(faux.receivedContexts[2]?.messages);
 		expect(retried).toContain("Conversation compacted");
 		expect(retried).toContain("hello");
+	});
+
+	test("a read above the boundary does not license an edit after the summary", async () => {
+		// A `-p` run used to build its tool set with a read record the host could
+		// not reach, so a summary replaced the prefix and the record outlived the
+		// bytes it described. The `done` phase is the clear the REPL makes, and
+		// the Edit gate below is what shows it ran: the first edit is refused for
+		// the gate's own reason, the re-read licenses the second one.
+		const f = fixture();
+		const target = join(f.cwd, "target.txt");
+		writeFileSync(target, "alpha\nbeta\n");
+		const read = { toolCalls: [{ name: "Read", arguments: { file_path: target } }] };
+		const edit = {
+			toolCalls: [{ name: "Edit", arguments: { file_path: target, old_string: "alpha", new_string: "ALPHA" } }],
+		};
+		const faux = fauxProvider([
+			read,
+			OVERFLOW,
+			{ text: "<summary>1. Primary Request: hello</summary>" },
+			edit,
+			read,
+			edit,
+			{ text: "done" },
+		]);
+
+		const { code, stdout } = await runCaptured(f, { streamFn: faux.streamFn, outputFormat: "stream-json" });
+
+		expect(code).toBe(0);
+		// The summary really ran: without it the first edit would be legal and the
+		// refusal below would pass for the wrong reason.
+		expect(faux.receivedContexts.length).toBeGreaterThanOrEqual(4);
+		const events = stdout
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { type: string; tool?: string; is_error?: boolean });
+		const edits = events.filter((event) => event.type === "tool_result" && event.tool === "Edit");
+		expect(edits.map((event) => event.is_error)).toEqual([true, false]);
+		expect(readFileSync(target, "utf8")).toBe("ALPHA\nbeta\n");
 	});
 
 	test("records the compaction in the session file, so the run can be resumed from it", async () => {

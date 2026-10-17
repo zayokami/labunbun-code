@@ -259,3 +259,69 @@ describe("the edit gate across a compaction", () => {
 		expect(readFileSync(target, "utf8")).toBe("ALPHA\nbeta\n");
 	}, 30_000);
 });
+
+describe("the edit gate across /trim", () => {
+	test("a read whose result became a preview does not license an edit", async () => {
+		const cwd = tempDir("lbb-readstate-trim-cwd-");
+		const home = tempDir("lbb-readstate-trim-home-");
+		const big = join(cwd, "big.txt");
+		// Long enough that one Read is over the cheap rung's 2000-character
+		// per-result budget, so `trim` has something to preview.
+		const line = (i: number) => `line ${String(i).padStart(3, "0")} ${"x".repeat(10)}`;
+		writeFileSync(big, `${Array.from({ length: 300 }, (_, i) => line(i)).join("\n")}\n`);
+		// Three tiny reads after it: the cheap rung keeps the last three tool
+		// results whole, which leaves the big one as the only candidate.
+		for (const name of ["one", "two", "three"]) writeFileSync(join(cwd, `${name}.txt`), `${name}\n`);
+
+		const edit = (old_string: string, new_string: string) => ({
+			tool: { name: "Edit", arguments: { file_path: big, old_string, new_string } },
+		});
+		const first = line(0);
+		const outcome = await runScene(
+			{
+				pointedAt: big,
+				// Read, a second turn that reads three small files, `/trim` (no
+				// model call), then an edit that must be refused, the re-read, and
+				// the same edit again — all in one prompt, since a tool result does
+				// not end a turn.
+				steps: JSON.stringify([
+					{ tool: { name: "Read", arguments: { file_path: big } } },
+					{ text: "read the big file" },
+					{ tool: { name: "Read", arguments: { file_path: join(cwd, "one.txt") } } },
+					{ tool: { name: "Read", arguments: { file_path: join(cwd, "two.txt") } } },
+					{ tool: { name: "Read", arguments: { file_path: join(cwd, "three.txt") } } },
+					{ text: "read the small ones" },
+					edit(first, "LINE 000 xxxxxxxxxx"),
+					{ tool: { name: "Read", arguments: { file_path: big } } },
+					edit(first, "LINE 000 xxxxxxxxxx"),
+					{ text: "edited" },
+				]),
+				run: `
+					promptResult = (await session.prompt("read the big file")).toString();
+					await session.prompt("read the small ones");
+					await onCommand("/trim");
+					afterResume = (await session.prompt("now edit")).toString();
+				`,
+			},
+			{ cwd, home },
+		);
+
+		expect(outcome.promptResult).toBe("completed");
+		expect(outcome.afterResume).toBe("completed");
+		// The trim really replaced the big result — and only that one — or the
+		// refusal below would pass for the wrong reason.
+		expect((outcome.infos as string[]).join("\n")).toContain("Replaced 1 old tool result");
+
+		const edits = (outcome.toolResults as Array<{ name: string; isError: boolean; text: string }>).filter(
+			(result) => result.name === "Edit",
+		);
+		expect(edits).toHaveLength(2);
+		// The record described bytes the model can no longer see, so the gate
+		// refuses exactly as it does after a summary.
+		expect(edits[0]?.isError).toBe(true);
+		expect(edits[0]?.text).toContain("was not read this session");
+		// One re-read brings the record back: the clear is a cost, not a lockout.
+		expect(edits[1]?.isError).toBe(false);
+		expect(readFileSync(big, "utf8").split("\n")[0]).toBe("LINE 000 xxxxxxxxxx");
+	}, 30_000);
+});

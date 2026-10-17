@@ -45,6 +45,7 @@ import {
 	detectRuntime,
 	detectShell,
 	type Operations,
+	ReadFileState,
 	TaskStore,
 } from "@labunbun/tools";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
@@ -310,11 +311,17 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// the tools still exist and the list lives for the length of the run, which is
 	// the same in-memory-only answer the rest of that mode gives.
 	const taskStore = new TaskStore();
+	// Held here rather than left to `createAllTools`, for the same reason as the
+	// task store: a finished compaction replaces what the model was shown, and
+	// the read evidence has to go with it — an instance private to the factory
+	// would be unreachable from the `done` phase below.
+	const readState = new ReadFileState();
 	// Spilling applies here too: a `-p` run reads a repository like any other
 	// session, and a build log that does not fit is no more reproducible for
 	// being unattended.
 	const tools = createAllTools(cwd, {
 		taskStore,
+		readState,
 		operations: ops,
 		backgroundShells,
 		readOnlyRoots: [toolOutputRoot(cwd)],
@@ -664,6 +671,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		report: (text) => console.error(text),
 		readFile: readFileOrNull,
 		noteRewrite: (cause) => transport.tracker?.note(cause),
+		// The cheap rung replaces old tool results with previews, so the bytes the
+		// model was shown are gone from its context and the read record goes too.
+		onContextReduced: () => readState.clear(),
 		// The pass re-roots the chain above the task snapshot, so the end of it is
 		// the first moment the list can be put back where a restart reads it — the
 		// same save the REPL makes at the same point. The reporting here is the
@@ -674,6 +684,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			const text = compactionPhaseText(phase);
 			if (text) console.error(text);
 			if (phase.kind !== "done") return;
+			// A summary replaces what the model was shown above the boundary, so
+			// the read evidence is no longer this conversation's to edit from.
+			readState.clear();
 			for (const warning of compactionWarnings(phase.verification)) console.error(warning);
 			saveTasks(taskStore, store);
 		},

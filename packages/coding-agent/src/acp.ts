@@ -77,6 +77,7 @@ import {
 	detectRuntime,
 	detectShell,
 	type Operations,
+	ReadFileState,
 	TaskStore,
 } from "@labunbun/tools";
 import { permissionOptions, ruleSpecifierFor } from "@labunbun/tui/permission-options";
@@ -972,8 +973,14 @@ class AcpAgent implements acp.Agent {
 		// store exists, because the store is the resume/new choice made a few lines
 		// down and the binding only needs the instance.
 		const taskStore = new TaskStore();
+		// One store per ACP session, held here rather than left to `createAllTools`:
+		// a compaction replaces what this conversation's model was shown, and the
+		// read evidence has to be clearable from the `done` phase below. A module
+		// scope instance would hand one session's reads to another.
+		const readState = new ReadFileState();
 		const tools = createAllTools(cwd, {
 			taskStore,
+			readState,
 			operations: ops,
 			backgroundShells,
 			readOnlyRoots: [toolOutputRoot(cwd)],
@@ -1120,6 +1127,9 @@ class AcpAgent implements acp.Agent {
 				}
 			},
 			noteRewrite: (cause) => transport.tracker?.note(cause),
+			// The cheap rung replaces old tool results with previews, so the bytes
+			// the model was shown are gone from its context and the record goes too.
+			onContextReduced: () => readState.clear(),
 			// The end of a pass is the first moment the chain below the boundary can
 			// hold the list again, and the save is the same one the REPL makes at the
 			// same point. The reporting is the wiring's default, reproduced because
@@ -1129,6 +1139,9 @@ class AcpAgent implements acp.Agent {
 				const text = compactionPhaseText(phase);
 				if (text) process.stderr.write(`${text}\n`);
 				if (phase.kind !== "done") return;
+				// A summary replaces what the model was shown above the boundary, so
+				// the read evidence is no longer this conversation's to edit from.
+				readState.clear();
 				for (const warning of compactionWarnings(phase.verification)) process.stderr.write(`${warning}\n`);
 				saveTasks(taskStore, store);
 			},

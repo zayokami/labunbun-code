@@ -73,6 +73,7 @@ interface Harness {
 		customInstructions?: string,
 	) => Promise<{ blocked: boolean; reason?: string }>;
 	summaries: () => number;
+	reducedClears: () => number;
 	reports: string[];
 	causes: string[];
 }
@@ -102,6 +103,7 @@ function wiring(
 	};
 	const reports: string[] = [];
 	const causes: string[] = [];
+	let reducedClears = 0;
 	const created = createCompactionWiring({
 		model: options.model ?? MODEL,
 		store: options.store,
@@ -111,12 +113,14 @@ function wiring(
 		preCompact: options.preCompact,
 		tuning: options.tuning,
 		noteRewrite: (cause) => causes.push(cause),
+		onContextReduced: () => reducedClears++,
 		onPhase: options.phases ? (phase) => options.phases?.push(phase) : undefined,
 	});
 	return {
 		check: created.checkCompaction as Harness["check"],
 		runPreCompact: created.runPreCompact,
 		summaries: () => summaries,
+		reducedClears: () => reducedClears,
 		reports,
 		causes,
 	};
@@ -199,6 +203,24 @@ describe("which rung runs at the threshold", () => {
 		expect(await harness.check({ systemPrompt: "", messages: [userMessage("short")] })).toBeNull();
 		expect(harness.causes).toEqual([]);
 		expect(harness.reports).toEqual([]);
+	});
+
+	test("only the previews invalidate the read evidence; a summary and nothing do not", async () => {
+		// The cheap rung replaces bytes the model was shown with previews, so what
+		// Read recorded is no longer in its context. A full compaction is the other
+		// event, but its clear belongs to each entry point's `done` phase: calling
+		// this door there as well would clear twice and say nothing extra.
+		const reduced = wiring();
+		expect((await reduced.check({ systemPrompt: "", messages: overThreshold() }))?.action).toBe("reduced");
+		expect(reduced.reducedClears()).toBe(1);
+
+		const summarized = wiring({ trimOldToolResults: false });
+		expect((await summarized.check({ systemPrompt: "", messages: overThreshold() }))?.action).toBe("compact");
+		expect(summarized.reducedClears()).toBe(0);
+
+		const untouched = wiring();
+		expect(await untouched.check({ systemPrompt: "", messages: [userMessage("short")] })).toBeNull();
+		expect(untouched.reducedClears()).toBe(0);
 	});
 });
 
