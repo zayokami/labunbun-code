@@ -783,6 +783,17 @@ export class CompactionManager {
 	}
 
 	/**
+	 * Whether the user's setting has automatic compaction off.
+	 *
+	 * Not the same switch as `isTripped`: that is this session's breaker, and the
+	 * two get different words because one is a choice and the other is a fault.
+	 * A disabled manager still runs a forced pass and a manual `/compact`.
+	 */
+	get isDisabled(): boolean {
+		return this.#config.enabled === false;
+	}
+
+	/**
 	 * The three numbers that describe this session's headroom, as the manager
 	 * itself computes them: where it compacts, where a request is refused, and
 	 * the window both are derived from. Reported rather than recomputed by the
