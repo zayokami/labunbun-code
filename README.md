@@ -863,13 +863,13 @@ Questions and bug reports: labunbun@zayoka.com
 
 ## Sponsor
 
-If LaBunbun Code saves you time, you can support the development.
+If LaBunbun Code saves you time, you can support the development. Scan a code with a wallet app, or copy the address.
 
-| Network | Address |
-|---------|---------|
-| BTC | `bc1qv9zhpzzdddyakzsetgwr4tkznl4ycsuxn7d00g` |
-| ETH | `0x8dFB632F494C694a1a0Ff4CC2566617230530020` |
-| SOL | `AdryGzPCKyH5PPzEmZ9ZxW77A5kCbBuapmrqeYFGcPna` |
+| Network | Address | QR code |
+|---------|---------|---------|
+| BTC | `bc1qv9zhpzzdddyakzsetgwr4tkznl4ycsuxn7d00g` | ![QR code for the BTC address](./docs/assets/sponsor-btc.svg) |
+| ETH | `0x8dFB632F494C694a1a0Ff4CC2566617230530020` | ![QR code for the ETH address](./docs/assets/sponsor-eth.svg) |
+| SOL | `AdryGzPCKyH5PPzEmZ9ZxW77A5kCbBuapmrqeYFGcPna` | ![QR code for the SOL address](./docs/assets/sponsor-sol.svg) |
 
 ## License
 
