@@ -310,6 +310,7 @@ import {
 	withheldProjectAgents,
 } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { createTaskNudges } from "./task-nudges.ts";
 import { bindTaskStore, restoreTasks, saveTasks } from "./task-snapshot.ts";
 import { formatTaskTree } from "./task-tree.ts";
 import {
@@ -1441,11 +1442,21 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// Edge-triggered state for the low-context warning, per attached session:
 		// after a hot swap the incoming conversation has its own size.
 		let contextLowWarned = false;
+		// Board reminders belong to the attached conversation too: their counters
+		// must not cross a hot swap, and a reminder must steer the session attached
+		// now. Plan mode is read live off the session's permission axis.
+		const taskNudges = createTaskNudges({
+			isPlanMode: () => target.permissionMode === "plan",
+			taskStore,
+			steer: (text) => target.steer(text),
+			followUp: (text) => target.followUp(text),
+		});
 		detachSessionListeners?.();
 		detachSessionListeners = target.on(async (event) => {
 			// The band's setTools rewrite, registered on the main session's own next
 			// turn — the latch explains why it cannot register where the change does.
 			toolChangeLatch.observe(event);
+			if (event.type === "agent_start") taskNudges.onAgentStart();
 			// The tool ledger: one `custom` entry per finished call — what ran,
 			// whether it worked, the file fingerprints Edit and Write took, the
 			// failing tests a failed test run reported, and the next step the
@@ -1453,10 +1464,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// so the main loop stays untouched; the input is taken at the start
 			// event because the end event does not carry one.
 			if (event.type === "tool_execution_start") ledger.noteToolStart(event.callId, event.input);
-			if (event.type === "tool_execution_end") ledger.noteToolEnd(event);
+			if (event.type === "tool_execution_end") {
+				ledger.noteToolEnd(event);
+				taskNudges.onToolExecutionEnd(event.toolName);
+			}
 			if (event.type === "turn_end") {
 				costTracker.recordUsage(event.message.provider, event.message.model, event.message.usage);
 				costTracker.persist();
+				taskNudges.onTurnEnd();
 			}
 			// Tool calls may have created or deleted files; the next user turn should
 			// see the tree as it is now, not as it was when they last typed.
@@ -1492,33 +1507,46 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// Stop: the loop reached a natural end. A hook may send it back to work
 			// (e.g. "tests still failing"), which followUp() does by design. Only
 			// natural completion is resumable — an abort or error stays stopped.
-			if (event.type === "agent_end" && event.reason === "completed") {
-				if (hooksRuntime.has("Notification")) {
-					const notification = await hooksRuntime.run("Notification", {
-						session_id: sessionIdHolder.current,
-						cwd,
-					});
-					reportHookErrors(handle, advisoryHookFailures("Notification", notification));
-				}
-				if (hooksRuntime.has("Stop")) {
-					const outcome = await hooksRuntime.run("Stop", { session_id: sessionIdHolder.current, cwd });
-					reportHookErrors(
-						handle,
-						outcome.errors.map((e) => `Stop hook failed: ${e}`),
-					);
-					if (outcome.blocked) {
-						if (stopHookResumes >= MAX_STOP_HOOK_RESUMES) {
-							pushInfo(
-								handle,
-								`Stop hook asked to continue but the per-session resume limit (${MAX_STOP_HOOK_RESUMES}) is reached.`,
-							);
-						} else {
-							stopHookResumes++;
-							const reason = outcome.reason ?? "Stop hook requested that work continue.";
-							pushInfo(handle, `Continuing: ${reason}`);
-							target.followUp(reason);
+			if (event.type === "agent_end") {
+				if (event.reason === "completed") {
+					let stopHookResumed = false;
+					if (hooksRuntime.has("Notification")) {
+						const notification = await hooksRuntime.run("Notification", {
+							session_id: sessionIdHolder.current,
+							cwd,
+						});
+						reportHookErrors(handle, advisoryHookFailures("Notification", notification));
+					}
+					if (hooksRuntime.has("Stop")) {
+						const outcome = await hooksRuntime.run("Stop", { session_id: sessionIdHolder.current, cwd });
+						reportHookErrors(
+							handle,
+							outcome.errors.map((e) => `Stop hook failed: ${e}`),
+						);
+						if (outcome.blocked) {
+							if (stopHookResumes >= MAX_STOP_HOOK_RESUMES) {
+								pushInfo(
+									handle,
+									`Stop hook asked to continue but the per-session resume limit (${MAX_STOP_HOOK_RESUMES}) is reached.`,
+								);
+							} else {
+								stopHookResumes++;
+								const reason = outcome.reason ?? "Stop hook requested that work continue.";
+								pushInfo(handle, `Continuing: ${reason}`);
+								// Marked before followUp(): that call starts the next
+								// run, and its agent_start resets this per-run gate.
+								taskNudges.onStopHookContinued();
+								target.followUp(reason);
+								stopHookResumed = true;
+							}
 						}
 					}
+					// The board's completion reminder is decided after the Stop hook
+					// has had its say, so a continuation is never talked over.
+					if (!stopHookResumed) taskNudges.onAgentEnd("completed");
+				} else {
+					// Abort, error, turn limit: the board waits for the next run.
+					taskNudges.onAgentEnd(event.reason);
 				}
 			}
 		});
