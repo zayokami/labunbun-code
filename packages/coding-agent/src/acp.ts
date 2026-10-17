@@ -79,7 +79,7 @@ import {
 	type Operations,
 	TaskStore,
 } from "@labunbun/tools";
-import { permissionOptions, ruleSpecifierFor } from "@labunbun/tui";
+import { permissionOptions, ruleSpecifierFor } from "@labunbun/tui/permission-options";
 import * as acp from "@zed-industries/agent-client-protocol";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";

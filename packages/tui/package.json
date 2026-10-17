@@ -4,7 +4,9 @@
 	"private": true,
 	"type": "module",
 	"exports": {
-		".": "./src/index.ts"
+		".": "./src/index.ts",
+		"./conpty": "./src/conpty.ts",
+		"./permission-options": "./src/permission-options.ts"
 	},
 	"dependencies": {
 		"@labunbun/agent": "workspace:*",

@@ -340,20 +340,23 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		return 0;
 	}
 
-	// One install for every mode: on a Windows console a single write past the
-	// buffer budget strands the viewport where it was, and this process is about
-	// to emit whole-transcript reprints. See `conpty.ts` in the tui package.
+	// One install for every mode but ACP: on a Windows console a single write
+	// past the buffer budget strands the viewport where it was, and this process
+	// is about to emit whole-transcript reprints. See `conpty.ts` in the tui
+	// package; the subpath import is that file alone, so this step does not load
+	// the barrel and the ink/react tree behind it.
 	//
-	// Every mode but ACP. That stdout carries newline-delimited JSON-RPC and
+	// ACP is excluded. That stdout carries newline-delimited JSON-RPC and
 	// nothing else, and the transform below is written for a console's viewport,
 	// not for a frame stream: it inspects its argument with
 	// `data.lastIndexOf("\n")`, which over the `Uint8Array` that
 	// `Writable.toWeb` hands it is `-1` — so it falls through to cutting every
 	// 8 KiB raw. That is byte-preserving over a pipe (measured), and it is an
-	// accident of type coercion either way; the ACP path keeps its frames away
-	// from it.
-	const { chunkWritesForConPTY, isConPTYHost } = await import("@labunbun/tui");
-	if (isConPTYHost() && args.subcommand !== "acp") chunkWritesForConPTY(process.stdout);
+	// accident of type coercion either way; the ACP path never imports it.
+	if (args.subcommand !== "acp") {
+		const { chunkWritesForConPTY, isConPTYHost } = await import("@labunbun/tui/conpty");
+		if (isConPTYHost()) chunkWritesForConPTY(process.stdout);
+	}
 
 	// Subcommands run before model resolution and the API-key check: importing a
 	// configuration is exactly what someone does when they have no working

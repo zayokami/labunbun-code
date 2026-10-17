@@ -7,6 +7,7 @@
  * reprint that actually trips the budget is measured in repl-clear-screen.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
 	chunkForConPTY,
 	chunkWritesForConPTY,
@@ -158,6 +159,32 @@ describe("chunkWritesForConPTY", () => {
 		stream.write("\x1b[2J\x1b[3J\x1b[Hnext frame");
 
 		expect(calls).toEqual([["\x1b[2J\x1b[Hnext frame"]]);
+	});
+
+	test("the pure subpaths stay pure", () => {
+		// The startup paths that only need these two files import them through
+		// their own exports so they never execute the barrel's ink/react graph.
+		// Two regressions are cheap to make and invisible here until startup
+		// slows again: a value import added to conpty.ts (which then needs the
+		// module graph on a path that only wanted string functions), and an
+		// export re-pointed at ./src/index.ts. `import type` is allowed because
+		// it is erased; any other import, a dynamic import or a require is not.
+		const source = readFileSync(new URL("../src/conpty.ts", import.meta.url), "utf8")
+			.replace(/\/\*[\s\S]*?\*\//g, "")
+			.replace(/\/\/.*$/gm, "");
+		const imports = source.match(/^\s*import\b.*$/gm) ?? [];
+		expect(imports.filter((line) => !/^\s*import\s+type\b/.test(line))).toEqual([]);
+		expect(source).not.toMatch(/\bimport\s*\(/);
+		expect(source).not.toMatch(/\brequire\s*\(/);
+
+		const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+			exports: Record<string, string>;
+		};
+		expect(manifest.exports).toMatchObject({
+			".": "./src/index.ts",
+			"./conpty": "./src/conpty.ts",
+			"./permission-options": "./src/permission-options.ts",
+		});
 	});
 
 	test("stripping happens before the cut, so the pieces join to the stripped data", () => {
