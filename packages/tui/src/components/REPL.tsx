@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentSession } from "@labunbun/agent";
+import type { AgentEvent, AgentSession, PermissionMode, SandboxMode } from "@labunbun/agent";
 import { cycleModeChoice, describeModeChoice, type ModeChoice } from "@labunbun/agent";
 import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout } from "ink";
@@ -21,6 +21,7 @@ import { CommandWheel } from "./CommandWheel.tsx";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
+import { PlanReviewDialog } from "./PlanReviewDialog.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { QuestionDialog } from "./QuestionDialog.tsx";
 import { QueuedMessages } from "./QueuedMessages.tsx";
@@ -83,7 +84,11 @@ export interface ReplProps {
 	 * for `setMode`, and everything `/mode` does about a change — the prompt's
 	 * badge, the session file — this key has to do too.
 	 */
-	onModeChange?: (choice: ModeChoice) => void;
+	onModeChange?: (
+		choice: ModeChoice,
+		/** The pair the session was in before this key was applied. */
+		previous: { mode: PermissionMode; sandbox: SandboxMode },
+	) => void;
 	/** Slash-command suggestions for autocomplete. */
 	commandSuggestions?: Array<[string, string]>;
 	/** Candidate file paths for @-mention completion in the prompt. */
@@ -204,6 +209,7 @@ export function REPL({
 	const statusPhase = useStore(store, (s) => s.statusPhase);
 	const dialog = useStore(store, (s) => s.dialog);
 	const question = useStore(store, (s) => s.question);
+	const planReview = useStore(store, (s) => s.planReview);
 	const picker = useStore(store, (s) => s.picker);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const contextActivity = useStore(store, (s) => s.contextActivity);
@@ -252,13 +258,17 @@ export function REPL({
 	 */
 	const cycleMode = useCallback(() => {
 		const session = getSession();
-		const next = cycleModeChoice({ mode: session.permissionMode, sandbox: session.sandbox });
+		const previous = { mode: session.permissionMode, sandbox: session.sandbox };
+		const next = cycleModeChoice(previous);
 		session.setMode(next.mode, next.sandbox);
 		store.set((s) => ({ ...s, modeLabel: next.label }));
 		// Told as well as shown. `/mode` records the change on the way to the same
 		// place; this key is the other way both axes move, and a session file that
-		// only knew about the typed route would forget the keyed one.
-		onModeChange?.(next);
+		// only knew about the typed route would forget the keyed one. The pair the
+		// session left goes with it: by the time the app layer hears about the
+		// press the session is already on the new row, and a plan entered here has
+		// to remember what it replaced.
+		onModeChange?.(next, previous);
 	}, [getSession, store, onModeChange]);
 	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
 	// Ink's own writer, not `process.stdout`: it knows where the frame it drew is,
@@ -270,7 +280,7 @@ export function REPL({
 	// All three overlays mean the same thing: the run is stopped until the user
 	// answers. The clock, the title and the notification all read it from here so
 	// a new overlay cannot be added to one and forgotten in another.
-	const awaitingUser = dialog !== null || question !== null || picker !== null;
+	const awaitingUser = dialog !== null || question !== null || planReview !== null || picker !== null;
 	/** A key pressed now would land mid-turn, so the prompt's keys change meaning. */
 	const busy = statusPhase !== "idle";
 	/**
@@ -580,7 +590,7 @@ export function REPL({
 		// explaining itself: the panel is not a command, and nothing on screen would
 		// be improved by a sentence about a key that just said no.
 		if (key.ctrl && input === "t") {
-			if (dialog || question || picker) return;
+			if (dialog || question || planReview || picker) return;
 			if (transcriptMode) return;
 			setWatchOpen((v) => !v);
 			return;
@@ -596,7 +606,7 @@ export function REPL({
 		// host, and the emacs engine binds no C-v at all — the terminal is the
 		// one place it can be swallowed (recorded in docs/dev/split-pane-design.md).
 		if (key.ctrl && input === "v") {
-			if (dialog || question || picker) return;
+			if (dialog || question || planReview || picker) return;
 			if (transcriptMode) return;
 			if (!watchOpen) return;
 			setWatchSelection((current) => nextWatchSelection(backgroundShells, current));
@@ -615,7 +625,7 @@ export function REPL({
 		// move the panel. The engine has the older claim, so the jump stands down
 		// under emacs and does nothing: the user sees one action, not two.
 		if (key.meta && /^[1-9]$/.test(input)) {
-			if (dialog || question || picker) return;
+			if (dialog || question || planReview || picker) return;
 			if (transcriptMode) return;
 			if (!watchOpen) return;
 			if (emacs) return;
@@ -657,7 +667,7 @@ export function REPL({
 		// too would kill the very tool call the user is deciding about, and the
 		// decision they just made would land on a run that no longer exists.
 		if (key.escape) {
-			if (dialog || question || picker) return;
+			if (dialog || question || planReview || picker) return;
 			// The editor gets the first look — it may have something of its own to
 			// cancel (an @-list, insert mode, a half-typed vim command) that is not
 			// an interrupt. Only what it declines to use reaches the session.
@@ -716,7 +726,7 @@ export function REPL({
 		// A dialog is the user deciding, and its own subscription already has this
 		// action. An ○ here must not abort the very turn the dialog is asking
 		// about — the same rule the Esc branch states above.
-		if (dialog || question || picker) return true;
+		if (dialog || question || planReview || picker) return true;
 		if (transcriptMode) {
 			// The button that opened the transcript is the button that closes it, the
 			// way ctrl+o toggles both ways. ○ leaves as well, but a person who used
@@ -909,6 +919,7 @@ export function REPL({
 						/>
 					) : null}
 					{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} pad={pad} /> : null}
+					{planReview ? <PlanReviewDialog plan={planReview.plan} resolve={planReview.resolve} pad={pad} /> : null}
 					{picker ? (
 						<ListPickerDialog
 							title={picker.title}
@@ -967,7 +978,14 @@ export function REPL({
 			<Box display={transcriptMode ? "none" : "flex"} flexDirection="column">
 				<PromptInput
 					onSubmit={handleSubmit}
-					disabled={dialog !== null || question !== null || picker !== null || shortcutsOpen || activity !== null}
+					disabled={
+						dialog !== null ||
+						question !== null ||
+						planReview !== null ||
+						picker !== null ||
+						shortcutsOpen ||
+						activity !== null
+					}
 					onToggleHelp={() => setShortcutsOpen(true)}
 					commandSuggestions={commandSuggestions}
 					completeFiles={completeFiles}
@@ -1101,7 +1119,8 @@ export function connectTurnFooter(
 	const sample = (): void => {
 		const state = store.get();
 		const busy = state.statusPhase !== "idle";
-		const frozen = state.dialog !== null || state.question !== null || state.picker !== null;
+		const frozen =
+			state.dialog !== null || state.question !== null || state.planReview !== null || state.picker !== null;
 		clock = advanceTimer(clock, now(), { busy, frozen });
 		if (busy) workingMs = clock.elapsedMs;
 	};

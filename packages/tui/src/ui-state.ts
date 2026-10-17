@@ -134,6 +134,13 @@ export interface UiState {
 	statusPhase: StatusPhase;
 	dialog: PermissionDialogState | null;
 	question: QuestionDialogState | null;
+	/**
+	 * The plan review dialog: a plan going up for approve / keep planning /
+	 * feedback. Its own surface rather than the permission dialog because the
+	 * answer is richer than allow/deny — a rejection can carry the sentence the
+	 * planner should act on.
+	 */
+	planReview: PlanReviewDialogState | null;
 	/** Pick-one dialog (resume, model switch). Like `question`, carries a resolve closure. */
 	picker: ListPickerState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
@@ -302,6 +309,25 @@ export interface QuestionDialogState {
 }
 
 /**
+ * What the reviewer said about a plan.
+ *
+ * `approved: false` with no feedback is "keep planning, no note"; with feedback
+ * it is the instruction the planner reads on rejection. `null`, one level up,
+ * means the dialog was canceled rather than answered.
+ */
+export interface PlanReviewResult {
+	approved: boolean;
+	feedback?: string;
+}
+
+export interface PlanReviewDialogState {
+	/** The plan text, as the model submitted it. */
+	plan: string;
+	/** Resolves with the answer; null = canceled (Esc, abort, replacement). */
+	resolve: (result: PlanReviewResult | null) => void;
+}
+
+/**
  * Tool output kept per entry. Generous on purpose — transcript mode (Ctrl+O)
  * renders up to this much so real command output stays readable — while the
  * live view still truncates for layout.
@@ -318,6 +344,7 @@ export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiSt
 		statusPhase: "idle",
 		dialog: null,
 		question: null,
+		planReview: null,
 		picker: null,
 		statusCard: null,
 		activity: null,

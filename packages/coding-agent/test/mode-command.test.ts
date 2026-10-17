@@ -46,6 +46,13 @@ function makeCtx(pair?: { mode: PermissionMode; sandbox: SandboxMode }) {
 	});
 
 	const picks: Pick[] = [];
+	/**
+	 * Every plan entry the command reports, with the pair read at the moment of
+	 * the call. Reading it here rather than passing it in is what lets a test pin
+	 * the ordering: the pair has to be the pre-plan one, so the call must land
+	 * before `setMode`.
+	 */
+	const planEntries: Array<{ mode: PermissionMode; sandbox: SandboxMode }> = [];
 	let settle: ((index: number | null) => void) | undefined;
 	const ctx = {
 		getSession: () => session,
@@ -66,9 +73,20 @@ function makeCtx(pair?: { mode: PermissionMode; sandbox: SandboxMode }) {
 				});
 			},
 		},
+		// At the context level, not on the handle: `/mode` reports a plan entry
+		// through the context the way it persists policy, so the fixture reads the
+		// pair when the command calls it — which is how the ordering is pinned.
+		recordPlanEntry: () => planEntries.push({ mode: session.permissionMode, sandbox: session.sandbox }),
 	} as unknown as AppCommandContext;
 
-	return { ctx, store, session, picks, finish: (index: number | null) => settle?.(index) };
+	return {
+		ctx,
+		store,
+		session,
+		picks,
+		planEntries,
+		finish: (index: number | null) => settle?.(index),
+	};
 }
 
 const infoTexts = (store: { get: () => UiState }) =>
@@ -107,6 +125,26 @@ describe("/mode with a name", () => {
 		// store would leave the prompt naming the last mode Shift+Tab set — two
 		// ways of changing the mode, and the visible one going stale.
 		expect(h.store.get().modeLabel).toBe("Plan");
+	});
+
+	test("entering plan by name records the pair it is leaving, before the move", () => {
+		const h = makeCtx({ mode: "agent", sandbox: "danger-full-access" });
+		handleAppCommand("/mode plan", h.ctx);
+
+		// The fixture reads the session when the callback runs, so this is the
+		// ordering assertion: called after `setMode`, it would record plan mode
+		// itself and approval would "restore" the session into the mode it is
+		// already in.
+		expect(h.planEntries).toEqual([{ mode: "agent", sandbox: "danger-full-access" }]);
+		expect(h.session.permissionMode).toBe("plan");
+		expect(h.session.sandbox).toBe("workspace-write");
+	});
+
+	test("re-selecting plan, or another mode, records no entry", () => {
+		const h = makeCtx({ mode: "plan", sandbox: "workspace-write" });
+		handleAppCommand("/mode plan", h.ctx);
+		handleAppCommand("/mode agent", h.ctx);
+		expect(h.planEntries).toEqual([]);
 	});
 
 	/**
@@ -229,6 +267,26 @@ describe("/mode without an argument", () => {
 		// `Agent 无沙箱` and read `Agent` under their thumb, unable to tell the
 		// confinement the session is actually in.
 		expect(h.store.get().modeLabel).toBe("Agent 无沙箱");
+	});
+
+	test("picking Plan in the list records the pair it is leaving", async () => {
+		const h = await openPicker({ mode: "agent", sandbox: "danger-full-access" });
+		const index = MODE_CHOICES.findIndex((c) => c.mode === "plan");
+		h.finish(index);
+		await delay(10);
+
+		expect(h.planEntries).toEqual([{ mode: "agent", sandbox: "danger-full-access" }]);
+		expect(h.session.permissionMode).toBe("plan");
+		expect(h.session.sandbox).toBe("workspace-write");
+	});
+
+	test("picking a row that is not plan records nothing", async () => {
+		const h = await openPicker({ mode: "agent", sandbox: "workspace-write" });
+		const index = MODE_CHOICES.findIndex((c) => c.id === "agentNoSandbox");
+		h.finish(index);
+		await delay(10);
+
+		expect(h.planEntries).toEqual([]);
 	});
 
 	test("cancelling leaves both axes alone and says nothing", async () => {

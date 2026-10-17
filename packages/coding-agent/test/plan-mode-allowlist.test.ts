@@ -87,7 +87,7 @@ describe("plan mode's allow-list against the tools' declarations", () => {
 		});
 	}
 
-	test("the sentence the model reads names the tools the mode actually admits", async () => {
+	test("the sentence the model reads states the rule, not a stale tool list", async () => {
 		const callbacks: PlanModeCallbacks = {
 			enterPlanMode: () => {},
 			requestPlanApproval: async () => ({ approved: false }),
@@ -98,11 +98,17 @@ describe("plan mode's allow-list against the tools' declarations", () => {
 		const result = await enter.call({}, {} as never);
 		const text = result.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 
-		// The model plans by what it is told it may use. A sentence listing four tools
-		// while the list admits more is how a question that could have been asked is
-		// never asked at all.
-		for (const name of ["Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "AskUserQuestion"]) {
-			expect(text).toContain(name);
+		// The sentence states the rule the gate enforces — read-only tools only —
+		// instead of enumerating the names that happened to answer "read-only" when
+		// it was written. An enumerated list goes stale silently: the mode admits a
+		// tool the sentence never named, and the model plans around a capability it
+		// was not told it had (AskUserQuestion was the one that proved this). What
+		// the model is owed is the rule plus the two tools it acts through.
+		expect(text).toContain("read-only tools");
+		expect(text).toContain("AskUserQuestion");
+		expect(text).toContain("ExitPlanMode");
+		for (const name of ["Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch"]) {
+			expect(text).not.toContain(name);
 		}
 	});
 

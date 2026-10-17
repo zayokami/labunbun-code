@@ -37,13 +37,17 @@ function harness(
 		sandbox?: SandboxMode;
 		steps?: FauxStep[];
 		approval?: () => Promise<boolean>;
+		/** The review surface. Absent = a host with only the permission dialog. */
+		review?: (plan: string, signal?: AbortSignal) => Promise<{ approved: boolean; feedback?: string } | null>;
 		rules?: PermissionRule[];
 	} = {},
 ) {
 	let current: AgentSession | null = null;
 	let writes = 0;
 	const dialogs: unknown[] = [];
+	const reviews: Array<{ plan: string; signal?: AbortSignal }> = [];
 	const modes: Array<{ tool: string; mode: PermissionMode }> = [];
+	let modeChanges = 0;
 	const callbacks = createPlanModeCallbacks(
 		() => current,
 		() => ({
@@ -51,7 +55,20 @@ function harness(
 				dialogs.push({ name, input });
 				return options.approval ? options.approval() : true;
 			},
+			// Offered only when the test asks for it, so the fallback tests below are
+			// the same harness with the surface genuinely absent rather than stubbed
+			// to decline.
+			requestPlanReview: options.review
+				? async (plan, signal) => {
+						reviews.push({ plan, signal });
+						return options.review?.(plan, signal) ?? null;
+					}
+				: undefined,
 		}),
+		undefined,
+		() => {
+			modeChanges++;
+		},
 	);
 	const faux = fauxProvider(options.steps ?? [{ text: "done" }]);
 	const session = new AgentSession({
@@ -89,10 +106,14 @@ function harness(
 		session,
 		callbacks,
 		dialogs,
+		reviews,
 		modes,
 		faux,
 		get writes() {
 			return writes;
+		},
+		get modeChanges() {
+			return modeChanges;
 		},
 		swap(next: AgentSession | null) {
 			current = next;
@@ -306,6 +327,183 @@ describe("plan mode full lifecycle", () => {
 			expect(h.session.permissionMode).toBe("plan");
 			expect(replacement.permissionMode).toBe("ask");
 		}
+	});
+
+	test("the review surface answers instead of the permission dialog, and its sentence reaches the retry", async () => {
+		let attempts = 0;
+		const h = harness({
+			mode: "agent",
+			sandbox: "danger-full-access",
+			review: async () =>
+				++attempts === 1 ? { approved: false, feedback: "Keep the old loader behind a flag" } : { approved: true },
+			steps: [
+				call("EnterPlanMode"),
+				call("ExitPlanMode", { plan: "first" }),
+				call("Write"),
+				call("ExitPlanMode", { plan: "first, behind a flag" }),
+				call("Write"),
+				{ text: "done" },
+			],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+		// The review is the question that was asked; the boolean permission dialog
+		// would be the same question twice, without the sentence that is the answer.
+		expect(h.reviews.map((entry) => entry.plan)).toEqual(["first", "first, behind a flag"]);
+		expect(h.dialogs).toEqual([]);
+		expect(h.writes).toBe(1);
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.session.sandbox).toBe("danger-full-access");
+
+		const results = h.session.messages.filter((m) => m.role === "toolResult");
+		// The rejection the model reads carries what the reviewer typed, which is
+		// the whole reason the review surface exists.
+		expect(JSON.stringify(results[1]?.content)).toContain("Feedback: Keep the old loader behind a flag");
+		expect(results[2]?.isError).toBe(true);
+	});
+
+	test("a review rejection without a sentence is a plain keep-planning answer", async () => {
+		const h = harness({
+			mode: "plan",
+			review: async () => ({ approved: false }),
+			steps: [call("ExitPlanMode", { plan: "proposal" }), { text: "done" }],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+		expect(h.dialogs).toEqual([]);
+		expect(h.session.permissionMode).toBe("plan");
+		const results = h.session.messages.filter((m) => m.role === "toolResult");
+		const text = JSON.stringify(results[0]?.content);
+		expect(text).toContain("Plan rejected by the user.");
+		expect(text).not.toContain("Feedback:");
+	});
+
+	test("null from the review surface is reported as canceled, not as a verdict", async () => {
+		const h = harness({
+			mode: "plan",
+			review: async () => null,
+			steps: [call("ExitPlanMode", { plan: "proposal" }), { text: "done" }],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+		expect(h.session.permissionMode).toBe("plan");
+		const results = h.session.messages.filter((m) => m.role === "toolResult");
+		expect(JSON.stringify(results[0]?.content)).toContain("Plan approval canceled");
+	});
+
+	test("a host with no review surface keeps the permission dialog", async () => {
+		const h = harness({ mode: "agent", sandbox: "danger-full-access" });
+		h.callbacks.enterPlanMode();
+		expect(await h.callbacks.requestPlanApproval("proposal")).toEqual({ approved: true });
+		expect(h.reviews).toEqual([]);
+		expect(h.dialogs).toEqual([{ name: "ExitPlanMode", input: { plan: "proposal" } }]);
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.session.sandbox).toBe("danger-full-access");
+	});
+
+	test("the run's signal travels to the review surface with the plan", async () => {
+		const h = harness({ mode: "agent", review: async () => ({ approved: false }) });
+		h.callbacks.enterPlanMode();
+		const controller = new AbortController();
+		await h.callbacks.requestPlanApproval("proposal", controller.signal);
+		expect(h.reviews).toHaveLength(1);
+		expect(h.reviews[0]?.signal).toBe(controller.signal);
+	});
+
+	test("a /mode entry records the pre-plan pair once, and approval restores it", async () => {
+		const h = harness({ mode: "ask", sandbox: "workspace-write", review: async () => ({ approved: true }) });
+		// The user-driven door records before moving the session; recording itself
+		// does not enter plan mode.
+		h.callbacks.recordPlanEntry?.();
+		expect(h.session.permissionMode).toBe("ask");
+		h.session.setMode("plan");
+		// A second record while already in plan mode must not overwrite the pair the
+		// cycle started from with `plan` itself.
+		h.callbacks.recordPlanEntry?.();
+		expect(await h.callbacks.requestPlanApproval("proposal")).toEqual({ approved: true });
+		expect(h.session.permissionMode).toBe("ask");
+		expect(h.session.sandbox).toBe("workspace-write");
+	});
+
+	test("a Shift+Tab entry hands the pair the session has already left", async () => {
+		const h = harness({ mode: "plan", review: async () => ({ approved: true }) });
+		// Shift+Tab applies the move before the host hears about it, so the old pair
+		// cannot be read off the session; the host passes it explicitly.
+		h.callbacks.recordPlanEntry?.({ mode: "agent", sandbox: "danger-full-access" });
+		expect(await h.callbacks.requestPlanApproval("proposal")).toEqual({ approved: true });
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.session.sandbox).toBe("danger-full-access");
+	});
+
+	test("a second cycle after an approval restores the pair it left, not the first cycle's", async () => {
+		const h = harness({ mode: "agent", sandbox: "workspace-write", review: async () => ({ approved: true }) });
+		h.callbacks.enterPlanMode();
+		expect(await h.callbacks.requestPlanApproval("first")).toEqual({ approved: true });
+		expect(h.session.permissionMode).toBe("agent");
+
+		h.session.setMode("ask", "workspace-write");
+		h.callbacks.enterPlanMode();
+		expect(await h.callbacks.requestPlanApproval("second")).toEqual({ approved: true });
+		expect(h.session.permissionMode).toBe("ask");
+		expect(h.session.sandbox).toBe("workspace-write");
+	});
+
+	test("a manual /mode exit does not leave the first cycle's pair for the next approval", async () => {
+		const h = harness({ mode: "agent", sandbox: "workspace-write", review: async () => ({ approved: true }) });
+		h.callbacks.enterPlanMode();
+		// Leave plan by hand. No approval runs, so nothing deletes the snapshot the
+		// first cycle saved; the next entry has to replace it.
+		h.session.setMode("ask", "workspace-write");
+		// The `/mode plan` path records the pair before moving the session.
+		h.callbacks.recordPlanEntry?.();
+		h.session.setMode("plan", "workspace-write");
+
+		expect(await h.callbacks.requestPlanApproval("second")).toEqual({ approved: true });
+		expect(h.session.permissionMode).toBe("ask");
+		expect(h.session.sandbox).toBe("workspace-write");
+	});
+
+	test("a manual Shift+Tab exit replaces the stale snapshot with the pair it names", async () => {
+		const h = harness({ mode: "agent", sandbox: "danger-full-access", review: async () => ({ approved: true }) });
+		h.callbacks.enterPlanMode();
+		// The same manual exit, through the other door: Shift+Tab moves the session
+		// first and then reports the pair it left, so the record must override the
+		// stale first-cycle snapshot even though the live session is already `plan`.
+		h.session.setMode("ask", "workspace-write");
+		h.session.setMode("plan", "workspace-write");
+		h.callbacks.recordPlanEntry?.({ mode: "ask", sandbox: "workspace-write" });
+
+		expect(await h.callbacks.requestPlanApproval("second")).toEqual({ approved: true });
+		expect(h.session.permissionMode).toBe("ask");
+		expect(h.session.sandbox).toBe("workspace-write");
+	});
+
+	test("a record of plan itself is not a snapshot, so approval still restores the prior pair", async () => {
+		const h = harness({ mode: "agent", sandbox: "workspace-write", review: async () => ({ approved: true }) });
+		h.callbacks.enterPlanMode();
+		// `plan` is never a legitimate "pair left for plan mode", whichever door
+		// names it. Accepting it would overwrite the entry's snapshot and make the
+		// approval put the session back into the mode it is already in.
+		h.callbacks.recordPlanEntry?.({ mode: "plan", sandbox: "workspace-write" });
+
+		expect(await h.callbacks.requestPlanApproval("proposal")).toEqual({ approved: true });
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.session.sandbox).toBe("workspace-write");
+	});
+
+	test("the mode-change hook fires on a model-driven entry and on the approval that ends it", async () => {
+		const h = harness({
+			mode: "agent",
+			steps: [call("EnterPlanMode"), call("ExitPlanMode", { plan: "proposal" }), { text: "done" }],
+		});
+		expect(h.modeChanges).toBe(0);
+		expect(await h.session.prompt("go")).toBe("completed");
+		expect(h.modeChanges).toBe(2);
+
+		// The user-driven door reports through recordPlanEntry, which only records:
+		// the host's own badge/persist already ran on that path, and a second
+		// publish here would be work nobody asked for.
+		const user = harness({ mode: "ask" });
+		user.callbacks.recordPlanEntry?.();
+		user.session.setMode("plan");
+		expect(user.modeChanges).toBe(0);
 	});
 
 	test("mode bookkeeping is per session and per entry, not a single captured startup mode", async () => {

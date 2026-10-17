@@ -26,11 +26,34 @@ export interface PlanModeCallbacks {
 	 * session it was asking about.
 	 */
 	requestPlanApproval(plan: string, signal?: AbortSignal): Promise<{ approved: boolean; feedback?: string }>;
+	/**
+	 * Remember the pair the session is about to leave for plan mode, so an
+	 * approval can put it back.
+	 *
+	 * The model-driven door (`EnterPlanMode`) records its own entry. The
+	 * user-driven doors — `/mode plan`, Shift+Tab — set the mode without going
+	 * through this object, so the host tells it. The optional `previous` pair is
+	 * for the Shift+Tab path, where the session has already moved by the time the
+	 * host hears about it and the old pair can no longer be read off the session.
+	 *
+	 * Optional because callback objects built by hand (tests, embedders) predate
+	 * the method and have no user-driven door to report.
+	 */
+	recordPlanEntry?(previous?: { mode: PermissionMode; sandbox: SandboxMode }): void;
 }
 
 export interface PlanApprovalUi {
 	/** Present a permission dialog; resolves to false when refused or canceled. */
 	requestPermission(toolName: string, input: unknown, signal?: AbortSignal): Promise<boolean>;
+	/**
+	 * Present the plan review surface, when the host has one.
+	 *
+	 * Resolves with the reviewer's answer, or null when the review was canceled
+	 * (Esc, abort, replacement). Absent on hosts that only have a permission
+	 * dialog; those fall back to the boolean question below, which cannot carry
+	 * feedback.
+	 */
+	requestPlanReview?(plan: string, signal?: AbortSignal): Promise<{ approved: boolean; feedback?: string } | null>;
 }
 
 /**
@@ -77,21 +100,67 @@ export function createPlanModeCallbacks(
 	getSession: () => AgentSession | null,
 	getUi: () => PlanApprovalUi | null,
 	swap?: PlanModelSwap,
+	/**
+	 * Fired once the session's mode pair has actually moved under the tools'
+	 * feet: after a model-driven entry, and after an approval puts the pair back.
+	 * The host uses it to publish the badge and persist the policy, which no
+	 * session event can do (`setMode` is a setter). Optional so every existing
+	 * caller keeps compiling and a host without a badge pays nothing.
+	 */
+	onModeChanged?: () => void,
 ): PlanModeCallbacks {
 	const previousModes = new WeakMap<AgentSession, { mode: PermissionMode; sandbox: SandboxMode; model: Model }>();
+	/**
+	 * Save the pair an entry into plan mode is leaving.
+	 *
+	 * `explicit` is true when the caller named the pair itself — Shift+Tab, whose
+	 * session has already moved by the time the host hears about it. Without one,
+	 * a pair that is already `plan` is a redundant record (a second EnterPlanMode
+	 * in a row, or a repeated record while the session is in plan mode): there is
+	 * no "before plan" to save, and the cycle's own snapshot stays.
+	 *
+	 * Any record taken from outside plan mode replaces an existing snapshot. The
+	 * guard used to be "the first snapshot wins, period", which assumed every
+	 * cycle ended in an approval — approval deletes the entry. A user can leave
+	 * plan mode by hand (`/mode`, Shift+Tab) with no approval to delete it, and
+	 * the next cycle would then find the old entry and restore the *first*
+	 * cycle's pair instead of the one it actually left.
+	 */
+	const remember = (
+		session: AgentSession,
+		pair: { mode: PermissionMode; sandbox: SandboxMode },
+		explicit: boolean,
+	): void => {
+		if (!explicit && pair.mode === "plan") return;
+		previousModes.set(session, { ...pair, model: session.model });
+	};
 	return {
 		enterPlanMode: () => {
 			const session = getSession();
 			if (!session) return;
-			if (session.permissionMode !== "plan") {
-				previousModes.set(session, { mode: session.permissionMode, sandbox: session.sandbox, model: session.model });
-			}
+			remember(session, { mode: session.permissionMode, sandbox: session.sandbox }, false);
 			session.setMode("plan");
 			const planModel = swap?.planModel();
 			if (planModel && !sameModel(planModel, session.model)) {
 				session.setModel(planModel);
 				swap?.onModelSwapped?.(planModel);
 			}
+			onModeChanged?.();
+		},
+		recordPlanEntry: (previous) => {
+			const session = getSession();
+			if (!session) return;
+			// Entering plan mode from a user-driven door: the pair is either the one
+			// the session is still in (the caller recorded before moving it) or the
+			// one the caller named after the move. Either way the model does not
+			// move here — this records, it does not enter.
+			const pair = previous ?? { mode: session.permissionMode, sandbox: session.sandbox };
+			// `plan` is never a legitimate "before plan" pair, whoever named it. The
+			// hosts guard this at their call sites, but the contract this method
+			// states is about the pair that was left, and a snapshot of `plan` would
+			// make an approval restore the mode the session is already in.
+			if (pair.mode === "plan") return;
+			remember(session, pair, previous !== undefined);
 		},
 		requestPlanApproval: async (plan, signal) => {
 			// Capture everything before the await: the session that entered plan
@@ -106,14 +175,27 @@ export function createPlanModeCallbacks(
 				session.permissionMode === "plan"
 					? (previousModes.get(session) ?? { ...DEFAULT_MODE_CHOICE })
 					: { mode: session.permissionMode, sandbox: session.sandbox };
-			let approved: boolean;
+			let decision: { approved: boolean; feedback?: string } | null;
 			try {
-				approved = await ui.requestPermission("ExitPlanMode", { plan }, signal);
+				// The review surface carries a rejection's feedback, so it is preferred
+				// wherever the host has one. A host without it keeps the old boolean
+				// permission dialog — the same question, minus the sentence.
+				decision = ui.requestPlanReview
+					? await ui.requestPlanReview(plan, signal)
+					: (await ui.requestPermission("ExitPlanMode", { plan }, signal))
+						? { approved: true }
+						: { approved: false };
 			} catch {
 				return { approved: false, feedback: "Plan approval dialog failed" };
 			}
-			if (!approved) {
-				return { approved: false };
+			// Null is the dialog being taken away — canceled, aborted, or replaced —
+			// rather than the user saying no. Report the cancellation so the model
+			// does not treat a review nobody finished as a verdict on the plan.
+			if (decision === null) {
+				return { approved: false, feedback: "Plan approval canceled" };
+			}
+			if (!decision.approved) {
+				return decision.feedback ? { approved: false, feedback: decision.feedback } : { approved: false };
 			}
 			// An interrupt that raced the dialog (Esc while it was up) counts as
 			// canceled, not approved: leave the plan-mode gate exactly as it was.
@@ -146,6 +228,9 @@ export function createPlanModeCallbacks(
 				session.setModel(previous.model);
 				swap.onModelSwapped?.(previous.model);
 			}
+			// The mode moved without a session event; the host's badge and stored
+			// policy learn about it here.
+			onModeChanged?.();
 			return { approved: true };
 		},
 	};
@@ -166,9 +251,9 @@ export function createPlanModeTools(callbacks: PlanModeCallbacks): AnyTool[] {
 			return {
 				content: [
 					textContent(
-						"Plan mode active. You may only use read-only tools (Read/Grep/Glob/LS, plus " +
-							"WebFetch/WebSearch for background), and AskUserQuestion when a decision is the " +
-							"user's. Design your approach, then call ExitPlanMode with the plan for approval.",
+						"Plan mode is active: only read-only tools are allowed. Writes, shell commands, " +
+							"and subagent tools are denied. Use AskUserQuestion for decisions only the user " +
+							"can make. When the approach is ready, call ExitPlanMode with the plan.",
 					),
 				],
 			};

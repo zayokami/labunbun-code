@@ -1162,6 +1162,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			return app
 				? {
 						requestPermission: (toolName, input, signal) => requestPermissionOrAbort(app, toolName, input, signal),
+						// Runtime-guarded: a hand-built handle (a test's, an embedder's)
+						// may predate the review surface, and reaching for a method that is
+						// not there would cost the approval rather than the reviewer. When
+						// it is absent the callbacks fall back to the permission dialog.
+						requestPlanReview:
+							typeof app.requestPlanReview === "function"
+								? (plan: string, signal?: AbortSignal) => requestPlanReviewOrAbort(app, plan, signal)
+								: undefined,
 					}
 				: null;
 		},
@@ -1182,6 +1190,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				handle?.setModelName(`${next.provider}/${next.id}`);
 				if (sessionRef) refreshContextInfo(sessionRef);
 			},
+		},
+		// The pair moved without a session event, so the two things that mirror it
+		// learn here: the prompt's badge and the policy snapshot in the session
+		// file. Both read the live session rather than a captured one, for the
+		// same reason `persistPolicy` does — a `/resume` rebinds it.
+		() => {
+			const live = sessionRef;
+			if (!live) return;
+			publishModeLabel(handle, describeModeChoice(live.permissionMode, live.sandbox));
+			persistPolicy();
 		},
 	);
 	const planTools = createPlanModeTools(planCallbacks);
@@ -1884,9 +1902,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// Shift+Tab moves both axes without passing through the app layer — the REPL
 		// owns that key, and the session has no event for `setMode` — so this is how a
 		// change made there reaches the file. The REPL applies it to the session
-		// before calling this, which is why nothing is passed: the axes are read from
-		// the live session, the same place `/mode`'s persist reads them.
-		onModeChange: () => persistPolicy(),
+		// before calling this, which is why the axes are read from the live session,
+		// the same place `/mode`'s persist reads them. The pair Shift+Tab left is
+		// passed separately because the move has already happened: a cycle that just
+		// landed in plan mode records the pair to restore on approval, and the
+		// badge/persist below run for every change, as they always have.
+		onModeChange: (_choice, previous) => {
+			if (sessionRef?.permissionMode === "plan" && previous?.mode !== "plan") {
+				planCallbacks.recordPlanEntry?.(previous);
+			}
+			persistPolicy();
+		},
 		// Whether the queue may answer a pending request from that grant instead of
 		// asking. The queue has already matched the rule; this is the second half —
 		// the engine's own answer, under the rules *including* the one just pushed and
@@ -2000,6 +2026,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				baseRules,
 				sessionRules,
 				persistPolicy,
+				recordPlanEntry: planCallbacks.recordPlanEntry,
 				commands,
 				agentDefinitions,
 				withheldAgents,
@@ -2411,6 +2438,48 @@ async function askUserOrAbort(
 }
 
 /**
+ * Show the plan for review, with the run's abort as a second way out.
+ *
+ * The same race as the two above, for the same reason: ExitPlanMode's call
+ * awaits this dialog, and an abort that left the plan on screen would hold the
+ * turn open behind a review nobody is waiting for. The signal also travels into
+ * the handle, so the slot takes the dialog down in the same statement that
+ * settles the promise; the race here and the clear in `finally` are the second
+ * door, kept because a handle whose slot missed the abort must still end this
+ * wait. Cancelling lands as null, which the callbacks report to the model as
+ * "canceled" rather than as a verdict.
+ *
+ * Unlike the question twin, this one guards an already-aborted signal: the
+ * dialog is a store write, and asking for one after the run ended would flash a
+ * screen for a turn that is already gone.
+ */
+async function requestPlanReviewOrAbort(
+	handle: ReplAppHandle,
+	plan: string,
+	signal?: AbortSignal,
+): Promise<{ approved: boolean; feedback?: string } | null> {
+	if (signal?.aborted) {
+		handle.clearPlanReviewRequest?.();
+		return null;
+	}
+	const answer = handle.requestPlanReview(plan, signal);
+	if (!signal) return answer;
+
+	let onAbort: (() => void) | undefined;
+	const abort = new Promise<null>((resolve) => {
+		onAbort = () => resolve(null);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([answer, abort]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+		// Whatever is still on screen belongs to the aborted run.
+		if (signal.aborted) handle.clearPlanReviewRequest?.();
+	}
+}
+
+/**
  * Await `promise`, unless the run aborts first — then undefined.
  *
  * For waits whose product is a dialog: nothing past an abort reads the result,
@@ -2687,6 +2756,17 @@ interface AppCommandContext {
 	 * assuming it. Supplied by `runInteractive`, where it is `persistPolicy`.
 	 */
 	persistPolicy?(): void;
+	/**
+	 * Remember the pair a plan mode entered from, so approving the plan can put
+	 * it back. Called by `/mode` before it moves a live session into plan mode;
+	 * nothing moves here, and it is a no-op when the session is already in plan
+	 * mode or a snapshot already exists.
+	 *
+	 * Optional for the same reason as `persistPolicy`: a hand-built context has
+	 * no plan callbacks behind it, and `/mode` must still work there. Supplied by
+	 * `runInteractive`, where it is `planCallbacks.recordPlanEntry`.
+	 */
+	recordPlanEntry?(): void;
 	commands: Command[];
 	/**
 	 * The live definition lists, the same arrays the session's tools read:
@@ -3913,6 +3993,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			if (arg && !target) {
 				pushInfo(ctx.handle, `Usage: /mode ${MODE_CHOICES.map((c) => c.id).join("|")}`);
 			} else if (target) {
+				// Snapshot before the move: the pair approval restores is the one the
+				// session is in now, not `plan` itself. Only the transition into plan
+				// records — re-selecting plan is not an entry.
+				if (session && target.mode === "plan" && session.permissionMode !== "plan") {
+					ctx.recordPlanEntry?.();
+				}
 				session?.setMode(target.mode, target.sandbox);
 				// The prompt's badge is a copy of the mode, and the session has no
 				// event for `setMode` — so this is the only place that can tell the
@@ -3948,6 +4034,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					if (index === null || index < 0) return;
 					const chosen = MODE_CHOICES[index];
 					if (!chosen) return;
+					// Same snapshot as the argument path, and before the move for the
+					// same reason; a picker landing on plan is still an entry.
+					if (session && chosen.mode === "plan" && session.permissionMode !== "plan") {
+						ctx.recordPlanEntry?.();
+					}
 					session?.setMode(chosen.mode, chosen.sandbox);
 					// The picker's answer has to reach the prompt for the same reason the
 					// argument path's does — this is the other way `/mode` can be run

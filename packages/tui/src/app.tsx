@@ -3,7 +3,7 @@
  * permission dialog bridge), renders the Ink app, and returns an exit code.
  */
 
-import type { ActivityRange, AgentSession, ModeChoice, PermissionMode } from "@labunbun/agent";
+import type { ActivityRange, AgentSession, ModeChoice, PermissionMode, SandboxMode } from "@labunbun/agent";
 import { describeModeChoice } from "@labunbun/agent";
 import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
@@ -17,11 +17,13 @@ import {
 } from "./components/REPL.tsx";
 import { inputTrace } from "./input-trace.ts";
 import { createPermissionQueue } from "./permission-queue.ts";
+import { createPlanReviewSlot } from "./plan-review-slot.ts";
 import { createQuestionSlot } from "./question-slot.ts";
 import { createStore, type Store, useStore } from "./store.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
 import {
 	initialUiState,
+	type PlanReviewResult,
 	type StatusCardData,
 	toolFullView,
 	toolPreview,
@@ -62,7 +64,15 @@ export interface ReplAppOptions {
 	 * on. The app layer records the change — the session file is where a restart
 	 * reads the mode from — and only this package sees the key.
 	 */
-	onModeChange?: (choice: ModeChoice) => void;
+	onModeChange?: (
+		choice: ModeChoice,
+		/**
+		 * The pair the session was in before the key was applied. Passed along
+		 * because the app layer is where a plan entry is recorded, and by the time
+		 * the callback runs the session has already moved.
+		 */
+		previous: { mode: PermissionMode; sandbox: SandboxMode },
+	) => void;
 	/**
 	 * Consulted when the user asks to leave — `/exit`, `/quit`, or the idle
 	 * double Ctrl+C — before anything unmounts. Return true to leave; false
@@ -155,11 +165,23 @@ export interface ReplAppHandle {
 	 */
 	clearPermissionRequest: () => void;
 	/**
+	 * Show the plan review dialog; resolves with the answer, or null when the
+	 * review is canceled — by Esc, by an abort, or by a newer plan replacing it.
+	 * The signal is the run's own, so an abort takes the dialog down and settles
+	 * the call instead of leaving a turn waiting on a reviewer.
+	 */
+	requestPlanReview: (plan: string, signal?: AbortSignal) => Promise<PlanReviewResult | null>;
+	/**
 	 * Dismiss the question dialog as canceled, if one is up. The same caller-side
 	 * need as `clearPermissionRequest` above and for the same reason: an aborted
 	 * run's question will never be answered, and its caller is still awaiting it.
 	 */
 	clearQuestionRequest: () => void;
+	/**
+	 * Dismiss an open plan review as canceled, if one is up. The third dialog with
+	 * the same caller-side need: its caller is a tool call awaiting an answer.
+	 */
+	clearPlanReviewRequest: () => void;
 	/**
 	 * Dismiss an open picker as canceled, if one is up. The same caller-side
 	 * need again: something else is about to take the screen — a confirmation
@@ -453,6 +475,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		show: (question) => store.set((state) => ({ ...state, question })),
 	});
 
+	const planReviewSlot = createPlanReviewSlot({
+		show: (planReview) => store.set((state) => ({ ...state, planReview })),
+	});
+
 	return {
 		store,
 		waitUntilExit: async () => {
@@ -537,8 +563,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			store.set((s) => ({ ...s, modelName: name }));
 		},
 		askUser: questionSlot.ask,
+		requestPlanReview: planReviewSlot.request,
 		clearPermissionRequest: permissionQueue.clear,
 		clearQuestionRequest: questionSlot.clear,
+		clearPlanReviewRequest: planReviewSlot.clear,
 		clearPickerRequest: () => cancelOpenPicker(store),
 	};
 }
