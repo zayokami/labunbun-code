@@ -229,7 +229,8 @@ import {
 	seatsByRef,
 } from "./model-roles.ts";
 import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
-import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
+import { createPlanModeCallbacks, createPlanModeTools, createPlanTasks, type PlanModeCallbacks } from "./plan-mode.ts";
+import { type PlanSnapshot, readPlanSnapshot, reanchorPlanSnapshot, writePlanSnapshot } from "./plan-snapshot.ts";
 import {
 	readPolicySnapshot,
 	resolveStartupAxes,
@@ -774,6 +775,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	];
 	const streamFn = withModelFallback(baseStreamFn, createModelChainResolver(roleOrders, globalFallbacks));
 
+	// The plan the running pass has to carry across its own re-rooting. Read when
+	// the pass starts, while the active chain still runs through the snapshot;
+	// by `done` the boundary is in the file and a fresh read would find nothing
+	// (see `reanchorPlanSnapshot`). Cleared at every ending.
+	let planAtPassStart: PlanSnapshot | null = null;
 	// Compaction, shared with the headless run and every subagent through the
 	// same wiring. Recreated on /resume or /model switch — the manager binds to
 	// one store and one model's window, so a swap must rebuild it.
@@ -791,6 +797,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// to the second half — it prints its own summary of the same event, and
 		// two lines for one compaction is the app talking over itself.
 		onPhase: async (phase) => {
+			// Read the plan before the pass re-roots the chain. `done` is too late:
+			// the boundary is appended before the manager announces the end, which
+			// is the same ordering that makes the task list re-save necessary.
+			if (phase.kind === "preparing") planAtPassStart = readPlanSnapshot(store);
 			// The store directly, the way `pushInfo` does: one word and one clock
 			// with no behaviour of their own, and a handle method for them would be
 			// a second name for a `set`. The clock is stamped when the pass first
@@ -836,6 +846,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// the first moment the boundary is in the file.
 			if (phase.kind === "done") {
 				saveTasks(taskStore, store);
+				// The plan goes back for the same reason and at the same moment: its
+				// snapshot was above the boundary too, and a summary that cost the
+				// session the plan it was implementing would leave the next turn with
+				// a task board and no proposal behind it. The fallback read covers a
+				// pass that never announced `preparing`; with the chain already
+				// re-rooted it finds nothing, and `writePlanSnapshot` de-duplicates
+				// the pass that did not actually re-root.
+				reanchorPlanSnapshot(store, planAtPassStart ?? readPlanSnapshot(store));
+				planAtPassStart = null;
 				persistPolicy();
 				resendCheckpointsAcrossCompaction(store);
 				// The `PostCompact` event, for anything that wants to know a pass
@@ -852,6 +871,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					reportHookErrors(handle, advisoryHookFailures("PostCompact", outcome));
 				}
 			}
+			// A failed pass appended no boundary, and the next attempt reads its own
+			// plan when it starts. Dropping this one keeps a stale snapshot from a
+			// pass that never ended from being written by anything later.
+			if (phase.kind === "failed") planAtPassStart = null;
 		},
 		readFile: readFileOrNull,
 		preCompact: async (trigger, customInstructions) => {
@@ -1200,6 +1223,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if (!live) return;
 			publishModeLabel(handle, describeModeChoice(live.permissionMode, live.sandbox));
 			persistPolicy();
+		},
+		// Where the plan and its steps outlive the turn. `record`/`read` go through
+		// `store` at the call, not a captured value: an in-app `/resume` swaps it,
+		// and a plan saved into the session just left is the orphan this batch is
+		// meant to prevent. The board is the same live store the strip and every
+		// band member already write through.
+		{
+			record: (snapshot) => writePlanSnapshot(store, snapshot),
+			read: () => readPlanSnapshot(store),
+			createTasks: (steps) => createPlanTasks(taskStore, steps),
 		},
 	);
 	const planTools = createPlanModeTools(planCallbacks);
@@ -3050,6 +3083,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
 		["/permissions", "Show the active permission mode and rules"],
+		["/plan", "Show the plan recorded in this session: its state, steps, and full text"],
 		["/ps", "List background shells and show what one has printed"],
 		["/resume", "Resume an earlier session in this directory (pick from a list)"],
 		["/rewind", "Restore a file from a checkpoint: /rewind [number]"],
@@ -3059,6 +3093,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/tasks", "Show the task tree: this session, its subagents, and its background shells"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/think", `Show or set how hard the model thinks: /think [${THINKING_LEVELS.join("|")}]`],
+		["/todo", "Show the full task board: every task, its status, owner, blockers, and description"],
 		["/tree", "Show the session branch tree"],
 		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
 	];
@@ -4053,6 +4088,50 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					pushInfo(ctx.handle, `Mode: ${chosen.label} (${chosen.mode} · sandbox ${chosen.sandbox})`);
 				})();
 			}
+			return true;
+		}
+		case "/plan": {
+			if (text.split(/\s+/).length > 1) {
+				pushInfo(ctx.handle, "Usage: /plan — prints the plan recorded in this session; it takes no arguments.");
+				return true;
+			}
+			// Read through the live store rather than a captured session: after an
+			// in-app `/resume` the plan that matters is the incoming conversation's,
+			// and the outgoing file is a different session's history.
+			const planStore = ctx.sessionStore();
+			const saved = planStore ? readPlanSnapshot(planStore) : null;
+			if (!saved) {
+				pushInfo(ctx.handle, "No plan has been recorded in this session yet.");
+				return true;
+			}
+			const steps = saved.steps?.length ?? 0;
+			const status = saved.approved ? "approved" : "proposed";
+			// The whole plan, not the attachment's bounded copy: the limit exists for
+			// what goes back into a turn, and the user asked to read this.
+			pushInfo(
+				ctx.handle,
+				`Plan (${status}, ${steps} step${steps === 1 ? "" : "s"}), saved ${saved.at}:\n${saved.plan}`,
+			);
+			return true;
+		}
+		case "/todo": {
+			// The live board, read at dispatch: `/resume` restores a different list
+			// into the same store, and a copy captured at startup would print the
+			// conversation the user left.
+			const tasks = ctx.taskSnapshot?.() ?? [];
+			if (tasks.length === 0) {
+				pushInfo(ctx.handle, "The task board is empty.");
+				return true;
+			}
+			const lines = tasks.map((task) => {
+				const details = [`#${task.id} [${task.status}] ${task.subject}`];
+				if (task.owner) details.push(`    owner: ${task.owner}`);
+				if (task.activeForm) details.push(`    activeForm: ${task.activeForm}`);
+				if (task.blockedBy.length > 0) details.push(`    blockedBy: ${task.blockedBy.join(", ")}`);
+				details.push(`    description: ${task.description}`);
+				return details.join("\n");
+			});
+			pushInfo(ctx.handle, lines.join("\n"));
 			return true;
 		}
 		case "/tree": {

@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	AgentSession,
 	buildTool,
@@ -8,10 +11,15 @@ import {
 	type PermissionMode,
 	type PermissionRule,
 	type SandboxMode,
+	SessionStore,
 } from "@labunbun/agent";
 import { FAUX_MODEL, type FauxStep, fauxProvider } from "@labunbun/ai";
+import { TaskStore } from "@labunbun/tools";
+import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { z } from "zod";
-import { createPlanModeCallbacks, createPlanModeTools } from "../src/plan-mode.ts";
+import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
+import { createPlanModeCallbacks, createPlanModeTools, createPlanTasks, type PlanLifecycle } from "../src/plan-mode.ts";
+import { MAX_INJECTED_PLAN_CHARS, type PlanSnapshot, writePlanSnapshot } from "../src/plan-snapshot.ts";
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -40,6 +48,8 @@ function harness(
 		/** The review surface. Absent = a host with only the permission dialog. */
 		review?: (plan: string, signal?: AbortSignal) => Promise<{ approved: boolean; feedback?: string } | null>;
 		rules?: PermissionRule[];
+		/** The snapshot/board bridge a host can hand the callbacks. */
+		lifecycle?: PlanLifecycle;
 	} = {},
 ) {
 	let current: AgentSession | null = null;
@@ -69,6 +79,7 @@ function harness(
 		() => {
 			modeChanges++;
 		},
+		options.lifecycle,
 	);
 	const faux = fauxProvider(options.steps ?? [{ text: "done" }]);
 	const session = new AgentSession({
@@ -529,5 +540,411 @@ describe("plan mode full lifecycle", () => {
 		expect(await h.callbacks.requestPlanApproval("new cycle")).toEqual({ approved: true });
 		expect(h.session.permissionMode).toBe("ask");
 		expect(h.session.sandbox).toBe("workspace-write");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The approval's second product: the task board
+// ---------------------------------------------------------------------------
+
+/** The text blocks a tool result carries, joined for readable assertions. */
+function textOf(result: { content: readonly unknown[] }): string {
+	return result.content
+		.map((block) =>
+			typeof block === "object" && block !== null && "text" in block ? String((block as { text: unknown }).text) : "",
+		)
+		.join("\n");
+}
+
+const roots: string[] = [];
+afterEach(() => {
+	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function freshSessionStore(): SessionStore {
+	const store = SessionStore.startNew(
+		mkdtempSync(join(tmpdir(), "lbb-plan-life-cwd-")),
+		mkdtempSync(join(tmpdir(), "lbb-plan-life-home-")),
+	);
+	roots.push(store.path);
+	return store;
+}
+
+/** A lifecycle wired the way the REPL wires it, over in-memory state a test can read. */
+function boardLifecycle(tasks: TaskStore, snapshots: PlanSnapshot[]): PlanLifecycle {
+	return {
+		record: (snapshot) => snapshots.push(snapshot),
+		read: () => snapshots.at(-1) ?? null,
+		createTasks: (steps) => createPlanTasks(tasks, steps),
+	};
+}
+
+describe("an approved plan and the task board", () => {
+	test("steps become pending tasks in order, and the approval says so", async () => {
+		const tasks = new TaskStore();
+		const snapshots: PlanSnapshot[] = [];
+		const h = harness({
+			mode: "agent",
+			lifecycle: boardLifecycle(tasks, snapshots),
+			steps: [
+				call("EnterPlanMode"),
+				call("ExitPlanMode", {
+					plan: "Two steps",
+					steps: [{ subject: "Run tests" }, { subject: "Write up", description: "a summary of what failed" }],
+				}),
+				{ text: "done" },
+			],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+
+		expect(tasks.list().map((t) => ({ subject: t.subject, description: t.description, status: t.status }))).toEqual([
+			{ subject: "Run tests", description: "Run tests", status: "pending" },
+			{ subject: "Write up", description: "a summary of what failed", status: "pending" },
+		]);
+		// Proposed before the dialog, approved after it: the file keeps both, and
+		// the approved one is what a re-entry reads.
+		expect(snapshots.map((s) => s.approved)).toEqual([false, true]);
+		expect(snapshots.at(-1)?.steps).toEqual([
+			{ subject: "Run tests" },
+			{ subject: "Write up", description: "a summary of what failed" },
+		]);
+		const text = JSON.stringify(h.session.messages.filter((m) => m.role === "toolResult").at(-1)?.content);
+		expect(text).toContain("2 tasks added to the task board");
+		expect(text).toContain("pending");
+		expect(text).toContain("archived");
+	});
+
+	test("a rejected plan creates no tasks and records no approval", async () => {
+		const tasks = new TaskStore();
+		const snapshots: PlanSnapshot[] = [];
+		const h = harness({
+			mode: "agent",
+			approval: async () => false,
+			lifecycle: boardLifecycle(tasks, snapshots),
+			steps: [
+				call("EnterPlanMode"),
+				call("ExitPlanMode", { plan: "Not yet", steps: [{ subject: "Never created" }] }),
+				{ text: "done" },
+			],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+
+		expect(tasks.list()).toEqual([]);
+		expect(snapshots.map((s) => s.approved)).toEqual([false]);
+		expect(snapshots.at(-1)?.plan).toBe("Not yet");
+		expect(JSON.stringify(h.session.messages.filter((m) => m.role === "toolResult").at(-1)?.content)).toContain(
+			"Plan rejected by the user.",
+		);
+	});
+
+	test("no steps means the approval asks for a board instead of inventing one", async () => {
+		const tasks = new TaskStore();
+		const snapshots: PlanSnapshot[] = [];
+		const h = harness({
+			mode: "agent",
+			lifecycle: boardLifecycle(tasks, snapshots),
+			steps: [call("EnterPlanMode"), call("ExitPlanMode", { plan: "A plan with no steps" }), { text: "done" }],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+
+		expect(tasks.list()).toEqual([]);
+		const text = JSON.stringify(h.session.messages.filter((m) => m.role === "toolResult").at(-1)?.content);
+		expect(text).toContain("TaskCreate");
+		expect(text).toContain("archived");
+		expect(text).not.toContain("added to the task board");
+	});
+
+	test("a host with no board approves without promising tasks", async () => {
+		const snapshots: PlanSnapshot[] = [];
+		const h = harness({
+			mode: "agent",
+			// No `createTasks`: a host (a test, an embedder) with no board behind it.
+			lifecycle: {
+				record: (snapshot) => snapshots.push(snapshot),
+				read: () => snapshots.at(-1) ?? null,
+			},
+			steps: [
+				call("EnterPlanMode"),
+				call("ExitPlanMode", { plan: "Portable plan", steps: [{ subject: "One" }] }),
+				{ text: "done" },
+			],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+
+		expect(snapshots.map((s) => s.approved)).toEqual([false, true]);
+		const text = JSON.stringify(h.session.messages.filter((m) => m.role === "toolResult").at(-1)?.content);
+		expect(text).toContain("archived");
+		// No board means no count to report, and a sentence promising tasks the
+		// session cannot see would be the one lie this result must not tell.
+		expect(text).not.toContain("task board");
+	});
+
+	test("approving the same steps twice does not double the board", async () => {
+		const tasks = new TaskStore();
+		const snapshots: PlanSnapshot[] = [];
+		const steps = [{ subject: "Run tests" }, { subject: "Write up" }];
+		const h = harness({
+			mode: "agent",
+			review: async () => ({ approved: true }),
+			lifecycle: boardLifecycle(tasks, snapshots),
+			steps: [
+				call("EnterPlanMode"),
+				call("ExitPlanMode", { plan: "same plan", steps }),
+				// A second cycle over the same plan: re-entering is how a model would
+				// retry an approval, and the board must not grow a duplicate row for it.
+				call("EnterPlanMode"),
+				call("ExitPlanMode", {
+					plan: "same plan",
+					steps: [...steps, { subject: "Run tests" }],
+				}),
+				{ text: "done" },
+			],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+
+		expect(tasks.list().map((t) => t.subject)).toEqual(["Run tests", "Write up"]);
+		const results = h.session.messages.filter((m) => m.role === "toolResult");
+		expect(JSON.stringify(results.at(-1)?.content)).toContain("No new tasks were added to the task board");
+	});
+
+	test("only unfinished tasks block a step; completed work is history", () => {
+		const tasks = new TaskStore();
+		const done = tasks.create("Run tests", "the previous pass");
+		tasks.update(done.id, { status: "completed" });
+
+		expect(createPlanTasks(tasks, [{ subject: "Run tests" }, { subject: "Run tests" }])).toBe(1);
+		expect(tasks.list().map((t) => t.subject)).toEqual(["Run tests", "Run tests"]);
+		expect(createPlanTasks(tasks, [])).toBe(0);
+		// A host with no board gets undefined rather than a fabricated count.
+		expect(createPlanTasks(undefined, [{ subject: "One" }])).toBeUndefined();
+	});
+
+	test("ExitPlanMode outside plan mode keeps today's answer and creates nothing", async () => {
+		const tasks = new TaskStore();
+		const snapshots: PlanSnapshot[] = [];
+		const h = harness({
+			mode: "agent",
+			lifecycle: boardLifecycle(tasks, snapshots),
+			steps: [call("ExitPlanMode", { plan: "Not a planning cycle", steps: [{ subject: "One" }] }), { text: "done" }],
+		});
+		expect(await h.session.prompt("go")).toBe("completed");
+
+		expect(tasks.list()).toEqual([]);
+		expect(snapshots).toEqual([]);
+		const text = JSON.stringify(h.session.messages.filter((m) => m.role === "toolResult")[0]?.content);
+		expect(text).toBe(
+			JSON.stringify([{ type: "text", text: "Plan approved. Plan mode restrictions lifted — you may now implement." }]),
+		);
+	});
+});
+
+describe("re-entering plan mode with a saved plan", () => {
+	test("the saved plan, its state, its step count, and the truncation marker are injected", async () => {
+		const saved: PlanSnapshot = {
+			plan: `${"x".repeat(MAX_INJECTED_PLAN_CHARS)}TAIL`,
+			approved: true,
+			steps: [{ subject: "One" }, { subject: "Two" }],
+			at: "2026-10-17T02:03:04.000Z",
+		};
+		const h = harness({ mode: "agent", lifecycle: { read: () => saved } });
+		const [enter] = createPlanModeTools(h.callbacks);
+
+		const text = textOf(await enter.call({}, {} as never));
+		expect(text).toContain("earlier in this session");
+		expect(text).toContain("ExitPlanMode");
+		expect(text).toContain("approved");
+		expect(text).toContain("2 steps");
+		expect(text).toContain("2026-10-17T02:03:04.000Z");
+		// Bounded: the plan is injected, not the whole of it, and the cut is named.
+		expect(text).toContain("[truncated 4 chars]");
+		expect(text).not.toContain("TAIL");
+		expect(text).toContain("x".repeat(MAX_INJECTED_PLAN_CHARS));
+	});
+
+	test("with nothing saved, the entry text is exactly what it always was", async () => {
+		const h = harness({ mode: "agent" });
+		const [enter] = createPlanModeTools(h.callbacks);
+
+		expect(textOf(await enter.call({}, {} as never))).toBe(
+			"Plan mode is active: only read-only tools are allowed. Writes, shell commands, " +
+				"and subagent tools are denied. Use AskUserQuestion for decisions only the user " +
+				"can make. When the approach is ready, call ExitPlanMode with the plan.",
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// /plan and /todo
+// ---------------------------------------------------------------------------
+
+function infoTexts(store: { get: () => UiState }): string {
+	return store
+		.get()
+		.entries.filter((entry) => entry.kind === "info")
+		.map((entry) => (entry as { text: string }).text)
+		.join("\n");
+}
+
+function commandCtx(options: { store?: SessionStore; tasks?: TaskStore } = {}) {
+	const ui = createStore<UiState>(initialUiState(false));
+	let currentStore = options.store;
+	const tasks = options.tasks;
+	// A real session with a scripted transport: neither command has any business
+	// moving its mode or sending it a prompt, and a stubbed-out session would not
+	// be able to say whether either happened.
+	const faux = fauxProvider([{ text: "n/a" }]);
+	const session = new AgentSession({
+		model: FAUX_MODEL,
+		permissionMode: "agent",
+		sandbox: "workspace-write",
+		deps: { streamFn: faux.streamFn },
+	});
+	const ctx = {
+		getSession: () => session,
+		handle: { store: ui },
+		sessionStore: () => currentStore,
+		taskSnapshot: () => tasks?.snapshot(),
+		commands: [],
+	} as unknown as AppCommandContext;
+	return {
+		ctx,
+		ui,
+		session,
+		faux,
+		text: () => infoTexts(ui),
+		reset() {
+			ui.set(() => initialUiState(false));
+		},
+		setStore(next: SessionStore | undefined) {
+			currentStore = next;
+		},
+	};
+}
+
+describe("/plan", () => {
+	test("with nothing recorded it says so", () => {
+		const h = commandCtx();
+		expect(handleAppCommand("/plan", h.ctx)).toBe(true);
+		expect(h.text()).toBe("No plan has been recorded in this session yet.");
+	});
+
+	test("a proposed plan is printed whole, however long", () => {
+		const store = freshSessionStore();
+		const longPlan = `${"p".repeat(MAX_INJECTED_PLAN_CHARS)} the tail that must survive`;
+		writePlanSnapshot(store, {
+			plan: longPlan,
+			steps: [{ subject: "One" }],
+			approved: false,
+			at: "2026-10-17T03:04:05.000Z",
+		});
+		const h = commandCtx({ store });
+
+		handleAppCommand("/plan", h.ctx);
+
+		expect(h.text()).toContain("proposed");
+		expect(h.text()).toContain("1 step");
+		expect(h.text()).toContain("2026-10-17T03:04:05.000Z");
+		// A command's output is the user's to read; the attachment limit is for
+		// what goes back into a turn, not for what they asked to see.
+		expect(h.text()).toContain(longPlan);
+		expect(h.text()).not.toContain("[truncated");
+		// Reading is the whole command: no model call, and the mode pair stays put.
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.faux.receivedContexts).toHaveLength(0);
+	});
+
+	test("an approved plan reports its state and every step", () => {
+		const store = freshSessionStore();
+		writePlanSnapshot(store, {
+			plan: "Ship it",
+			steps: [{ subject: "One" }, { subject: "Two" }, { subject: "Three" }],
+			approved: true,
+			at: "2026-10-17T04:05:06.000Z",
+		});
+		const h = commandCtx({ store });
+
+		handleAppCommand("/plan", h.ctx);
+
+		expect(h.text()).toContain("approved");
+		expect(h.text()).toContain("3 steps");
+		expect(h.text()).toContain("2026-10-17T04:05:06.000Z");
+		expect(h.text()).toContain("Ship it");
+	});
+
+	test("an argument is refused with usage and prints no plan", () => {
+		const store = freshSessionStore();
+		writePlanSnapshot(store, { plan: "Saved", approved: false, at: "2026-10-17T00:00:00.000Z" });
+		const h = commandCtx({ store });
+
+		handleAppCommand("/plan now", h.ctx);
+
+		expect(h.text()).toContain("Usage: /plan");
+		expect(h.text()).not.toContain("Saved");
+	});
+
+	test("reads the live session store, so /resume is not answered from the old one", () => {
+		const first = freshSessionStore();
+		writePlanSnapshot(first, { plan: "the first conversation", approved: false, at: "2026-10-17T00:00:00.000Z" });
+		const second = freshSessionStore();
+		writePlanSnapshot(second, { plan: "the resumed conversation", approved: true, at: "2026-10-17T00:00:01.000Z" });
+		const h = commandCtx({ store: first });
+
+		handleAppCommand("/plan", h.ctx);
+		expect(h.text()).toContain("the first conversation");
+
+		h.reset();
+		h.setStore(second);
+		handleAppCommand("/plan", h.ctx);
+		expect(h.text()).toContain("the resumed conversation");
+		expect(h.text()).toContain("approved");
+	});
+});
+
+describe("/todo", () => {
+	test("an empty board says so", () => {
+		const h = commandCtx({ tasks: new TaskStore() });
+		expect(handleAppCommand("/todo", h.ctx)).toBe(true);
+		expect(h.text()).toBe("The task board is empty.");
+	});
+
+	test("every task is printed with every field", () => {
+		const tasks = new TaskStore();
+		const first = tasks.create("Run tests", "bun test in packages/coding-agent", "Running tests", "alice");
+		const second = tasks.create("Write up", "summarize the failures", "Writing up", "bob", [first.id]);
+		tasks.create("Ship it", "tag the release");
+		tasks.update(first.id, { status: "in_progress" });
+		tasks.update(second.id, { status: "completed" });
+		const h = commandCtx({ tasks });
+
+		handleAppCommand("/todo", h.ctx);
+
+		const text = h.text();
+		expect(text).toContain("#1 [in_progress] Run tests");
+		expect(text).toContain("owner: alice");
+		expect(text).toContain("activeForm: Running tests");
+		expect(text).toContain("description: bun test in packages/coding-agent");
+		expect(text).toContain("#2 [completed] Write up");
+		expect(text).toContain("owner: bob");
+		expect(text).toContain("activeForm: Writing up");
+		expect(text).toContain("blockedBy: 1");
+		expect(text).toContain("description: summarize the failures");
+		expect(text).toContain("#3 [pending] Ship it");
+		expect(text).toContain("description: tag the release");
+		// The board is in memory, so printing it must not wake the model either.
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.faux.receivedContexts).toHaveLength(0);
+	});
+
+	test("reads the live board, so a swap or a task created later is seen", () => {
+		const tasks = new TaskStore();
+		const h = commandCtx({ tasks });
+
+		handleAppCommand("/todo", h.ctx);
+		expect(h.text()).toBe("The task board is empty.");
+
+		tasks.create("Created after the first read", "still shown");
+		h.reset();
+		handleAppCommand("/todo", h.ctx);
+		expect(h.text()).toContain("#1 [pending] Created after the first read");
 	});
 });

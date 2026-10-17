@@ -12,8 +12,10 @@ import {
 	type SandboxMode,
 } from "@labunbun/agent";
 import { type Model, textContent } from "@labunbun/ai";
+import type { TaskStore } from "@labunbun/tools";
 import { z } from "zod";
 import { sameModel } from "./model-roles.ts";
+import { formatPlanAttachment, type PlanSnapshot, type PlanStep } from "./plan-snapshot.ts";
 
 export interface PlanModeCallbacks {
 	enterPlanMode(): void;
@@ -40,6 +42,40 @@ export interface PlanModeCallbacks {
 	 * the method and have no user-driven door to report.
 	 */
 	recordPlanEntry?(previous?: { mode: PermissionMode; sandbox: SandboxMode }): void;
+	/**
+	 * Persist a plan snapshot, and read the newest one back.
+	 *
+	 * Optional together with the lifecycle argument that supplies them: a host
+	 * with no session file has nowhere to keep a plan, and the tools then behave
+	 * as they did before the bridge existed.
+	 */
+	recordPlanSnapshot?(snapshot: PlanSnapshot): void;
+	readPlanSnapshot?(): PlanSnapshot | null;
+	/**
+	 * Create the approved plan's steps on the task board, and answer the number
+	 * actually created. `undefined` means the host has no board behind it.
+	 *
+	 * The host owns de-duplication: re-approving a plan must not double the
+	 * board, and only the host can see what is already on it.
+	 */
+	createTasksFromSteps?(steps: PlanStep[]): number | undefined;
+	/** Whether the session is in plan mode at the call. */
+	isPlanMode?(): boolean;
+}
+
+/**
+ * The optional fifth argument: where a plan and its steps outlive the turn.
+ *
+ * Every member is optional so hand-built callback objects and hosts without a
+ * session file keep compiling and keep their old behaviour.
+ */
+export interface PlanLifecycle {
+	/** Persist the plan snapshot (best effort, like the task list). */
+	record?(snapshot: PlanSnapshot): void;
+	/** The newest plan this session holds, for a re-entry to inject. */
+	read?(): PlanSnapshot | null;
+	/** Create the approved steps; the count created, or undefined with no board. */
+	createTasks?(steps: PlanStep[]): number | undefined;
 }
 
 export interface PlanApprovalUi {
@@ -108,6 +144,13 @@ export function createPlanModeCallbacks(
 	 * caller keeps compiling and a host without a badge pays nothing.
 	 */
 	onModeChanged?: () => void,
+	/**
+	 * Where the plan and its steps go after the dialog: the session snapshot the
+	 * next turn can read, and the task board the approval fills. Optional as a
+	 * whole; each member is optional too, so a host can keep a plan without a
+	 * board or a board without a plan file.
+	 */
+	lifecycle?: PlanLifecycle,
 ): PlanModeCallbacks {
 	const previousModes = new WeakMap<AgentSession, { mode: PermissionMode; sandbox: SandboxMode; model: Model }>();
 	/**
@@ -135,6 +178,12 @@ export function createPlanModeCallbacks(
 		previousModes.set(session, { ...pair, model: session.model });
 	};
 	return {
+		recordPlanSnapshot: (snapshot) => lifecycle?.record?.(snapshot),
+		readPlanSnapshot: () => lifecycle?.read?.() ?? null,
+		createTasksFromSteps: (steps) => lifecycle?.createTasks?.(steps),
+		// Read from the live session, not captured: a `/resume` swaps it, and the
+		// question is about the session the tool call is running in.
+		isPlanMode: () => getSession()?.permissionMode === "plan",
 		enterPlanMode: () => {
 			const session = getSession();
 			if (!session) return;
@@ -236,6 +285,62 @@ export function createPlanModeCallbacks(
 	};
 }
 
+/**
+ * Add an approved plan's steps to the task board.
+ *
+ * Steps are created in order and start `pending`, which is what the approval
+ * result tells the model. A step whose subject already names an unfinished task
+ * is skipped: re-approving the same plan (a retry, a repeated `ExitPlanMode`)
+ * must not double the board, and a completed task with that subject is history
+ * rather than an obstacle. The number returned is what was actually created —
+ * `0` when the board already held every step, `undefined` when the host has no
+ * board at all. The approval result promises only what this number says.
+ */
+export function createPlanTasks(taskStore: TaskStore | undefined, steps: PlanStep[]): number | undefined {
+	if (!taskStore) return undefined;
+	const known = new Set(
+		taskStore
+			.list()
+			.filter((task) => task.status !== "completed")
+			.map((task) => task.subject),
+	);
+	let created = 0;
+	for (const step of steps) {
+		if (step.subject.trim().length === 0 || known.has(step.subject)) continue;
+		taskStore.create(step.subject, step.description ?? step.subject);
+		// Within one approval too: a plan that names the same step twice gets one
+		// task, because the second would be the duplicate the next approval skips.
+		known.add(step.subject);
+		created += 1;
+	}
+	return created;
+}
+
+/**
+ * What an approved plan tells the model.
+ *
+ * The archive sentence is unconditional — the snapshot was recorded before
+ * this result, so the plan is readable again either way. What follows it is
+ * only what actually happened to the board: the number the host created, the
+ * honest "nothing new" of a deduplicated approval, or a request to build the
+ * board with `TaskCreate` when the plan named no steps. A host with no board
+ * gets no task sentence at all; the tool must not promise what it cannot see.
+ */
+function planApprovedText(created: number | undefined, stepCount: number): string {
+	const archived =
+		"Plan approved. Plan mode restrictions lifted — you may now implement. The plan has been archived in this session.";
+	if (stepCount === 0) {
+		return `${archived} No steps were attached to the plan; create the task board with TaskCreate before you start implementing.`;
+	}
+	if (created !== undefined && created > 0) {
+		return `${archived} ${created} task${created === 1 ? "" : "s"} added to the task board and pending.`;
+	}
+	if (created === 0) {
+		return `${archived} No new tasks were added to the task board.`;
+	}
+	return archived;
+}
+
 export function createPlanModeTools(callbacks: PlanModeCallbacks): AnyTool[] {
 	const enter = buildTool({
 		name: "EnterPlanMode",
@@ -248,12 +353,21 @@ export function createPlanModeTools(callbacks: PlanModeCallbacks): AnyTool[] {
 		isConcurrencySafe: () => true,
 		call: async () => {
 			callbacks.enterPlanMode();
+			const activation =
+				"Plan mode is active: only read-only tools are allowed. Writes, shell commands, " +
+				"and subagent tools are denied. Use AskUserQuestion for decisions only the user " +
+				"can make. When the approach is ready, call ExitPlanMode with the plan.";
+			const saved = callbacks.readPlanSnapshot?.();
+			if (!saved) return { content: [textContent(activation)] };
+			// The plan is model output read back from a file, so it is attached as
+			// data under a sentence that says what to do with it — not as an
+			// instruction to reinstate it. A plan approved last cycle is still the
+			// user's plan, and a plan left proposed is not a decision.
 			return {
 				content: [
 					textContent(
-						"Plan mode is active: only read-only tools are allowed. Writes, shell commands, " +
-							"and subagent tools are denied. Use AskUserQuestion for decisions only the user " +
-							"can make. When the approach is ready, call ExitPlanMode with the plan.",
+						`${activation}\n\nA plan from earlier in this session is available below. Read it, revise it as ` +
+							`needed, and call ExitPlanMode with the complete plan to replace it.\n\n${formatPlanAttachment(saved)}`,
 					),
 				],
 			};
@@ -267,15 +381,52 @@ export function createPlanModeTools(callbacks: PlanModeCallbacks): AnyTool[] {
 			"or provides feedback. Only call after researching in plan mode.",
 		inputSchema: z.object({
 			plan: z.string().describe("The complete implementation plan for review"),
+			steps: z
+				.array(
+					z.object({
+						subject: z.string().min(1).describe("Brief imperative title, e.g. 'Run tests'"),
+						description: z.string().optional().describe("What needs to be done, with enough context to act on"),
+					}),
+				)
+				.optional()
+				.describe("Ordered steps to create as pending tasks when the plan is approved"),
 		}),
 		isReadOnly: () => true,
 		isConcurrencySafe: () => false,
 		call: async (input, toolCtx) => {
+			// Read at the call, before the dialog: approval itself restores the
+			// pre-plan pair, so a check made after it would always say "not plan
+			// mode" and the bridge would never fire on the one path that needs it.
+			const inPlanMode = callbacks.isPlanMode?.() ?? true;
+			if (inPlanMode) {
+				callbacks.recordPlanSnapshot?.({
+					plan: input.plan,
+					steps: input.steps,
+					approved: false,
+					at: new Date().toISOString(),
+				});
+			}
 			const decision = await callbacks.requestPlanApproval(input.plan, toolCtx.signal);
 			if (decision.approved) {
+				// An `ExitPlanMode` called outside plan mode is an abnormal path: the
+				// approval still answers (and restores the pair, as it always has), but
+				// there was no proposal to archive and there are no steps to add.
+				if (!inPlanMode) {
+					return {
+						content: [textContent("Plan approved. Plan mode restrictions lifted — you may now implement.")],
+						details: { approved: true },
+					};
+				}
+				callbacks.recordPlanSnapshot?.({
+					plan: input.plan,
+					steps: input.steps,
+					approved: true,
+					at: new Date().toISOString(),
+				});
+				const created = callbacks.createTasksFromSteps?.(input.steps ?? []);
 				return {
-					content: [textContent("Plan approved. Plan mode restrictions lifted — you may now implement.")],
-					details: { approved: true },
+					content: [textContent(planApprovedText(created, input.steps?.length ?? 0))],
+					details: created === undefined ? { approved: true } : { approved: true, tasksCreated: created },
 				};
 			}
 			return {
