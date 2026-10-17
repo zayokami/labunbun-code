@@ -22,6 +22,7 @@ import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { expandPromptCommand, findCommand } from "../src/commands.ts";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
 import { withheldProjectMemoryFiles } from "../src/memory.ts";
+import { loadOutputStyles, withheldProjectOutputStyles } from "../src/output-styles.ts";
 import { loadTrustedDefinitionKinds } from "../src/project-trust.ts";
 import { loadSkills, skillsAsCommands, withheldProjectSkills } from "../src/skills.ts";
 import { loadAgentDefinitions, withheldProjectAgents } from "../src/subagents.ts";
@@ -67,6 +68,7 @@ function harness(): {
 		agentDefinitions,
 		withheldAgents: withheldProjectAgents(cwd, home),
 		withheldSkills: withheldProjectSkills(cwd, home),
+		withheldStyles: withheldProjectOutputStyles(cwd, home),
 		baseRules: [],
 		sessionRules: [],
 		sessionStore: () => undefined,
@@ -97,11 +99,13 @@ describe("/agents", () => {
 		plant(join(h.cwd, ".labunbun", "agents", "deployer.md"), "---\ndescription: Deploys the app\n---\nProject body.\n");
 		plant(join(h.cwd, ".labunbun", "skills", "deploy", "SKILL.md"), "---\nname: deploy\n---\nDeploy body.\n");
 		plant(join(h.cwd, "LABUNBUN.md"), "# House rules\n");
+		plant(join(h.cwd, ".labunbun", "output-styles", "brief.md"), "PROJECT-BRIEF");
 		// Re-read through the readers a mounted app would have used at startup.
 		h.ctx.agentDefinitions = loadAgentDefinitions(h.cwd, h.home);
 		h.ctx.withheldAgents = withheldProjectAgents(h.cwd, h.home);
 		h.ctx.withheldSkills = withheldProjectSkills(h.cwd, h.home);
 		h.ctx.withheldMemory = withheldProjectMemoryFiles(h.cwd, h.home);
+		h.ctx.withheldStyles = withheldProjectOutputStyles(h.cwd, h.home);
 
 		expect(handleAppCommand("/agents", h.ctx)).toBe(true);
 
@@ -116,6 +120,10 @@ describe("/agents", () => {
 		// the decision — and with the restart, which the other two do not need.
 		// The planted LABUNBUN.md is the nearest file, so it closes the list.
 		expect(text).toContain(`LABUNBUN.md — /agents approve, then restart`);
+		// The fourth kind, named by path: a style is invisible until approved, and
+		// this listing is where the user sees what the decision would load.
+		expect(text).toContain("1 project output style not loaded: ");
+		expect(text).toContain("brief.md — /agents approve, then restart");
 	});
 
 	test("approve loads both tiers, and they answer from the next line typed", () => {
@@ -162,6 +170,30 @@ describe("/agents", () => {
 		expect(h.lines()).toContain(`${withheld} memory file${withheld === 1 ? "" : "s"}; memory loads on the next start`);
 		// Nothing is left pending for a second approve: the decision is recorded,
 		// and the restart is not something a second approval can buy.
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+		expect(h.lines()).toContain("Nothing pending");
+	});
+
+	test("approve records styles, the one kind nothing else can open", () => {
+		const h = harness();
+		plant(join(h.cwd, ".labunbun", "output-styles", "brief.md"), "PROJECT-BRIEF");
+		h.ctx.withheldStyles = withheldProjectOutputStyles(h.cwd, h.home);
+		expect(h.ctx.withheldStyles).toHaveLength(1);
+
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+
+		// `styles` is its own kind in the ledger. Before this path recorded it,
+		// `loadOutputStyles` asked the gate for a decision no command could make,
+		// so a repository's style was unreachable for the life of the checkout.
+		expect(loadTrustedDefinitionKinds(h.cwd, h.home)).toEqual(new Set(["styles"]));
+		expect(h.ctx.withheldStyles).toEqual([]);
+		expect(loadOutputStyles(h.cwd, h.home).map((style) => style.name)).toEqual(["brief"]);
+		// The prompt was built at startup, so the style is not live in this
+		// session; the line says restart rather than claiming a load the next
+		// message would refute.
+		expect(h.lines()).toContain("1 output style; output styles load on the next start");
+
+		// And a second approval has nothing left to grant.
 		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
 		expect(h.lines()).toContain("Nothing pending");
 	});

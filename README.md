@@ -332,7 +332,7 @@ The `Theme` interface has the full token list. The interface is in `packages/tui
 
 An output style is a Markdown file that changes the voice of the session. Put your styles in `~/.labunbun/output-styles/`. Put the styles of one project in `<project>/.labunbun/output-styles/`. The file name without `.md` is the name of the style.
 
-The tool loads the user styles always. It loads the project styles only when this project is trusted. When a user style and a project style have the same name, the project style wins.
+The tool loads the user styles always. It loads the project styles only after `/agents approve`. The command asks for a restart, because the prompt was built at startup. When a user style and a project style have the same name, the project style wins.
 
 Set `outputStyle` in the settings file to the name of a style. The tool adds the body of the file to the system prompt as the `# Output style` section. The section is an addition. It does not replace the instructions of the agent.
 
@@ -687,7 +687,7 @@ The tool does not add an ignore rule for `settings.local.json`.
 
 ### Approval of project definitions
 
-The tool does not load the agents or the skills of a project at first. Use `/agents approve` to load them. The tool remembers this decision in `~/.labunbun/projects/<dir>/`. The tool does not remember it in the repository.
+The tool does not load the agent definitions, the skills, the memory files, or the output styles of a project at first. Use `/agents approve` to load them. The tool remembers this decision in `~/.labunbun/projects/<dir>/`. The tool does not remember it in the repository.
 
 A headless run has no dialog. The tool does not load the definitions of an unapproved project. The tool writes a note to stderr.
 

@@ -243,7 +243,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
-import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
+import { loadOutputStyles, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
 import { createPlanModeCallbacks, createPlanModeTools, createPlanTasks, type PlanModeCallbacks } from "./plan-mode.ts";
 import { type PlanSnapshot, readPlanSnapshot, reanchorPlanSnapshot, writePlanSnapshot } from "./plan-snapshot.ts";
 import {
@@ -1244,6 +1244,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// The memory walk was already skipped by the gate above; this re-reads it
 	// un-gated only to name the withheld files (never their contents).
 	const withheldMemory = withheldProjectMemoryFiles(cwd, home);
+	// Style files, listed the same way. The gate is `styles`, a kind of its own,
+	// so `/agents approve` has to record it or a repository's styles can never
+	// load — the loader would keep asking for a decision nothing can make.
+	const withheldStyles = withheldProjectOutputStyles(cwd, home);
 	const planCallbacks: PlanModeCallbacks = createPlanModeCallbacks(
 		() => sessionRef,
 		// The approval dialog is built here rather than handed the handle whole so
@@ -2164,6 +2168,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				withheldAgents,
 				withheldSkills,
 				withheldMemory,
+				withheldStyles,
 				memoryFiles: memory.files,
 				subagents: subagentRegistry,
 				subagentControl,
@@ -2239,11 +2244,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// skill simply stops answering and nothing on screen says there was one. MCP has
 	// no equivalent line — a pending server is only visible under `/status` — which
 	// is a habit this starts rather than one it copies.
-	if (withheldAgents.length + withheldSkills.length + withheldMemory.length > 0) {
+	if (withheldAgents.length + withheldSkills.length + withheldMemory.length + withheldStyles.length > 0) {
 		pushInfo(
 			handle,
 			withheldDefinitionNotice(
-				{ agents: withheldAgents.length, skills: withheldSkills.length, memory: withheldMemory.length },
+				{
+					agents: withheldAgents.length,
+					skills: withheldSkills.length,
+					memory: withheldMemory.length,
+					styles: withheldStyles.length,
+				},
 				"repl",
 				enclosingRepositoryRoot(cwd),
 			),
@@ -2944,6 +2954,15 @@ interface AppCommandContext {
 	 */
 	withheldMemory?: string[];
 	/**
+	 * The project output-style files the gate is holding back
+	 * (`withheldProjectOutputStyles`), by the same rule as `withheldMemory`.
+	 *
+	 * Separate from memory because the trust ledger records the kinds
+	 * separately: an approval that skipped this list would leave the styles
+	 * permanently unreachable, since the loader asks the ledger for `styles`.
+	 */
+	withheldStyles?: string[];
+	/**
 	 * The memory files this session actually loaded (`loadMemoryFiles().files`),
 	 * for `/memory`'s no-editor answer, which lists what is in the prompt.
 	 *
@@ -3318,6 +3337,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// nothing withheld, the same way the other optional seams do.
 				const pendingMemory = ctx.withheldMemory ?? [];
 				if (pendingMemory.length > 0) kinds.push("memory");
+				// The style files sit behind the same decision. Without this the
+				// ledger would never gain `styles`, and `loadOutputStyles` would hold
+				// a project's styles back for the life of the checkout.
+				const pendingStyles = ctx.withheldStyles ?? [];
+				if (pendingStyles.length > 0) kinds.push("styles");
 				if (kinds.length === 0) {
 					pushInfo(ctx.handle, "Nothing pending: this project's definitions are already loaded.");
 					return true;
@@ -3332,21 +3356,35 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// rebuilding the mounted screen for a once-per-repository decision.
 				const adopted = ctx.withheldSkills.splice(0, ctx.withheldSkills.length);
 				ctx.commands.push(...skillsAsCommands(adopted));
-				// Memory is spliced like the others so a second approve has nothing
-				// pending, but it cannot join them in being "now loaded": it is read
-				// once at startup into the system prompt, and this session's prompt was
-				// built long ago. The confirmation says restart, because a "loaded" that
-				// the next message could contradict is the one lie this command must
-				// not tell. The tail is appended rather than the sentence rewritten so
-				// the no-memory byte-for-byte wording (and its test) stays put.
+				// Memory and styles are spliced like the others so a second approve
+				// has nothing pending, but they cannot join them in being "now
+				// loaded": both are read into the system prompt, and this session's
+				// prompt was built long ago. The confirmation says restart, because a
+				// "loaded" that the next message could contradict is the one lie this
+				// command must not tell. The tail is appended rather than the sentence
+				// rewritten so the no-memory byte-for-byte wording (and its test)
+				// stays put.
 				const memoryFiles = pendingMemory.splice(0, pendingMemory.length);
+				const styleFiles = pendingStyles.splice(0, pendingStyles.length);
+				const restarts: string[] = [];
+				if (memoryFiles.length > 0) restarts.push("memory loads on the next start, since it is read at startup");
+				if (styleFiles.length > 0) {
+					restarts.push("output styles load on the next start, since they are read at startup");
+				}
+				const tail =
+					restarts.length === 0
+						? " now loaded"
+						: restarts.length === 1
+							? `; ${restarts[0]}`
+							: "; memory and output styles load on the next start, since they are read at startup";
 				pushInfo(
 					ctx.handle,
 					`Approved this project's definitions — ${describeWithheld({
 						agents: agents.length,
 						skills: adopted.length,
 						memory: memoryFiles.length,
-					})}${memoryFiles.length > 0 ? "; memory loads on the next start, since it is read at startup" : " now loaded"}.`,
+						styles: styleFiles.length,
+					})}${tail}.`,
 				);
 				return true;
 			}
@@ -3374,6 +3412,16 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const names = withheldMemory.map((file) => shortenHome(file, ctx.home)).join(", ");
 				lines.push(
 					`  ${withheldMemory.length} project memory file${withheldMemory.length === 1 ? "" : "s"} not loaded: ${names} — /agents approve, then restart`,
+				);
+			}
+			// Output styles are the fourth kind, and they are named for the same
+			// reason: a repository's style is invisible until it is approved, and
+			// this listing is where the user sees what the decision would load.
+			const withheldStyles = ctx.withheldStyles ?? [];
+			if (withheldStyles.length > 0) {
+				const names = withheldStyles.map((file) => shortenHome(file, ctx.home)).join(", ");
+				lines.push(
+					`  ${withheldStyles.length} project output style${withheldStyles.length === 1 ? "" : "s"} not loaded: ${names} — /agents approve, then restart`,
 				);
 			}
 			pushInfo(ctx.handle, `Agent definitions:\n${lines.join("\n")}`);

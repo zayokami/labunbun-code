@@ -18,7 +18,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadOutputStyles, resolveOutputStyle } from "../src/output-styles.ts";
+import { loadOutputStyles, resolveOutputStyle, withheldProjectOutputStyles } from "../src/output-styles.ts";
 import { approveProjectDefinitions } from "../src/project-trust.ts";
 
 const roots: string[] = [];
@@ -105,6 +105,38 @@ describe("loadOutputStyles", () => {
 		const home = tempDir("lbb-styles6-home-");
 		const cwd = tempDir("lbb-styles6-cwd-");
 		expect(loadOutputStyles(cwd, home)).toEqual([]);
+	});
+});
+
+describe("withheldProjectOutputStyles", () => {
+	test("names the project styles the gate is holding back, without reading them", () => {
+		const home = tempDir("lbb-styles7-home-");
+		const cwd = tempDir("lbb-styles7-cwd-");
+		const dir = join(cwd, ".labunbun", "output-styles");
+		plantStyle(dir, "loud", "PROJECT-LOUD");
+		plantStyle(dir, "brief", "PROJECT-BRIEF");
+		writeFileSync(join(dir, "notes.txt"), "not a style", "utf8");
+
+		expect(withheldProjectOutputStyles(cwd, home)).toEqual([join(dir, "brief.md"), join(dir, "loud.md")]);
+
+		approveProjectDefinitions(cwd, ["styles"], home);
+		expect(withheldProjectOutputStyles(cwd, home)).toEqual([]);
+	});
+
+	test("another kind's approval does not clear the list", () => {
+		const home = tempDir("lbb-styles8-home-");
+		const cwd = tempDir("lbb-styles8-cwd-");
+		plantStyle(join(cwd, ".labunbun", "output-styles"), "loud", "PROJECT-LOUD");
+
+		approveProjectDefinitions(cwd, ["memory"], home);
+
+		expect(withheldProjectOutputStyles(cwd, home)).toHaveLength(1);
+	});
+
+	test("no project directory is no withheld styles", () => {
+		const home = tempDir("lbb-styles9-home-");
+		const cwd = tempDir("lbb-styles9-cwd-");
+		expect(withheldProjectOutputStyles(cwd, home)).toEqual([]);
 	});
 });
 

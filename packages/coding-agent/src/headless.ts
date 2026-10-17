@@ -73,7 +73,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
-import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
+import { loadOutputStyles, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
 import { enclosingRepositoryRoot, withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	damagedSessionNotice,
@@ -535,10 +535,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const withheldAgents = withheldProjectAgents(cwd, home);
 	const withheldSkills = withheldProjectSkills(cwd, home);
 	const withheldMemory = withheldProjectMemoryFiles(cwd, home);
-	if (withheldAgents.length + withheldSkills.length + withheldMemory.length > 0) {
+	const withheldStyles = withheldProjectOutputStyles(cwd, home);
+	if (withheldAgents.length + withheldSkills.length + withheldMemory.length + withheldStyles.length > 0) {
 		console.error(
 			withheldDefinitionNotice(
-				{ agents: withheldAgents.length, skills: withheldSkills.length, memory: withheldMemory.length },
+				{
+					agents: withheldAgents.length,
+					skills: withheldSkills.length,
+					memory: withheldMemory.length,
+					styles: withheldStyles.length,
+				},
 				"headless",
 				enclosingRepositoryRoot(cwd),
 			),

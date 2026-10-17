@@ -82,3 +82,28 @@ export function resolveOutputStyle(name: string | undefined, styles: OutputStyle
 	if (!name) return undefined;
 	return styles.find((style) => style.name === name);
 }
+
+/**
+ * The project-tier style files the trust gate is holding back, for the startup
+ * notice and `/agents` to name.
+ *
+ * The files are listed, never read. A style that has not been trusted is a path
+ * the user can open before deciding; reading it here would defeat the gate this
+ * function exists to report. The same readdir the loader uses decides what
+ * counts as a style, so a name the listing shows is a name the approval would
+ * actually load.
+ */
+export function withheldProjectOutputStyles(cwd: string, home: string = homedir()): string[] {
+	const dir = join(cwd, ".labunbun", "output-styles");
+	if (isProjectTierTrusted(cwd, "styles", home)) return [];
+	try {
+		if (!existsSync(dir)) return [];
+		return readdirSync(dir, { withFileTypes: true })
+			.filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map((entry) => join(dir, entry.name));
+	} catch {
+		// An unreadable directory holds no styles, the same answer the loader gives.
+		return [];
+	}
+}

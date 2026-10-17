@@ -75,16 +75,20 @@ export function loadTrustedDefinitionKinds(cwd: string, home: string = homedir()
  * after an approval, and a `-p` run's stderr) and the pluralisation is the part
  * that drifts quietly between them.
  *
- * The memory count is a real tier now but prints only when non-zero: the
- * agents/skills zeros are pinned (`project-trust.test.ts`), while a session
- * with no memory files in front of it should not read a clause about memory at
- * all — and its confirmation says "restart", which an absent tier has no
- * business doing.
+ * The memory and output-style counts are real tiers now but print only when
+ * non-zero: the agents/skills zeros are pinned (`project-trust.test.ts`), while
+ * a session with no memory files or styles in front of it should not read a
+ * clause about them at all — and their confirmation says "restart", which an
+ * absent tier has no business doing.
  */
-export function describeWithheld(kinds: { agents: number; skills: number; memory?: number }): string {
+export function describeWithheld(kinds: { agents: number; skills: number; memory?: number; styles?: number }): string {
 	const counts = `${kinds.agents} agent definition${kinds.agents === 1 ? "" : "s"}, ${kinds.skills} skill${kinds.skills === 1 ? "" : "s"}`;
-	if (kinds.memory === undefined || kinds.memory === 0) return counts;
-	return `${counts}, ${kinds.memory} memory file${kinds.memory === 1 ? "" : "s"}`;
+	const memory = kinds.memory;
+	const styles = kinds.styles;
+	const parts = [counts];
+	if (memory !== undefined && memory !== 0) parts.push(`${memory} memory file${memory === 1 ? "" : "s"}`);
+	if (styles !== undefined && styles !== 0) parts.push(`${styles} output style${styles === 1 ? "" : "s"}`);
+	return parts.join(", ");
 }
 
 /**
@@ -102,7 +106,7 @@ export function describeWithheld(kinds: { agents: number; skills: number; memory
  * directory, and when it is set the notice gains the scope sentence below.
  */
 export function withheldDefinitionNotice(
-	kinds: { agents: number; skills: number; memory?: number },
+	kinds: { agents: number; skills: number; memory?: number; styles?: number },
 	audience: "repl" | "headless",
 	subdirectoryOfGitRoot?: string,
 ): string {

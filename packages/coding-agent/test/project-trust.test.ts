@@ -72,6 +72,12 @@ describe("how the withheld counts are phrased", () => {
 		// `-p` run's stderr), which is why it is phrased once.
 		expect(describeWithheld({ agents: 1, skills: 1 })).toBe("1 agent definition, 1 skill");
 		expect(describeWithheld({ agents: 2, skills: 0 })).toBe("2 agent definitions, 0 skills");
+		// The later tiers print only when present, so the old strings survive a
+		// session that has neither.
+		expect(describeWithheld({ agents: 0, skills: 0, memory: 0, styles: 0 })).toBe("0 agent definitions, 0 skills");
+		expect(describeWithheld({ agents: 0, skills: 0, memory: 2, styles: 1 })).toBe(
+			"0 agent definitions, 0 skills, 2 memory files, 1 output style",
+		);
 	});
 });
 
