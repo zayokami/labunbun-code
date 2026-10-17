@@ -45,12 +45,19 @@ import {
 	detectRuntime,
 	detectShell,
 	type Operations,
+	TaskStore,
 } from "@labunbun/tools";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createToolLedger, formatResumeSummary, readToolCheckpoints } from "./checkpoint-log.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
-import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
+import {
+	type CompactionTuning,
+	compactionPhaseText,
+	compactionWarnings,
+	createCompactionWiring,
+	resolveCompactionSummarizer,
+} from "./compaction-wiring.ts";
 import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
@@ -97,6 +104,7 @@ import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts
 import { SubagentRegistry } from "./subagent-registry.ts";
 import { createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { bindTaskStore, saveTasks } from "./task-snapshot.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";
@@ -296,10 +304,17 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const runtime = detectRuntime(process.platform, shell);
 	const ops: Operations = defaultOperations(new ChildProcessExecOperations(runtime, shell));
 	const backgroundShells = new BackgroundShellManager(runtime, ops);
+	// The board a `-p` run keeps while it works. It is bound to the session below,
+	// once the resume/new choice has named one, so a run that resumed a session
+	// starts from the plan that session holds. `--no-session` binds it to nothing:
+	// the tools still exist and the list lives for the length of the run, which is
+	// the same in-memory-only answer the rest of that mode gives.
+	const taskStore = new TaskStore();
 	// Spilling applies here too: a `-p` run reads a repository like any other
 	// session, and a build log that does not fit is no more reproducible for
 	// being unattended.
 	const tools = createAllTools(cwd, {
+		taskStore,
 		operations: ops,
 		backgroundShells,
 		readOnlyRoots: [toolOutputRoot(cwd)],
@@ -358,6 +373,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	} else {
 		store = SessionStore.startNew(cwd, home);
 	}
+
+	// The list survives the process by living in the session file, the same way
+	// the REPL's does: this restores what a resumed session held, and records
+	// every change after that. The getter, not the value, for the same reason the
+	// REPL reads its own through one — a host that later swaps the store (`/resume`
+	// does not exist here, but the shape is shared) would otherwise keep saving
+	// into the file it started with. With `--no-session` the getter answers
+	// undefined and both the restore and the saves are no-ops.
+	bindTaskStore(taskStore, () => store);
 
 	// The recovery notices, at the same moment the REPL prints them and in its
 	// order. A fresh session reads empty ledgers and prints nothing, so neither
@@ -640,6 +664,19 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		report: (text) => console.error(text),
 		readFile: readFileOrNull,
 		noteRewrite: (cause) => transport.tracker?.note(cause),
+		// The pass re-roots the chain above the task snapshot, so the end of it is
+		// the first moment the list can be put back where a restart reads it — the
+		// same save the REPL makes at the same point. The reporting here is the
+		// wiring's own default, reproduced because passing `onPhase` replaces it:
+		// a `-p` run's surface is stderr, and it must say exactly what it said
+		// before the board existed.
+		onPhase: (phase) => {
+			const text = compactionPhaseText(phase);
+			if (text) console.error(text);
+			if (phase.kind !== "done") return;
+			for (const warning of compactionWarnings(phase.verification)) console.error(warning);
+			saveTasks(taskStore, store);
+		},
 	});
 
 	// The tool ledger, through the same writer the REPL runs: one entry per

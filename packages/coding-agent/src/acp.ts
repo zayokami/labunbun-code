@@ -77,12 +77,19 @@ import {
 	detectRuntime,
 	detectShell,
 	type Operations,
+	TaskStore,
 } from "@labunbun/tools";
 import { permissionOptions, ruleSpecifierFor } from "@labunbun/tui";
 import * as acp from "@zed-industries/agent-client-protocol";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
-import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
+import {
+	type CompactionTuning,
+	compactionPhaseText,
+	compactionWarnings,
+	createCompactionWiring,
+	resolveCompactionSummarizer,
+} from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
@@ -114,6 +121,7 @@ import { loadSkillsWithNotes, skillDiscoveryBlock, skillDiscoveryBudgetChars } f
 import { createSpawnConfiner } from "./spawn-confinement.ts";
 import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { bindTaskStore, saveTasks } from "./task-snapshot.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
 
 /** One `session/update` payload — the union the protocol declares for `update`. */
@@ -958,7 +966,14 @@ class AcpAgent implements acp.Agent {
 		const runtime = detectRuntime(process.platform, shell);
 		const ops: Operations = defaultOperations(new ChildProcessExecOperations(runtime, shell));
 		const backgroundShells = new BackgroundShellManager(runtime, ops);
+		// The board this live session keeps. It is per session, like the store it is
+		// bound to below: a connection can hold several sessions, and a list one of
+		// them holds is not another's. The tools are built from it here, before the
+		// store exists, because the store is the resume/new choice made a few lines
+		// down and the binding only needs the instance.
+		const taskStore = new TaskStore();
 		const tools = createAllTools(cwd, {
+			taskStore,
 			operations: ops,
 			backgroundShells,
 			readOnlyRoots: [toolOutputRoot(cwd)],
@@ -979,6 +994,12 @@ class AcpAgent implements acp.Agent {
 		const store = resumed?.store ?? SessionStore.startNew(cwd, home);
 		const sessionId = store.sessionId;
 		if (!sessionId) throw acp.RequestError.internalError({ message: "the session store produced no id" });
+		// Restore the list a loaded session holds and record every change after
+		// that, the pair the REPL and a `-p` run make. A session/load of a store
+		// with snapshots therefore comes up with the board the last run left, and
+		// every live session saves into its own file because the store here is
+		// this session's.
+		bindTaskStore(taskStore, () => store);
 		pruneToolOutput(cwd);
 		const rules = collectPermissionRules(loadedSettings);
 
@@ -1099,6 +1120,18 @@ class AcpAgent implements acp.Agent {
 				}
 			},
 			noteRewrite: (cause) => transport.tracker?.note(cause),
+			// The end of a pass is the first moment the chain below the boundary can
+			// hold the list again, and the save is the same one the REPL makes at the
+			// same point. The reporting is the wiring's default, reproduced because
+			// passing `onPhase` replaces it: an editor session's surface is stderr,
+			// and it must keep saying exactly what it said before the board existed.
+			onPhase: (phase) => {
+				const text = compactionPhaseText(phase);
+				if (text) process.stderr.write(`${text}\n`);
+				if (phase.kind !== "done") return;
+				for (const warning of compactionWarnings(phase.verification)) process.stderr.write(`${warning}\n`);
+				saveTasks(taskStore, store);
+			},
 		});
 
 		const permissions: PermissionState = {

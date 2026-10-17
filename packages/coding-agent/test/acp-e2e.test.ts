@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
 import { assistantMessage, toolResultMessage, userMessage } from "@labunbun/ai";
+import { TASK_BOARD_TOOL_NAMES } from "@labunbun/tools";
 import { type StubStep, startCacheStub } from "../../ai/test/cache-stub-server.ts";
 import { shortSessionId } from "../src/session-resume.ts";
 
@@ -679,5 +680,80 @@ describe("the ACP server, end to end", () => {
 		for (const frame of client.frames) {
 			expect(frame.jsonrpc).toBe("2.0");
 		}
+	}, 60_000);
+
+	test("a live session carries the board tools, and a TaskCreate is visible to TaskList in it", async () => {
+		const f = fixture([
+			{
+				tool: {
+					name: "TaskCreate",
+					input: { subject: "Ship the ACP board", description: "wire the live session's store" },
+				},
+			},
+			{ tool: { name: "TaskList", input: {} } },
+			{ text: "board ready" },
+		]);
+		let sessionId = "";
+		await withAcp(f, ["acp"], async (client) => {
+			sessionId = await openSession(client, f.dir);
+			const response = await client.promptResult(await client.startPrompt(sessionId, "set up the board"));
+			expect(response.error).toBeUndefined();
+			expect(response.result?.stopReason).toBe("end_turn");
+
+			// The tools as they went over the wire, not merely as this file intends:
+			// the four names are in the request the stub actually received.
+			const body = f.stub.requests[0]?.body as { tools?: Array<{ function?: { name?: string } }> } | undefined;
+			const advertised = (body?.tools ?? []).map((tool) => tool.function?.name);
+			for (const name of TASK_BOARD_TOOL_NAMES) expect(advertised).toContain(name);
+
+			// TaskList's answer carried the task TaskCreate made a moment earlier in
+			// this session — one shared store, through the host's tool list.
+			const answers = client
+				.updates()
+				.filter((update) => update.sessionUpdate === "tool_call_update")
+				.map((update) => JSON.stringify(update.content ?? ""));
+			expect(answers.some((text) => text.includes("Ship the ACP board"))).toBe(true);
+		});
+
+		// The board reached this session's own file, as the same `custom` entry kind
+		// the REPL and a `-p` run write — what a later session/load resumes from.
+		const path = SessionStore.listSessions(f.dir, f.home).find((session) => session.sessionId === sessionId)?.path;
+		if (!path) throw new Error(`no session file for ${sessionId}`);
+		const snapshot = fileEntries(path).find((entry) => entry.type === "custom" && entry.kind === "tasks");
+		expect((snapshot?.data as Array<{ subject?: string }> | undefined)?.[0]?.subject).toBe("Ship the ACP board");
+	}, 60_000);
+
+	test("session/load restores the loaded session's board into its tools", async () => {
+		const f = fixture([{ tool: { name: "TaskList", input: {} } }, { text: "listed" }]);
+		const store = SessionStore.startNew(f.dir, f.home);
+		store.appendMessage(userMessage("what was I doing"));
+		// The snapshot a previous run would have left: the same shape
+		// `readTaskSnapshot` validates, so a malformed fixture would be ignored
+		// rather than restored, and the test would fail on the answer below.
+		store.appendCustom("tasks", [
+			{
+				id: "1",
+				subject: "Resume the board",
+				description: "restored from the session file",
+				status: "in_progress",
+				blockedBy: [],
+				createdAt: Date.now(),
+			},
+		]);
+		const sessionId = store.sessionId ?? "";
+		expect(sessionId).not.toBe("");
+
+		await withAcp(f, ["acp"], async (client) => {
+			await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+			const loaded = await client.request("session/load", { sessionId, cwd: f.dir, mcpServers: [] });
+			expect(loaded.error).toBeUndefined();
+			const response = await client.promptResult(await client.startPrompt(sessionId, "what is on the board?"));
+			expect(response.error).toBeUndefined();
+			const answers = client
+				.updates()
+				.filter((update) => update.sessionUpdate === "tool_call_update")
+				.map((update) => JSON.stringify(update.content ?? ""));
+			expect(answers.some((text) => text.includes("Resume the board"))).toBe(true);
+		});
 	}, 60_000);
 });
