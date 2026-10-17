@@ -241,7 +241,12 @@ export const SettingsSchema = z.object({
 	 */
 	modelDiscovery: z.boolean().optional(),
 	// Long-form design notes: docs/dev/migration-framework.md
-	/** Wake the session when a background shell finishes on its own. */
+	/**
+	 * Wake the session when a background shell finishes on its own, and when
+	 * one stalls on what looks like an interactive prompt. A manager cap that
+	 * stops a shell is reported on screen either way — that is an action the
+	 * session took, not a notification to opt out of.
+	 */
 	backgroundShellNotifications: z.boolean().optional(),
 	permissions: z
 		.object({
@@ -450,10 +455,11 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.
 	modelDiscovery: "denied",
-	// The same class as `modelDiscovery`: whether a finished command spends a
-	// turn and sends the end of the log to the provider is the user's decision,
-	// and a repository that re-enabled silenced notices would be spending on its
-	// own checkout's behalf.
+	// The same class as `modelDiscovery`: whether a shell event that wakes the
+	// session — a completion, or a stall at a prompt — spends a turn and sends
+	// part of the log to the provider is the user's decision, and a repository
+	// that re-enabled silenced notices would be spending on its own checkout's
+	// behalf.
 	backgroundShellNotifications: "denied",
 	gamepad: "denied",
 	// The same money question as `model`: the band's four members spend the

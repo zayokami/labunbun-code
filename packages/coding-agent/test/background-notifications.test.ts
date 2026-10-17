@@ -23,8 +23,12 @@ import { z } from "zod";
 import {
 	attachShellNotices,
 	SHELL_NOTICE_TAIL_CHARS,
+	SHELL_STALL_LINE_MAX_CHARS,
 	shellNotice,
 	shellNoticeLine,
+	shellStallLine,
+	shellStallNotice,
+	shellTerminationLine,
 } from "../src/background-notifications.ts";
 
 /**
@@ -122,6 +126,40 @@ describe("notice text", () => {
 		expect(line).toContain("shell_3");
 		expect(line).toContain("exit code 0");
 		expect(line).toContain("42s");
+	});
+
+	test("a stall notice carries the suspect line and does not offer to type an answer", () => {
+		const line = shellStallLine(shell({ status: "running", exitCode: null }), "Proceed? (y/n)", 46_000);
+		expect(line).toContain("shell_3");
+		expect(line).toContain("may be waiting for input");
+		expect(line).toContain("46s");
+		expect(line).toContain("Proceed? (y/n)");
+
+		const text = shellStallNotice(shell({ status: "running", exitCode: null }), "Proceed? (y/n)", 46_000);
+		expect(text.split("\n")[0] ?? "").toContain("not from the user");
+		expect(text).toContain("Proceed? (y/n)");
+		expect(text).toContain("still running");
+		// The manager has no stdin path to a background shell, so the notice
+		// must not suggest answering it.
+		expect(text).toContain("cannot type into a background shell");
+		expect(text).toContain("KillBash");
+		expect(text).toContain("not a user instruction");
+	});
+
+	test("a very long suspect line is shortened, not copied whole", () => {
+		const line = "x".repeat(SHELL_STALL_LINE_MAX_CHARS + 50);
+		const text = shellStallNotice(shell({ status: "running", exitCode: null }), line, 46_000);
+		expect(text).not.toContain(line);
+		expect(text).toContain(`${"x".repeat(SHELL_STALL_LINE_MAX_CHARS)}…`);
+	});
+
+	test("a cap kill says which cap stopped the shell", () => {
+		expect(shellTerminationLine(shell({ status: "killed", exitCode: null, killReason: "lifetime" }))).toContain(
+			"lifetime limit",
+		);
+		expect(shellTerminationLine(shell({ status: "killed", exitCode: null, killReason: "log-limit" }))).toContain(
+			"log reached the size limit",
+		);
 	});
 });
 

@@ -106,6 +106,27 @@ The poll only needs the last few lines. The read starts at an offset instead. Wh
 
 BashOutput reads the accumulated output of a background shell, and it is safe to call again for progress. Its status line shows the elapsed seconds while the shell runs, and the status with the exit code after it ends. An unknown id is an error. KillBash stops a background shell that runs and kills the whole process tree. A failure reports that the shell was not found or not active.
 
+#### Background shell bounds and attention
+
+The manager takes a fourth constructor argument, an options object. Every field is optional, so a three-argument construction keeps its meaning. The bounds are `defaultTimeoutMs` (1800000, 30 minutes), `maxTimeoutMs` (7200000, 2 hours), `maxLogBytes` (5368709120, 5 GiB), `stallPollMs` (5000, 5 seconds), and `stallAfterMs` (45000, 45 seconds). The attention hooks are `onStalled` and `onTerminated`.
+
+`start` and `adopt` take an optional lifetime. `start` uses the default when the caller names none. Both clamp the value to the maximum. `adopt` subtracts the time the process already ran, counted from `startTime`. A process handed over late in its life gets the rest of its budget, not a new one.
+
+A lifetime that expires stops the shell through `kill` and through no other path. That path runs the pid-tree kill, the terminate of a confined handle, and the end event that releases a container grant. The record says `status: "killed"` and `killReason: "lifetime"`. A line in the log says that the lifetime limit was reached. A user kill carries no reason.
+
+The log cap is counted in the append path, in UTF-8 bytes. The chunk that would cross the cap is dropped whole. The manager flushes what it accepted, writes one line in its own wording, and stops the shell through `kill`. Later chunks are dropped, the exit line included. The record says `killReason: "log-limit"`. `adopt` seeds the counter with the text the log opens with, so output from before the handoff counts. A shell with no pid has nothing to kill. Its log stops at the cap line, and its record keeps the running status. No stop is claimed that did not happen.
+
+The stall watchdog polls a running shell's log every `stallPollMs`. It flushes the batch buffer before it stats the file, because buffered bytes are not on disk yet. A size change resets the episode and its notice. After `stallAfterMs` without a change, the watchdog reads the last non-empty line of a bounded tail. If that line matches the prompt list, the manager calls `onStalled` once for the episode. The watchdog never kills. A shell that waits on a prompt is a decision for the user or the model, not a reason to end it.
+
+The prompt list is our own and small. It matches a bracketed choice such as `(y/n)` or `[yes/no]`, a bare choice at the end of a line, a line that ends in `?`, and "press any key", "press enter", or "press return". Matching ignores case. The list is a heuristic and not a claim of parity with any other tool. A false positive costs one notice. A false negative costs the notice that a waiting shell would have earned.
+
+Only the interactive host passes the callbacks. It sends a stall notice through the same follow-up queue as a completion, under the same `backgroundShellNotifications` setting, read at the moment the notice is sent. The notice says that the session cannot type into a background shell, so the model's action is a decision: stop the shell, or leave it. The interactive host also prints one line when a manager cap stops a shell. That line does not wake the model, because the setting governs turns and the cap is the manager's own action. The headless and ACP hosts construct the manager with three arguments. They have no transcript and no follow-up path, so they receive no stall or termination notice, and their manager arms no watchdog. This is deliberate. A notice that those hosts cannot deliver would be a host-inconsistent behavior.
+
+Two non-goals are recorded here on purpose:
+
+- A two-second auto-background of a foreground command is not implemented. The Windows AppContainer backend has no handoff path, and `ToolCallContext` has no agent-role field. A second backgrounding mechanism without both would be a bypass or an inconsistency.
+- Notification consume and dedupe are not implemented. The reference mechanism consumes a notice that was already delivered as a tool result. It is not a time-based retraction. That carrier does not exist in this repository yet.
+
 ### Edit, read, write, and file state
 
 The Edit tool does exact string replacement. Two gates sit in front of the write, and a diagnostic behind it says where an edit went wrong. The split of the work rests on a measurement, not on an assumption. The measurement used the history of this repository itself (`edit_probe.ts`, 99 hunks over 60 commits):

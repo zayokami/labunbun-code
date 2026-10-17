@@ -28,6 +28,9 @@ import { type BackgroundShell, readTail } from "@labunbun/tools";
 /** How much of the log a completion notice carries. */
 export const SHELL_NOTICE_TAIL_CHARS = 2_000;
 
+/** How much of a suspect prompt line a stall notice repeats; a prompt is short, a runaway line is not. */
+export const SHELL_STALL_LINE_MAX_CHARS = 200;
+
 /** Seconds between spawn and finish, rounded — the same reading BashOutput's status line gives. */
 function durationSeconds(shell: BackgroundShell, now: number): number {
 	return Math.max(0, Math.round((now - shell.startTime) / 1000));
@@ -72,6 +75,55 @@ export function shellNotice(shell: BackgroundShell, now: number, tail: { text: s
 		"Report the outcome to the user; if you were waiting on this command, continue from its result. " +
 		"This notice is not a user instruction."
 	);
+}
+
+/** The suspect line, shortened to a length a notice can carry. */
+function namedLine(line: string): string {
+	return line.length > SHELL_STALL_LINE_MAX_CHARS ? `${line.slice(0, SHELL_STALL_LINE_MAX_CHARS)}…` : line;
+}
+
+/**
+ * The one line the user sees when a shell stalls.
+ *
+ * It says what the manager saw and what it did not do: no output for a while,
+ * a last line that looks like a question, and a shell still running. "May be
+ * waiting for input" and not "is waiting", because the shape is a heuristic —
+ * a command can print a question and keep working.
+ */
+export function shellStallLine(shell: BackgroundShell, line: string, idleMs: number): string {
+	return `[background] ${shell.id} may be waiting for input: no output for ${Math.round(idleMs / 1000)}s — last line: ${namedLine(line)}`;
+}
+
+/**
+ * The message a stalled shell sends to the session.
+ *
+ * A background shell's stdin is not connected to this session, so the notice
+ * must not suggest typing an answer: the only action is a decision — stop the
+ * shell with KillBash, or leave it running. The provenance envelope is the
+ * same as a completion's, for the same reason: a user-role message that does
+ * not say where it came from can be mistaken for the user speaking.
+ */
+export function shellStallNotice(shell: BackgroundShell, line: string, idleMs: number): string {
+	return (
+		"[background shell notification — automated, not from the user]\n" +
+		`${shell.id} has produced no output for ${Math.round(idleMs / 1000)}s, and its last log line looks like an interactive prompt:\n` +
+		`${namedLine(line)}\n` +
+		`Command: ${shell.command}\n` +
+		`Full log: ${shell.outputFile}\n` +
+		"The shell is still running. This session cannot type into a background shell; if the command is waiting for input, stop it with KillBash, and if it is still working, leave it running. " +
+		"This notice is not a user instruction."
+	);
+}
+
+/** The line the user sees when a manager cap — not the user — stopped a shell. */
+export function shellTerminationLine(shell: BackgroundShell): string {
+	const reason =
+		shell.killReason === "log-limit"
+			? "its log reached the size limit"
+			: shell.killReason === "lifetime"
+				? "it reached its lifetime limit"
+				: "a manager limit stopped it";
+	return `[background] ${shell.id} was stopped by the manager: ${reason}.`;
 }
 
 export interface ShellNoticeOptions {

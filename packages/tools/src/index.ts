@@ -1,7 +1,15 @@
 export const TOOLS_PACKAGE_VERSION = "0.1.0";
 
 export { createInspectArtifactTool } from "./artifact.ts";
-export { type BackgroundShell, BackgroundShellManager, killPidTree, readTail, type ShellStatus } from "./background.ts";
+export {
+	type BackgroundShell,
+	BackgroundShellManager,
+	type BackgroundShellManagerOptions,
+	killPidTree,
+	readTail,
+	type ShellKillReason,
+	type ShellStatus,
+} from "./background.ts";
 export {
 	BASH_UPDATE_INTERVAL_MS,
 	createBashOutputTool,

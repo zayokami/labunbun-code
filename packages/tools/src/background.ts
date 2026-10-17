@@ -45,6 +45,68 @@ const LOG_FLUSH_INTERVAL_MS = 100;
 /** How long a killed POSIX shell gets to honour `SIGTERM` before `killPidTree` escalates to `SIGKILL`. */
 const KILL_ESCALATE_MS = 250;
 
+/**
+ * The lifetime a background shell gets when its caller names none: 30 minutes.
+ * A shell is for a build or a watcher, not for a service; one that outlives
+ * this is more likely forgotten than still working.
+ */
+export const BACKGROUND_SHELL_DEFAULT_TIMEOUT_MS = 1_800_000;
+
+/** The longest lifetime a caller may ask for: 2 hours. */
+export const BACKGROUND_SHELL_MAX_TIMEOUT_MS = 7_200_000;
+
+/**
+ * The hard byte cap for one shell's log: 5 GiB. A command that writes more
+ * than this is not producing output a person can read, and the file would
+ * otherwise grow for as long as the shell runs. The cap stops both.
+ */
+export const BACKGROUND_SHELL_MAX_LOG_BYTES = 5 * 1024 ** 3;
+
+/** How often the stall watchdog looks at a running shell's log. */
+export const STALL_POLL_MS = 5_000;
+
+/** How long a log may stand still before its last line is checked for a prompt shape. */
+export const STALL_AFTER_MS = 45_000;
+
+/** How much of the log's tail the stall check reads — enough for the last line and its neighbours. */
+const STALL_TAIL_CHARS = 4_000;
+
+/**
+ * The last-line shapes the stall watchdog treats as an interactive prompt.
+ *
+ * This list is our own and deliberately small; it is not a claim of parity
+ * with any other tool's heuristic. A false positive costs one notice and
+ * nothing else — the watchdog never kills — and a false negative costs the
+ * notice a waiting shell would have earned. Matching is case-insensitive.
+ */
+const INTERACTIVE_PROMPT_PATTERNS: readonly RegExp[] = [
+	// A bracketed choice: (y/n), [yes/no], ( y / n / a ).
+	/[[(]\s*(?:y\s*\/\s*n(?:\s*\/\s*a)?|yes\s*\/\s*no)\s*[\])]\s*[?:]?$/i,
+	// The same choice without brackets: "continue y/n".
+	/\b(?:y\s*\/\s*n|yes\s*\/\s*no)\s*[?:]?$/i,
+	// A question, which can carry the choice before it: "Do you want to proceed?".
+	/\?\s*$/,
+	// A key press or confirmation prompt: "Press any key to continue", "Press Enter".
+	/\bpress\s+(?:any\s+key|enter|return)\b/i,
+];
+
+/** Whether a line has the shape of a prompt that waits for a person. */
+export function isInteractivePromptLine(line: string): boolean {
+	const trimmed = line.trim();
+	if (trimmed === "") return false;
+	return INTERACTIVE_PROMPT_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/** The last non-blank line of a text block, trimmed, or `undefined` when there is none. */
+export function lastNonEmptyLine(text: string): string | undefined {
+	const lines = text.split(/\r?\n/);
+	for (let index = lines.length - 1; index >= 0; index -= 1) {
+		const line = lines[index]?.trim();
+		if (line !== undefined && line !== "") return line;
+	}
+	return undefined;
+}
+
 // Long-form design notes: docs/dev/tools.md
 /** The last `maxChars` characters of a file, without reading the whole thing. */
 export function readTail(path: string, maxChars: number): { text: string; truncated: boolean; bytes: number } {
@@ -66,6 +128,9 @@ export function readTail(path: string, maxChars: number): { text: string; trunca
 
 export type ShellStatus = "running" | "completed" | "killed";
 
+/** Why the manager itself stopped a running shell. A user kill carries no reason. */
+export type ShellKillReason = "lifetime" | "log-limit";
+
 export interface BackgroundShell {
 	id: string;
 	command: string;
@@ -81,6 +146,41 @@ export interface BackgroundShell {
 	 * later run can probe and kill with.
 	 */
 	pid?: number;
+	/**
+	 * Set only when a cap in this manager ended the shell — its lifetime ran
+	 * out or its log reached the byte cap. A shell the user killed, or one
+	 * that ended on its own, carries no reason.
+	 */
+	killReason?: ShellKillReason;
+}
+
+/**
+ * The manager's own bounds and its attention hooks.
+ *
+ * Every value has a default, so the three-argument constructor keeps working
+ * unchanged. The callbacks are how a host hears about the two states that are
+ * not completions and not user kills: a shell standing still on what looks
+ * like an interactive prompt, and a shell this manager stopped for a cap.
+ */
+export interface BackgroundShellManagerOptions {
+	/** Lifetime a shell gets when its caller names none. Default 30 minutes. */
+	defaultTimeoutMs?: number;
+	/** The ceiling any requested lifetime is clamped to. Default 2 hours. */
+	maxTimeoutMs?: number;
+	/** The log's hard byte cap. Default 5 GiB. The crossing chunk is dropped and the shell stopped. */
+	maxLogBytes?: number;
+	/** How often the stall watchdog samples a running shell's log. Default 5 s. */
+	stallPollMs?: number;
+	/** How long the log may stand still before its last line is examined. Default 45 s. */
+	stallAfterMs?: number;
+	/**
+	 * Called once per stall episode, when a log has not grown for `stallAfterMs`
+	 * and its last non-empty line matches {@link isInteractivePromptLine}. The
+	 * shell is left running. The callback's own bugs are contained.
+	 */
+	onStalled?: (shell: BackgroundShell, line: string, idleMs: number) => void;
+	/** Called when one of this manager's caps stopped a shell, after the record says why. */
+	onTerminated?: (shell: BackgroundShell) => void;
 }
 
 // Long-form design notes: docs/dev/tools.md
@@ -166,6 +266,17 @@ interface ShellEntry {
 	/** Log chunks not yet on disk, and their byte count; see `#append`. */
 	pending?: string[];
 	pendingBytes?: number;
+	/** Bytes accepted into the log so far, seeded for an adopted shell from the text it arrived with. */
+	loggedBytes?: number;
+	/** Set when the log cap was reached: later chunks are dropped and the one cap line is already written. */
+	logCapped?: boolean;
+	/** The lifetime timer; cleared at end, eviction, user kill, and disposal. */
+	lifetimeTimer?: ReturnType<typeof setTimeout>;
+	/** The log size the stall watchdog last saw, after a flush, and when it last changed. */
+	stallBytes?: number;
+	stallSince?: number;
+	/** One notice per stall episode; growth clears it. */
+	stallNotified?: boolean;
 }
 
 let shellCounter = 0;
@@ -203,6 +314,14 @@ export class BackgroundShellManager {
 	/** Whoever owns the proxy lifecycle. Defaults to a real executor so a manager
 	 * that confines a network cannot be built without one. */
 	readonly #operations: ExecOperations;
+	/** The manager's caps and attention hooks; every field has a default. */
+	readonly #defaultTimeoutMs: number;
+	readonly #maxTimeoutMs: number;
+	readonly #maxLogBytes: number;
+	readonly #stallPollMs: number;
+	readonly #stallAfterMs: number;
+	readonly #onStalled: BackgroundShellManagerOptions["onStalled"];
+	readonly #onTerminated: BackgroundShellManagerOptions["onTerminated"];
 
 	constructor(
 		// Resolved in the body, not as a default: the default now depends on the
@@ -213,14 +332,27 @@ export class BackgroundShellManager {
 		// Injected like the runtime: so a test can pin the shell the container
 		// branch wraps without depending on what this machine has installed.
 		shell: ReturnType<typeof detectShell> = detectShell(),
+		// Fourth and optional, so every three-argument construction keeps its
+		// meaning. Read once here: a bound that changed under a running timer
+		// would make one shell's life depend on when the caller edited settings.
+		options: BackgroundShellManagerOptions = {},
 	) {
 		this.#runtime = runtime ?? detectRuntime(process.platform, shell);
 		this.#operations = operations;
 		this.#shell = shell;
+		this.#defaultTimeoutMs = options.defaultTimeoutMs ?? BACKGROUND_SHELL_DEFAULT_TIMEOUT_MS;
+		this.#maxTimeoutMs = options.maxTimeoutMs ?? BACKGROUND_SHELL_MAX_TIMEOUT_MS;
+		this.#maxLogBytes = options.maxLogBytes ?? BACKGROUND_SHELL_MAX_LOG_BYTES;
+		this.#stallPollMs = options.stallPollMs ?? STALL_POLL_MS;
+		this.#stallAfterMs = options.stallAfterMs ?? STALL_AFTER_MS;
+		this.#onStalled = options.onStalled;
+		this.#onTerminated = options.onTerminated;
 	}
 
 	/** The sweep timer, alive only while some entry has buffered output. */
 	#sweepTimer: ReturnType<typeof setInterval> | null = null;
+	/** The stall watchdog, alive only while a host asked for stall attention and a shell runs. */
+	#stallTimer: ReturnType<typeof setInterval> | null = null;
 
 	// Long-form design notes: docs/dev/tools.md
 	/**
@@ -233,10 +365,24 @@ export class BackgroundShellManager {
 	 * eviction just deleted; and a chunk that arrives after the shell ended
 	 * writes straight through, so the drain's late output stays ordered behind
 	 * the exit line.
+	 *
+	 * The byte cap is charged here, in bytes and not characters, because the
+	 * file grows by UTF-8 bytes. The chunk that would cross the cap is dropped
+	 * whole — a half line would be a log that lies about what the command
+	 * printed — and from then on every chunk is dropped. `adopt` seeds the
+	 * count with the text the log opened with, so an adopted process does not
+	 * get a fresh allowance for what it printed before the handoff.
 	 */
 	#append(entry: ShellEntry, chunk: Buffer | string): void {
 		if (!this.#entries.has(entry.info.id)) return;
 		const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+		if (entry.logCapped === true) return;
+		const bytes = Buffer.byteLength(text);
+		if ((entry.loggedBytes ?? 0) + bytes > this.#maxLogBytes) {
+			this.#capLog(entry);
+			return;
+		}
+		entry.loggedBytes = (entry.loggedBytes ?? 0) + bytes;
 		if (entry.endedAt !== undefined) {
 			try {
 				appendFileSync(entry.info.outputFile, text);
@@ -247,7 +393,7 @@ export class BackgroundShellManager {
 		}
 		entry.pending ??= [];
 		entry.pending.push(text);
-		entry.pendingBytes = (entry.pendingBytes ?? 0) + Buffer.byteLength(text);
+		entry.pendingBytes = (entry.pendingBytes ?? 0) + bytes;
 		if (entry.pendingBytes >= LOG_FLUSH_BYTES) {
 			this.#flushEntry(entry);
 			return;
@@ -258,6 +404,170 @@ export class BackgroundShellManager {
 			// the process alive.
 			this.#sweepTimer.unref();
 		}
+	}
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * The log cap's one exit. What was already accepted is flushed, the one
+	 * notice line goes straight to the file — it is not charged against the cap
+	 * it announces — and the shell is stopped through {@link kill}, the only
+	 * path that also releases a container grant. Later chunks are dropped by
+	 * the `logCapped` guard above.
+	 *
+	 * The wording promises only what the manager knows: the log stopped
+	 * growing. Whether the process behind it stopped is the kill's answer, and
+	 * a shell with no pid (a fake, a failed spawn) keeps its running record
+	 * rather than a kill that did not happen.
+	 */
+	#capLog(entry: ShellEntry): void {
+		if (entry.logCapped === true) return;
+		entry.logCapped = true;
+		this.#flushEntry(entry);
+		try {
+			appendFileSync(
+				entry.info.outputFile,
+				`\n[background log limit reached: ${this.#maxLogBytes} bytes; later output is dropped]\n`,
+			);
+		} catch {
+			// best-effort logging
+		}
+		this.#terminateForCap(entry, "log-limit");
+	}
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * End a running shell for one of the manager's own caps. The stop goes
+	 * through {@link kill} and nowhere else: that path runs the pid-tree kill
+	 * and the confined handle's own terminate, marks the record killed, and
+	 * lets the end event release the container grant before any subscriber
+	 * hears of it. A shell this manager cannot reach — no pid — is left with
+	 * its running record, and no kill is claimed.
+	 */
+	#terminateForCap(entry: ShellEntry, reason: ShellKillReason): void {
+		if (entry.info.status !== "running") return;
+		if (!this.kill(entry.info.id)) return;
+		entry.info.killReason = reason;
+		if (reason === "lifetime") {
+			// The lifetime line goes through the append path like every other
+			// annotation, so it lands behind what the command last printed.
+			this.#append(entry, "\n[background shell lifetime limit reached; stopped]\n");
+		}
+		const shell = entry.info;
+		if (this.#onTerminated !== undefined) {
+			try {
+				this.#onTerminated(shell);
+			} catch {
+				// A subscriber's bug is not the shell's record — the same stance
+				// as every other hook here.
+			}
+		}
+	}
+
+	/**
+	 * Arm a shell's lifetime. The requested value falls back to the configured
+	 * default and is clamped to the configured maximum; an adopted shell has
+	 * already spent `alreadyRunMs` of it. `unref` for the same reason as every
+	 * timer here: a shell's cap must not keep the process alive.
+	 */
+	#armLifetime(entry: ShellEntry, requested: number | undefined, alreadyRunMs = 0): void {
+		const lifetimeMs = Math.min(Math.max(1, requested ?? this.#defaultTimeoutMs), this.#maxTimeoutMs);
+		const remainingMs = Math.max(0, lifetimeMs - Math.max(0, alreadyRunMs));
+		entry.lifetimeTimer = setTimeout(() => {
+			entry.lifetimeTimer = undefined;
+			this.#terminateForCap(entry, "lifetime");
+		}, remainingMs);
+		entry.lifetimeTimer.unref();
+	}
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * Start watching a shell for a stall. Growth is measured from the log file,
+	 * not from memory, so everything a reader sees is counted; the poll flushes
+	 * the batch buffer before it stats, because buffered bytes are not in the
+	 * file yet and a busy shell would otherwise read as a quiet one.
+	 *
+	 * The watch exists only when a host supplied {@link BackgroundShellManagerOptions.onStalled}.
+	 * A host with nowhere to put a notice — a `-p` run, an ACP session — pays no
+	 * timer at all, which is also why this file's notices cannot appear in
+	 * those hosts by accident.
+	 */
+	#watchStalls(entry: ShellEntry): void {
+		if (this.#onStalled === undefined) return;
+		entry.stallBytes = entry.loggedBytes ?? 0;
+		entry.stallSince = Date.now();
+		entry.stallNotified = false;
+		if (this.#stallTimer !== null) return;
+		this.#stallTimer = setInterval(() => this.#pollStalls(), this.#stallPollMs);
+		this.#stallTimer.unref();
+	}
+
+	/**
+	 * One stall watchdog pass. Growth resets the episode: the idle clock moves,
+	 * and the next stall earns its own notice. No growth for `stallAfterMs`
+	 * earns a notice only when the last non-empty line looks like a prompt, and
+	 * only once per episode. The watchdog never kills — a prompt that waits is
+	 * a decision for the person or the model, not a reason to end the shell.
+	 */
+	#pollStalls(): void {
+		const now = Date.now();
+		let running = 0;
+		for (const entry of this.#entries.values()) {
+			if (entry.info.status !== "running") continue;
+			running += 1;
+			// The batch buffer is not in the file until it is flushed; a stat
+			// before this would read a chatty shell as quiet.
+			this.#flushEntry(entry);
+			let size: number;
+			try {
+				size = statSync(entry.info.outputFile).size;
+			} catch {
+				continue;
+			}
+			if (size !== entry.stallBytes) {
+				entry.stallBytes = size;
+				entry.stallSince = now;
+				entry.stallNotified = false;
+				continue;
+			}
+			if (entry.stallNotified === true) continue;
+			const idleSince = entry.stallSince ?? now;
+			if (now - idleSince < this.#stallAfterMs) continue;
+			const line = this.#lastLogLine(entry);
+			if (line === undefined || !isInteractivePromptLine(line)) continue;
+			entry.stallNotified = true;
+			if (this.#onStalled !== undefined) {
+				try {
+					this.#onStalled(entry.info, line, now - idleSince);
+				} catch {
+					// A subscriber's bug must not take the shell down.
+				}
+			}
+		}
+		// A watchdog with nothing to watch is a leak; retire it until the next
+		// running shell arms it again.
+		if (running === 0 && this.#stallTimer !== null) {
+			clearInterval(this.#stallTimer);
+			this.#stallTimer = null;
+		}
+	}
+
+	/** The last non-empty line of a shell's log, read from a bounded tail. */
+	#lastLogLine(entry: ShellEntry): string | undefined {
+		try {
+			return lastNonEmptyLine(readTail(entry.info.outputFile, STALL_TAIL_CHARS).text);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Retire the stall watchdog early when the last running shell has ended. */
+	#stopStallWatchIfIdle(): void {
+		if (this.#stallTimer === null) return;
+		for (const entry of this.#entries.values()) {
+			if (entry.info.status === "running") return;
+		}
+		clearInterval(this.#stallTimer);
+		this.#stallTimer = null;
 	}
 
 	/** One append of everything buffered, in order. */
@@ -348,6 +658,13 @@ export class BackgroundShellManager {
 	#onEnded(entry: ShellEntry): void {
 		if (entry.endedAt !== undefined) return;
 		entry.endedAt = Date.now();
+		// An ended shell has no lifetime left to enforce. Clearing here is what
+		// makes "cleared on shell end" true even when the close and the timer
+		// race; the same clear runs at eviction and disposal.
+		if (entry.lifetimeTimer !== undefined) {
+			clearTimeout(entry.lifetimeTimer);
+			entry.lifetimeTimer = undefined;
+		}
 		// Whatever is still buffered goes to disk before anyone is told, so a
 		// subscriber that reads the log in its handler sees the exit line the
 		// caller appended just above. Appends after this point write through
@@ -383,6 +700,7 @@ export class BackgroundShellManager {
 			}
 		}
 		this.#evictEnded();
+		this.#stopStallWatchIfIdle();
 	}
 
 	// Long-form design notes: docs/dev/tools.md
@@ -393,6 +711,13 @@ export class BackgroundShellManager {
 		ended.sort((a, b) => (a[1].endedAt ?? 0) - (b[1].endedAt ?? 0));
 		for (const [id, entry] of ended.slice(0, ended.length - MAX_RETAINED_SHELLS)) {
 			this.#entries.delete(id);
+			// Defensive: `#onEnded` is the one place an ended entry's timer is
+			// cleared, and this loop only sees ended entries. A timer that
+			// somehow survived would fire into a record no longer in the map.
+			if (entry.lifetimeTimer !== undefined) {
+				clearTimeout(entry.lifetimeTimer);
+				entry.lifetimeTimer = undefined;
+			}
 			// The file goes with the record: once the id no longer resolves, the
 			// path inside `info` is out of every reader's reach — `output` guards
 			// on the map — so keeping the file would only pile up one log per
@@ -443,8 +768,16 @@ export class BackgroundShellManager {
 	}
 
 	// Long-form design notes: docs/dev/tools.md
-	/** Start a detached command. */
-	async start(command: string, cwd: string, sandbox?: SandboxPolicy): Promise<BackgroundShell> {
+	/**
+	 * Start a detached command.
+	 *
+	 * `timeoutMs` is the shell's lifetime: it falls back to the manager's
+	 * default (30 minutes) and is clamped to its maximum (2 hours). On expiry
+	 * the shell is stopped through {@link kill}, so a confined shell's grant is
+	 * released by the same end path a user kill uses, and the record carries
+	 * `killReason: "lifetime"`.
+	 */
+	async start(command: string, cwd: string, sandbox?: SandboxPolicy, timeoutMs?: number): Promise<BackgroundShell> {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
 		const outputFile = createLogFile(id, "");
@@ -572,6 +905,10 @@ export class BackgroundShellManager {
 		if (release !== undefined) entry.release = release;
 		if (terminate !== undefined) entry.terminate = terminate;
 		this.#entries.set(id, entry);
+		// Timers arm only once the entry is in the map: a lifetime that fired
+		// before registration would reach `kill` after its own record was gone.
+		this.#armLifetime(entry, timeoutMs);
+		this.#watchStalls(entry);
 
 		proc.stdout?.setEncoding("utf8");
 		proc.stderr?.setEncoding("utf8");
@@ -587,7 +924,17 @@ export class BackgroundShellManager {
 	}
 
 	// Long-form design notes: docs/dev/tools.md
-	/** Register a process that was already running — a foreground command that outlived its timeout. */
+	/**
+	 * Register a process that was already running — a foreground command that
+	 * outlived its timeout.
+	 *
+	 * `timeoutMs` is a lifetime measured from the original spawn, not from the
+	 * adoption: the time the process already ran comes off the budget, so a
+	 * command handed over near the end of its life is not granted a fresh one.
+	 * The log's own counter is seeded with the text it opens with, for the same
+	 * reason: an adopted shell's output before the handoff counts against its
+	 * byte cap.
+	 */
 	adopt(input: {
 		child: ChildProcess;
 		command: string;
@@ -595,10 +942,12 @@ export class BackgroundShellManager {
 		startTime: number;
 		stdout: string;
 		stderr: string;
+		timeoutMs?: number;
 	}): BackgroundShell {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
-		const outputFile = createLogFile(id, input.stdout + input.stderr);
+		const initial = input.stdout + input.stderr;
+		const outputFile = createLogFile(id, initial);
 
 		const info: BackgroundShell = {
 			id,
@@ -610,8 +959,10 @@ export class BackgroundShellManager {
 			exitCode: null,
 			pid: input.child.pid,
 		};
-		const entry: ShellEntry = { info, proc: input.child };
+		const entry: ShellEntry = { info, proc: input.child, loggedBytes: Buffer.byteLength(initial) };
 		this.#entries.set(id, entry);
+		this.#armLifetime(entry, input.timeoutMs, Date.now() - input.startTime);
+		this.#watchStalls(entry);
 		this.#attachExit(entry, (chunk) => this.#append(entry, chunk));
 		this.#onSpawned(info);
 
@@ -671,6 +1022,13 @@ export class BackgroundShellManager {
 	kill(id: string): boolean {
 		const entry = this.#entries.get(id);
 		if (entry?.info.status !== "running" || !entry.proc.pid) return false;
+		// A user kill ends the lifetime question now, not when the close event
+		// eventually arrives: a shell that ignores its stop must not later be
+		// "terminated" by a cap we already acted on.
+		if (entry.lifetimeTimer !== undefined) {
+			clearTimeout(entry.lifetimeTimer);
+			entry.lifetimeTimer = undefined;
+		}
 		// Fire-and-forget: for a shell in hand the end is confirmed by the
 		// process's own close event, which settles the record and the ledger.
 		// Only a pid with no handle left to watch needs the awaited exit code.
@@ -681,5 +1039,30 @@ export class BackgroundShellManager {
 		entry.terminate?.();
 		entry.info.status = "killed";
 		return true;
+	}
+
+	/**
+	 * Stop this manager's own timers: every shell's lifetime, the log sweep, and
+	 * the stall watchdog. Running shells are left running — ending them is a
+	 * decision, and a host that wants it calls {@link kill} or disposes after a
+	 * stop. A disposed manager still accepts new shells; their timers arm as
+	 * usual. Exists for tests and shutdown paths that must not leave a timer
+	 * behind.
+	 */
+	dispose(): void {
+		for (const entry of this.#entries.values()) {
+			if (entry.lifetimeTimer !== undefined) {
+				clearTimeout(entry.lifetimeTimer);
+				entry.lifetimeTimer = undefined;
+			}
+		}
+		if (this.#sweepTimer !== null) {
+			clearInterval(this.#sweepTimer);
+			this.#sweepTimer = null;
+		}
+		if (this.#stallTimer !== null) {
+			clearInterval(this.#stallTimer);
+			this.#stallTimer = null;
+		}
 	}
 }

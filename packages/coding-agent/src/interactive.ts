@@ -127,7 +127,12 @@ import {
 	resolveShellId,
 	shellPickerItems,
 } from "./background-commands.ts";
-import { attachShellNotices } from "./background-notifications.ts";
+import {
+	attachShellNotices,
+	shellStallLine,
+	shellStallNotice,
+	shellTerminationLine,
+} from "./background-notifications.ts";
 import { beetleUsage, parseBeetleCommand } from "./beetle.ts";
 import { type BeetleSurface, createBeetleSurface, createToolChangeLatch } from "./beetle-commands.ts";
 import { cacheStatusLine, formatCacheReport } from "./cache-report.ts";
@@ -628,10 +633,21 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const shell = detectShell();
 	const runtime = detectRuntime(process.platform, shell);
 	const ops: Operations = defaultOperations(new ChildProcessExecOperations(runtime, shell));
+	// The two shell events that are not completions — a shell standing still on
+	// what looks like an interactive prompt, and one a manager cap stopped —
+	// are reported through the REPL's notice path further down. The hooks are
+	// late-bound because the manager is built before the screen, the session,
+	// and the notice wiring exist; nothing can fire before the first stall poll,
+	// which is after all three.
+	let reportStalledShell: ((shell: BackgroundShell, line: string, idleMs: number) => void) | undefined;
+	let reportStoppedShell: ((shell: BackgroundShell) => void) | undefined;
 	// Owned here rather than inside createAllTools so `/ps` and `/stop` can reach
 	// the same shells the Bash tool started; the factory would otherwise make a
 	// private manager nobody else can see.
-	const backgroundShells = new BackgroundShellManager(runtime, ops);
+	const backgroundShells = new BackgroundShellManager(runtime, ops, shell, {
+		onStalled: (shellInfo, line, idleMs) => reportStalledShell?.(shellInfo, line, idleMs),
+		onTerminated: (shellInfo) => reportStoppedShell?.(shellInfo),
+	});
 	// Every shell this session starts goes onto the session file too, so a
 	// later run can find the ones that outlive this process — and stop them.
 	const detachShellLedger = attachShellLedger(backgroundShells, () => store);
@@ -2304,6 +2320,32 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			pushInfo(handle, text);
 		},
 	});
+
+	// A stall is worth waking for on the same terms as a completion: the
+	// command is not progressing, and this session cannot type into it, so the
+	// notice turns a silent wait into a decision — stop it with KillBash, or
+	// leave it running. The same switch and the same follow-up queue apply,
+	// both read at the moment there is something to say: an idle session is
+	// woken, a busy one hears it at the turn boundary.
+	reportStalledShell = (shell, line, idleMs) => {
+		if (settings.backgroundShellNotifications === false) return;
+		const session = sessionRef;
+		if (!session) return;
+		try {
+			pushInfo(handle, shellStallLine(shell, line, idleMs));
+		} catch {
+			// A UI subscriber's bug must not cost the session its notice.
+		}
+		session.followUp(shellStallNotice(shell, line, idleMs));
+		publishShells();
+	};
+	// A cap kill is the manager's own doing, not a completion and not the
+	// user's kill. It gets a line and a refreshed row, but no model wake: the
+	// setting governs turns, and the record and the log already say why.
+	reportStoppedShell = (shell) => {
+		pushInfo(handle, shellTerminationLine(shell));
+		publishShells();
+	};
 
 	// SessionStart ran before the REPL existed, so its failures surface now.
 	reportHookErrors(handle, startupHookErrors);
