@@ -17,6 +17,7 @@ import { createPlanModeCallbacks, createPlanModeTools, type PlanApprovalUi } fro
 import { approveProjectDefinitions } from "../src/project-trust.ts";
 import { loadSkills, skillsAsCommands } from "../src/skills.ts";
 import { agentSystemPrompt, createSubagentTools, loadAgentDefinitions } from "../src/subagents.ts";
+import { buildSubagentContext } from "../src/system-prompt.ts";
 
 function echoTool(): AnyTool {
 	return buildTool({
@@ -409,6 +410,56 @@ describe("Task tool (subagents)", () => {
 			},
 		);
 		expect(subFaux.receivedContexts[0]?.systemPrompt).toBe("OVERRIDE");
+	});
+
+	// Both hosts (interactive.ts and headless.ts) build their `systemPromptFor`
+	// from `agentSystemPrompt` plus `buildSubagentContext`; this drives that
+	// exact composition through the tool seam the hosts hand it to. The role
+	// has to stay first — the context says where the worker runs, not what it
+	// is — and memory and skills have to follow it.
+	test("a host-supplied systemPromptFor carries the shared context after the definition", async () => {
+		const subFaux = fauxProvider([{ text: "done" }]);
+		const [taskTool] = createSubagentTools({
+			streamFn: subFaux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: () => [echoTool()],
+			definitions: () => [
+				{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "ROLE-DEFINITION-FIRST" },
+			],
+			systemPromptFor: (definition) =>
+				[
+					agentSystemPrompt(definition),
+					buildSubagentContext({
+						cwd: process.cwd(),
+						platform: process.platform,
+						isTTY: false,
+						memory: "MEMORY-MARKER",
+						skills: "SKILLS-MARKER",
+					}),
+				]
+					.filter(Boolean)
+					.join("\n\n"),
+		});
+		await taskTool.call(
+			{ description: "run sub", prompt: "do the thing", subagent_type: "scribe" },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
+				onUpdate: () => {},
+			},
+		);
+
+		const prompt = subFaux.receivedContexts[0]?.systemPrompt ?? "";
+		expect(prompt.startsWith("ROLE-DEFINITION-FIRST")).toBe(true);
+		expect(prompt.indexOf("MEMORY-MARKER")).toBeGreaterThan(prompt.indexOf("ROLE-DEFINITION-FIRST"));
+		expect(prompt).toContain("# Environment");
+		expect(prompt).toContain("# Project memory\nMEMORY-MARKER");
+		expect(prompt).toContain("SKILLS-MARKER");
+		// The parent's voice is not part of a worker's prompt.
+		expect(prompt).not.toContain("# Communication");
 	});
 
 	describe("cancellation", () => {

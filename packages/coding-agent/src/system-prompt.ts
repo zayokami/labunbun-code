@@ -24,8 +24,8 @@ export interface SystemPromptContext {
 	platform: string;
 	isTTY: boolean;
 	/**
-	 * The joined memory files (`loadMemoryFiles`): LABUNBUN.md / AGENTS.md walked
-	 * from cwd to root, the user's own MEMORY.md, and rules.
+	 * The joined memory files (`loadMemoryFiles`): LABUNBUN.md / AGENTS.md /
+	 * CLAUDE.md walked from cwd to root, the user's own MEMORY.md, and rules.
 	 *
 	 * A section of the system prompt rather than a user message, for two reasons
 	 * that both come down to the same one — the model has to keep seeing it:
@@ -80,6 +80,30 @@ export interface SystemPromptContext {
 	skills?: string;
 }
 
+/**
+ * The `# Environment` section. Shared by the main prompt and the subagent
+ * context block, so the two cannot disagree about where the process runs or
+ * what today is.
+ */
+function environmentSection(ctx: Pick<SystemPromptContext, "cwd" | "platform" | "isTTY" | "now">): string {
+	return `# Environment
+- Working directory: ${ctx.cwd}
+- Platform: ${ctx.platform}
+- Is interactive terminal: ${ctx.isTTY}
+- Today's date: ${localDayKey(ctx.now ?? Date.now())}`;
+}
+
+/** The `# Project memory` section, or undefined when there is nothing to send. */
+function memorySection(memory: string | undefined): string | undefined {
+	const text = memory?.trim();
+	return text ? `# Project memory\n${text}` : undefined;
+}
+
+/** The skill discovery block when it has content, or undefined so no empty section is emitted. */
+function skillsSection(skills: string | undefined): string | undefined {
+	return skills?.trim() ? skills : undefined;
+}
+
 export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): string {
 	const sections: string[] = [];
 
@@ -107,11 +131,7 @@ You MUST answer the user's question directly, without padding, and to the point.
 - Say in one line what you are about to do before your first tool call, and note briefly what you just found when a turn runs long.
 - Report outcomes faithfully: if a command failed, say so with its output.`);
 
-	sections.push(`# Environment
-- Working directory: ${ctx.cwd}
-- Platform: ${ctx.platform}
-- Is interactive terminal: ${ctx.isTTY}
-- Today's date: ${localDayKey(ctx.now ?? Date.now())}`);
+	sections.push(environmentSection(ctx));
 
 	sections.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
 
@@ -125,9 +145,9 @@ You MUST answer the user's question directly, without padding, and to the point.
 	// differs per project, so it belongs on the dynamic side of the marker. A
 	// session with no memory files produces the same bytes it did before this
 	// section existed.
-	const memory = ctx.memory?.trim();
+	const memory = memorySection(ctx.memory);
 	if (memory) {
-		sections.push(`# Project memory\n${memory}`);
+		sections.push(memory);
 	}
 
 	// Output style, between memory and skills: it is the user's own instruction
@@ -142,10 +162,32 @@ You MUST answer the user's question directly, without padding, and to the point.
 
 	// Skill discovery, after memory: the block carries its own header and the
 	// budget that decided what survives in it (skills.ts).
-	const skills = ctx.skills?.trim();
+	const skills = skillsSection(ctx.skills);
 	if (skills) {
 		sections.push(skills);
 	}
 
 	return sections.join("\n\n");
+}
+
+/** The parts of `SystemPromptContext` a subagent's context block reads. */
+export type SubagentContext = Pick<SystemPromptContext, "cwd" | "platform" | "isTTY" | "now" | "memory" | "skills">;
+
+/**
+ * The context a subagent shares with the session that spawned it: the
+ * `# Environment` section, `# Project memory` when it has content, and the
+ * skill discovery block when it has content, in that order, joined by blank
+ * lines. The caller puts the agent definition's body first, so the role the
+ * agent was spawned as still leads the prompt.
+ *
+ * Deliberately absent: `# Attitude`, `# Context`, `# Doing tasks`,
+ * `# Communication`, `# Tool guidance`, the language line and the output
+ * style. Those are the parent session's harness contract and voice; a
+ * subagent's output is a report back to the parent, so a voice instruction
+ * belongs to the parent rather than to every worker it spawns.
+ */
+export function buildSubagentContext(ctx: SubagentContext): string {
+	return [environmentSection(ctx), memorySection(ctx.memory), skillsSection(ctx.skills)]
+		.filter((section): section is string => section !== undefined)
+		.join("\n\n");
 }

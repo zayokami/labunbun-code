@@ -103,8 +103,8 @@ import {
 import { createSpawnConfiner } from "./spawn-confinement.ts";
 import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
 import { SubagentRegistry } from "./subagent-registry.ts";
-import { createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
-import { buildSystemPrompt } from "./system-prompt.ts";
+import { agentSystemPrompt, createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
+import { buildSubagentContext, buildSystemPrompt } from "./system-prompt.ts";
 import { bindTaskStore, saveTasks } from "./task-snapshot.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
 
@@ -519,6 +519,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// a nightly job to do what they just did by hand.
 	const memory = loadMemoryFiles(cwd, home);
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
+	// Built once and shared by the session prompt and every subagent's context
+	// block, so both are matching the same discovery snapshot.
+	const skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
 	// The model's door to the same skills the commands beside it expand for the
 	// user; merged into both tool lists below (the session's and a subagent's).
 	const skillTool = createSkillTool(skills);
@@ -612,6 +615,25 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// hand a subagent a tool the parent session never got.
 		allTools: () => [...tools, skillTool, ...mcpTools],
 		definitions: () => agentDefinitions,
+		// The role definition first, then the context every subagent shares with
+		// the run that spawned it: environment, project memory, skills. The memory
+		// is the same `memory.content` the session prompt carries — read through
+		// the gated loader above, never re-read here. No output style and no
+		// language line: a subagent's output is a report to its parent, so a voice
+		// instruction belongs to the parent.
+		systemPromptFor: (definition) =>
+			[
+				agentSystemPrompt(definition),
+				buildSubagentContext({
+					cwd,
+					platform: process.platform,
+					isTTY: process.stdout.isTTY ?? false,
+					memory: memory.content,
+					skills: skillsBlock,
+				}),
+			]
+				.filter(Boolean)
+				.join("\n\n"),
 		store: () => store,
 		registry: subagentRegistry,
 		permissionMode: () => effectiveMode,
@@ -747,7 +769,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			memory: memory.content,
 			language: settings.language,
 			outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
-			skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
+			skills: skillsBlock,
 		}),
 		tools: allTools,
 		store,

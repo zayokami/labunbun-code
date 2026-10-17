@@ -1,10 +1,11 @@
 /**
- * Memory-file loading (LABUNBUN.md / AGENTS.md).
+ * Memory-file loading (LABUNBUN.md / AGENTS.md / CLAUDE.md).
  *
  * Load order (later = higher priority, matching the reference design):
  *   1. user memory: ~/.labunbun/MEMORY.md, then ~/.labunbun/rules/*.md
  *   2. project walk, rendered root → cwd (nearest last): at each level
- *      LABUNBUN.md if present else AGENTS.md (nearest wins per level), plus
+ *      LABUNBUN.md if present, else AGENTS.md, else CLAUDE.md (nearest wins
+ *      per level; never more than one of the three), plus
  *      .labunbun/rules/*.md
  *   3. `@path` includes expanded recursively with cycle guarding
  *
@@ -221,9 +222,9 @@ function includeStaysWithinRealRoot(includePath: string, root: string): boolean 
  * `root` pins the containment boundary to the directory of the file that
  * originally referenced an include (defaults to `baseDir` on the initial
  * call, then threaded unchanged through recursion) — an untrusted
- * AGENTS.md/LABUNBUN.md pulled in from a cloned repo can't use `@../../../
- * etc/passwd` or a `\\host\share` UNC path to read or trigger network
- * access outside its own directory tree.
+ * AGENTS.md/LABUNBUN.md/CLAUDE.md pulled in from a cloned repo can't use
+ * `@../../../etc/passwd` or a `\\host\share` UNC path to read or trigger
+ * network access outside its own directory tree.
  */
 export function expandIncludes(
 	content: string,
@@ -267,17 +268,25 @@ function collectRules(rulesDir: string): Array<{ path: string; content: string }
 	return out;
 }
 
-/** Collect memory files for one directory level: LABUNBUN.md else AGENTS.md + rules/. */
+/**
+ * Collect memory files for one directory level: the first of
+ * LABUNBUN.md > AGENTS.md > CLAUDE.md that exists, plus rules/.
+ *
+ * Exactly one of the three is read per level — CLAUDE.md is the last
+ * fallback, not an additional document — because the three are alternative
+ * spellings of the same standing instructions. The trust gate, `@include`
+ * expansion and budget all live around this collector, so the fallback
+ * inherits them by construction in both `loadMemoryFiles` and
+ * `withheldProjectMemoryFiles`.
+ */
 function collectLevel(dir: string): Array<{ path: string; content: string }> {
 	const out: Array<{ path: string; content: string }> = [];
-	const labunbunPath = join(dir, "LABUNBUN.md");
-	const agentsPath = join(dir, "AGENTS.md");
-	const mainContent = readIfExists(labunbunPath);
-	if (mainContent !== null) {
-		out.push({ path: labunbunPath, content: mainContent });
-	} else {
-		const agentsContent = readIfExists(agentsPath);
-		if (agentsContent !== null) out.push({ path: agentsPath, content: agentsContent });
+	const candidates = [join(dir, "LABUNBUN.md"), join(dir, "AGENTS.md"), join(dir, "CLAUDE.md")];
+	for (const path of candidates) {
+		const content = readIfExists(path);
+		if (content === null) continue;
+		out.push({ path, content });
+		break;
 	}
 
 	out.push(...collectRules(join(dir, ".labunbun", "rules")));

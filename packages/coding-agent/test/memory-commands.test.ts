@@ -243,6 +243,68 @@ describe("loadMemoryFiles", () => {
 	});
 });
 
+/**
+ * CLAUDE.md is the third and last spelling of a directory's standing
+ * instructions: a checkout imported from a Claude Code setup may have only
+ * that file. It is a fallback, not an addition — the three names are
+ * alternatives, so exactly one of them is read per level.
+ */
+describe("the CLAUDE.md fallback", () => {
+	/** The four fixtures below share one shape: a throwaway home and cwd. */
+	function fixture(prefix: string): { home: string; cwd: string } {
+		return { home: tempDir(`${prefix}-home-`), cwd: tempDir(`${prefix}-cwd-`) };
+	}
+
+	test("loads when neither LABUNBUN.md nor AGENTS.md exists", () => {
+		const { home, cwd } = fixture("lbb-memclaude");
+		writeFileSync(join(cwd, "CLAUDE.md"), "CLAUDE-FALLBACK-MARKER\n");
+		approveProjectDefinitions(cwd, ["memory"], home);
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).toContain("CLAUDE-FALLBACK-MARKER");
+		expect(result.files).toContain(join(cwd, "CLAUDE.md"));
+	});
+
+	test("LABUNBUN.md beats CLAUDE.md at the same level", () => {
+		const { home, cwd } = fixture("lbb-memclaude-labunbun");
+		writeFileSync(join(cwd, "LABUNBUN.md"), "LABUNBUN-WINS\n");
+		writeFileSync(join(cwd, "CLAUDE.md"), "CLAUDE-SHOULD-NOT-LOAD\n");
+		approveProjectDefinitions(cwd, ["memory"], home);
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).toContain("LABUNBUN-WINS");
+		// Never two of the three at one level: the loser is not merely lower, it
+		// is absent.
+		expect(result.content).not.toContain("CLAUDE-SHOULD-NOT-LOAD");
+		expect(result.files).not.toContain(join(cwd, "CLAUDE.md"));
+	});
+
+	test("AGENTS.md beats CLAUDE.md at the same level", () => {
+		const { home, cwd } = fixture("lbb-memclaude-agents");
+		writeFileSync(join(cwd, "AGENTS.md"), "AGENTS-WINS\n");
+		writeFileSync(join(cwd, "CLAUDE.md"), "CLAUDE-SHOULD-NOT-LOAD\n");
+		approveProjectDefinitions(cwd, ["memory"], home);
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).toContain("AGENTS-WINS");
+		expect(result.content).not.toContain("CLAUDE-SHOULD-NOT-LOAD");
+		expect(result.files).not.toContain(join(cwd, "CLAUDE.md"));
+	});
+
+	test("an untrusted project withholds CLAUDE.md and lists it by path", () => {
+		const { home, cwd } = fixture("lbb-memclaude-gate");
+		writeFileSync(join(cwd, "CLAUDE.md"), "CLAUDE-PROJECT-SECRET\n");
+
+		// No approval: the whole walk is behind the gate, so the fallback file is
+		// neither read into the prompt nor named inside it.
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).not.toContain("CLAUDE-PROJECT-SECRET");
+		expect(result.files).not.toContain(join(cwd, "CLAUDE.md"));
+		// What an approval would load is still named — by path, contents unread.
+		expect(withheldProjectMemoryFiles(cwd, home)).toContain(join(cwd, "CLAUDE.md"));
+	});
+});
+
 describe("selectMemoryContent", () => {
 	test("the separator is charged before the next file, so no empty partial is reported", () => {
 		// 5 chars of content, then a 7-char separator leaves exactly 0 for `b`:
@@ -328,12 +390,46 @@ describe("appendMemoryNoteAt", () => {
 		expect(() => appendMemoryNoteAt(home, "note")).toThrow(/not a directory/);
 	});
 
-	test("the # shortcut writes through the injected home, not homedir()", () => {
-		// The write core is covered above; this is the one wiring fact the unit
-		// tests cannot see — the REPL passes the home the session was given.
+	test("the note is visible to the next load, which is what the prompt refresh reads", () => {
+		const home = tempDir("lbb-memnote3-");
+		const cwd = tempDir("lbb-memnote3-cwd-");
+		appendMemoryNoteAt(home, "live note");
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).toContain("- live note");
+		expect(result.files).toContain(userMemoryPath(home));
+	});
+
+	test("the # shortcut writes through the injected home and refreshes the live prompt", () => {
+		// The write core is covered above; this is the wiring the unit tests
+		// cannot see — the REPL passes the home the session was given, and the
+		// same handler hands a freshly loaded memory block to the live session.
+		//
+		// A source check is acceptable here: the handler is a closure inside the
+		// REPL component, and the pieces it touches (writer, gated loader,
+		// session) have no shared runtime object a test could call. Slicing from
+		// the handler's option name to the next option keeps the assertions about
+		// that handler rather than about the file at large.
 		const source = readFileSync(join(import.meta.dir, "..", "src", "interactive.ts"), "utf8");
 		expect(source).toContain("appendMemoryNoteAt(home, note)");
 		expect(source).not.toContain('join(homedir(), ".labunbun", "MEMORY.md")');
+
+		const start = source.indexOf("onMemoryShortcut:");
+		const end = source.indexOf("onCommand:", start);
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const handler = source.slice(start, end);
+		const appendAt = handler.indexOf("appendMemoryNoteAt(home, note)");
+		const loadAt = handler.indexOf("loadMemoryFiles(cwd, home).content");
+		const setAt = handler.indexOf("setSystemPrompt(buildPrompt(");
+		const sayAt = handler.indexOf("Remembered:");
+		expect(appendAt).toBeGreaterThan(-1);
+		// The note is re-read through the same gated loader startup used and put
+		// on the live session's prompt before the user is told it was remembered:
+		// a note that waits for the next process is not what "Remembered" says.
+		expect(loadAt).toBeGreaterThan(appendAt);
+		expect(setAt).toBeGreaterThan(loadAt);
+		expect(sayAt).toBeGreaterThan(setAt);
 	});
 });
 

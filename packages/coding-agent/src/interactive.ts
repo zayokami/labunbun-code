@@ -319,13 +319,14 @@ import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts
 import { type SubagentHandle, SubagentRegistry, subagentStatus } from "./subagent-registry.ts";
 import {
 	type AgentDefinition,
+	agentSystemPrompt,
 	createSubagentTools,
 	GENERAL_PURPOSE,
 	loadAgentDefinitions,
 	type SubagentControl,
 	withheldProjectAgents,
 } from "./subagents.ts";
-import { buildSystemPrompt } from "./system-prompt.ts";
+import { buildSubagentContext, buildSystemPrompt } from "./system-prompt.ts";
 import { createTaskNudges } from "./task-nudges.ts";
 import { bindTaskStore, restoreTasks, saveTasks } from "./task-snapshot.ts";
 import { formatTaskTree } from "./task-tree.ts";
@@ -746,11 +747,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	let handle: ReplAppHandle | null = null;
 
-	// Memory files (LABUNBUN.md / AGENTS.md), part of the system prompt. `home` is
-	// passed rather than left to `homedir()`: the caller may have named one, and a
-	// home the code reads but does not honour is how a test run ends up reading
-	// the operator's own memory files.
+	// Memory files (LABUNBUN.md / AGENTS.md / CLAUDE.md), part of the system
+	// prompt. `home` is passed rather than left to `homedir()`: the caller may
+	// have named one, and a home the code reads but does not honour is how a test
+	// run ends up reading the operator's own memory files.
 	const memory = loadMemoryFiles(cwd, home);
+	// The memory text the live session and its subagents see. The `#` shortcut
+	// replaces this after a successful append, so a note reaches the next request
+	// (and any subagent spawned afterwards) without a restart; a subagent's
+	// `systemPromptFor` reads it at spawn time.
+	let memoryText = memory.content;
 	markStartup("memory loaded");
 
 	// ---- model fallback chain ----
@@ -1157,6 +1163,26 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// evaluation to the spawn, which cannot precede that line.
 		allTools: () => [...tools, skillTool, ...mcpConnections.flatMap((c) => c.tools)],
 		definitions: () => agentDefinitions,
+		// The role definition first, then the context every subagent shares with
+		// the session that spawned it: environment, project memory, skills. Memory
+		// is read through `memoryText`, the live value the `#` handler refreshes,
+		// so a note appended before a spawn reaches that subagent. `skillsBlock` is
+		// the startup discovery block, read through the arrow like `skillTool`
+		// above. No output style and no language line: a subagent's output is a
+		// report to its parent, so a voice instruction belongs to the parent.
+		systemPromptFor: (definition) =>
+			[
+				agentSystemPrompt(definition),
+				buildSubagentContext({
+					cwd,
+					platform: process.platform,
+					isTTY: true,
+					memory: memoryText,
+					skills: skillsBlock,
+				}),
+			]
+				.filter(Boolean)
+				.join("\n\n"),
 		store: () => store,
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
 		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
@@ -1300,18 +1326,30 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// the refresh wiring above.
 	mcpToolsSeededAtBirth = mcpConnections.length > 0;
 
-	const systemPrompt = buildSystemPrompt(allTools, {
-		cwd,
-		platform: process.platform,
-		isTTY: true,
-		memory: memory.content,
-		language: settings.language,
-		// The style files are loaded through the same trust gate as the rest of
-		// the project tier; `settings.outputStyle` is what selects one, and an
-		// unset or unknown name contributes nothing (`output-styles.ts`).
-		outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
-		skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
-	});
+	// The skill discovery block is built once at startup and shared by the main
+	// prompt and by every subagent's context block, so the two see one list.
+	const skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
+	/**
+	 * The system prompt for a given memory text. Built once at startup, then
+	 * rebuilt by the `#` shortcut after it re-reads the memory files: the note
+	 * has to be in the next request, not the next process, because the output
+	 * already tells the user it was remembered. The options are otherwise the
+	 * same as the startup build, so only the memory section differs.
+	 */
+	const buildPrompt = (currentMemory: string) =>
+		buildSystemPrompt(allTools, {
+			cwd,
+			platform: process.platform,
+			isTTY: true,
+			memory: currentMemory,
+			language: settings.language,
+			// The style files are loaded through the same trust gate as the rest of
+			// the project tier; `settings.outputStyle` is what selects one, and an
+			// unset or unknown name contributes nothing (`output-styles.ts`).
+			outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
+			skills: skillsBlock,
+		});
+	const systemPrompt = buildPrompt(memoryText);
 
 	/**
 	 * The ledger writer: one entry per finished call, the /rewind snapshots, and
@@ -2069,6 +2107,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if (!note) return;
 			try {
 				appendMemoryNoteAt(home, note);
+				// Rebuild the prompt now that the note is on disk: the line below says
+				// it was remembered, and a model that only sees it after a restart
+				// would make that a claim about the next process rather than the next
+				// request. The re-read is the same gated loader startup used, so a
+				// project memory file cannot enter through this path without trust,
+				// and the result becomes the live value subagents read at spawn.
+				memoryText = loadMemoryFiles(cwd, home).content;
+				// Before the session exists nothing has a prompt to swap; the note is
+				// still on disk and the startup build sees it.
+				sessionRef?.setSystemPrompt(buildPrompt(memoryText));
 				pushInfo(handle, `Remembered: ${note}`);
 			} catch (error) {
 				// A refused or failed write is shown rather than reported as saved.
@@ -4057,7 +4105,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						ctx.handle,
 						withheld > 0
 							? `No project memory is loaded — ${withheld} project memory file${withheld === 1 ? " is" : "s are"} held back by the trust gate. /agents approve, then restart.`
-							: "No project memory file found above this directory (LABUNBUN.md, AGENTS.md, or .labunbun/rules). /init can scaffold one.",
+							: "No project memory file found above this directory (LABUNBUN.md, AGENTS.md, CLAUDE.md, or .labunbun/rules). /init can scaffold one.",
 					);
 					return true;
 				}

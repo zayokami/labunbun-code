@@ -30,7 +30,12 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { localDayKey } from "@labunbun/agent";
-import { buildSystemPrompt, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, type SystemPromptContext } from "../src/system-prompt.ts";
+import {
+	buildSubagentContext,
+	buildSystemPrompt,
+	SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+	type SystemPromptContext,
+} from "../src/system-prompt.ts";
 
 const ORIGINAL_TZ = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -229,6 +234,68 @@ describe("the language setting", () => {
 		// itself; the configured value is the more specific one, so the generic
 		// line is gone, not merely preceded.
 		expect(prompt).not.toContain("the user's language");
+	});
+});
+
+/**
+ * The subagent context block: what a worker shares with the session that
+ * spawned it. It is deliberately not the session prompt, so the omissions are
+ * as load-bearing as the inclusions — a worker that answered in the parent's
+ * voice, or inherited the parent's "do the task asked for" contract as if it
+ * were its own role, would be reading a second definition of its job.
+ */
+describe("the subagent context block", () => {
+	const now = Date.UTC(2026, 8, 27, 12, 0);
+	const SUB = { cwd: BASE.cwd, platform: BASE.platform, isTTY: BASE.isTTY, now };
+
+	test("carries the same # Environment section as the main prompt", () => {
+		const main = buildSystemPrompt([], { ...BASE, now });
+		const start = main.indexOf("# Environment");
+		const end = main.indexOf(`\n\n${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}`);
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		// Byte-identical to the section the parent gets: one wording, one date.
+		expect(buildSubagentContext(SUB)).toBe(main.slice(start, end));
+		const context = buildSubagentContext(SUB);
+		expect(context).toContain(`- Working directory: ${BASE.cwd}`);
+		expect(context).toContain(`- Platform: ${BASE.platform}`);
+		expect(context).toContain(`- Today's date: ${localDayKey(now)}`);
+	});
+
+	test("adds memory and skills after the environment, in that order", () => {
+		const context = buildSubagentContext({ ...SUB, memory: "MEMORY-MARKER", skills: "SKILLS-MARKER" });
+		expect(context).toContain("# Project memory\nMEMORY-MARKER");
+		expect(context).toContain("SKILLS-MARKER");
+		expect(context.indexOf("# Environment")).toBeLessThan(context.indexOf("# Project memory"));
+		expect(context.indexOf("# Project memory")).toBeLessThan(context.indexOf("SKILLS-MARKER"));
+		// The role definition is the caller's to prepend; this block never
+		// re-states it and always starts with where the worker is running.
+		expect(context.startsWith("# Environment")).toBe(true);
+	});
+
+	test("leaves out the parent's voice, harness contract, tool guidance and style", () => {
+		const context = buildSubagentContext({ ...SUB, memory: "MEMORY-MARKER", skills: "SKILLS-MARKER" });
+		for (const omitted of [
+			"# Attitude",
+			"# Context",
+			"# Doing tasks",
+			"# Communication",
+			"# Tool guidance",
+			"# Output style",
+			"Answer in",
+			SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+		]) {
+			expect(context, `the subagent context must not carry "${omitted}"`).not.toContain(omitted);
+		}
+	});
+
+	test("empty memory and skills produce no headers and no empty sections", () => {
+		const plain = buildSubagentContext(SUB);
+		// Whitespace is what an empty file loads as; a heading over nothing would
+		// be a section the model is told to read and finds empty.
+		expect(buildSubagentContext({ ...SUB, memory: "  \n", skills: "\n\t" })).toBe(plain);
+		expect(plain).not.toContain("# Project memory");
+		expect(plain).not.toContain("\n\n\n");
 	});
 });
 

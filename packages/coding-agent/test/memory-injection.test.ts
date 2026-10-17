@@ -1,9 +1,9 @@
 /**
  * Memory files must reach the model on every request, not only the first.
  *
- * LABUNBUN.md / AGENTS.md / `~/.labunbun/MEMORY.md` are the user's standing
- * instructions for a project — the house rules the agent is supposed to be
- * working under. If a conversation stops carrying them, the rules quietly stop
+ * LABUNBUN.md / AGENTS.md / CLAUDE.md / `~/.labunbun/MEMORY.md` are the user's
+ * standing instructions for a project — the house rules the agent is supposed
+ * to be working under. If a conversation stops carrying them, the rules quietly stop
  * applying mid-session, with nothing on screen to say so: the one failure mode
  * the user cannot see and would not think to check.
  *
