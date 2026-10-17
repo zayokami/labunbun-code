@@ -291,3 +291,53 @@ describe("a timed-out Bash call (real spawn)", () => {
 		expect(result.isError).toBe(true);
 	}, 15_000);
 });
+
+describe("the timeout field serves both modes", () => {
+	test("run_in_background passes it to the manager as the lifetime", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-handoff-"));
+		const seen: Array<number | undefined> = [];
+		// The manager's own copy is what the timer reads; this test owns the
+		// seam between the tool's input and that copy, and a real shell would
+		// only add a process whose timing the assertion does not read.
+		const manager = {
+			start: async (command: string, shellCwd: string, _sandbox: unknown, timeoutMs?: number) => {
+				seen.push(timeoutMs);
+				return {
+					id: "shell_fake",
+					command,
+					cwd: shellCwd,
+					startTime: Date.now(),
+					outputFile: join(shellCwd, "fake.log"),
+					status: "running" as const,
+				};
+			},
+		} as unknown as BackgroundShellManager;
+		const tool = createBashTool(cwd, defaultOperations(), manager);
+
+		const result = await tool.call({ command: "echo hi", run_in_background: true, timeout: 1_234 }, toolCtx(cwd));
+
+		expect(result.isError).toBeFalsy();
+		expect(seen).toEqual([1_234]);
+	});
+
+	test("a foreground wait stays at its 600000 ceiling", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-handoff-"));
+		const base = defaultOperations();
+		let seen: number | undefined;
+		const ops = {
+			...base,
+			exec: async (request: { timeoutMs: number }) => {
+				seen = request.timeoutMs;
+				return { stdout: "", stderr: "", exitCode: 0, killed: false, sandboxBackend: "native" as const };
+			},
+		} as typeof base;
+		const tool = createBashTool(cwd, ops);
+
+		// The schema admits the background ceiling. The foreground branch must
+		// apply its own documented maximum rather than passing 2 hours on.
+		const result = await tool.call({ command: "echo hi", timeout: 7_200_000 }, toolCtx(cwd));
+
+		expect(result.isError).toBeFalsy();
+		expect(seen).toBe(600_000);
+	});
+});

@@ -28,7 +28,7 @@ The tool rejects a `bash.exe` on PATH when it is the WSL launcher of Windows its
 
 A candidate must also be a file. A directory named `bash.exe` is not a shell.
 
-Bash inputs are `command`, `timeout` in milliseconds, `description`, and `run_in_background`. The timeout default is 120000, the minimum is one and the maximum is 600000. The tool is not read-only and not concurrency safe. Its `overflow` mode is `"spill"`, because command output comes once. A build that fails ends its report with the error. A head-only cut throws that part away.
+Bash inputs are `command`, `timeout` in milliseconds, `description`, and `run_in_background`. The timeout minimum is one. A foreground wait defaults to 120000 and is clamped to 600000. With `run_in_background` the same field is the shell's lifetime: default 1800000, clamped to 7200000 by the manager. The schema admits the larger ceiling so one field can serve both modes; the foreground branch applies its own clamp. The tool is not read-only and not concurrency safe. Its `overflow` mode is `"spill"`, because command output comes once. A build that fails ends its report with the error. A head-only cut throws that part away.
 
 The live preview pushes at most one update per 100 ms (`BASH_UPDATE_INTERVAL_MS`). The stream is a preview and not a transcript, because the full output arrives with the result either way. Ten updates a second look the same as every chunk. Without the limit, a command that prints thousands of lines a second drives one store update and one React render per line. The preview buffer keeps the last 30000 characters (`MAX_PREVIEW_CHARS`). It is not the result.
 

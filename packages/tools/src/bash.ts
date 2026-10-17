@@ -39,9 +39,16 @@ export function createBashTool(
 				.number()
 				.int()
 				.min(1)
-				.max(600_000)
+				// The ceiling is the background lifetime's; a foreground call is
+				// clamped to its own 600000 below, so one schema field can serve
+				// both modes without a conditional that only some callers obey.
+				.max(7_200_000)
 				.optional()
-				.describe("Timeout in ms before a foreground command moves to the background (default 120000, max 600000)"),
+				.describe(
+					"Timeout in ms. Foreground: how long to wait before the command moves to the background " +
+						"(default 120000, max 600000). run_in_background: the shell's lifetime " +
+						"(default 1800000, max 7200000).",
+				),
 			description: z.string().optional().describe("One-line description of what this does"),
 			run_in_background: z.boolean().optional().describe("Start without waiting; poll via BashOutput"),
 		}),
@@ -92,7 +99,7 @@ export function createBashTool(
 				// that could not be established — and the message names the
 				// constraint rather than the mechanism.
 				try {
-					const shell = await background.start(input.command, cwd, policy);
+					const shell = await background.start(input.command, cwd, policy, input.timeout);
 					return {
 						content: [
 							textContent(
@@ -109,7 +116,9 @@ export function createBashTool(
 				}
 			}
 
-			const timeoutMs = input.timeout ?? 120_000;
+			// The schema admits the background ceiling so one field can name a
+			// lifetime; a foreground wait stays at its own documented maximum.
+			const timeoutMs = Math.min(input.timeout ?? 120_000, 600_000);
 			const buffer = createTailBuffer(MAX_PREVIEW_CHARS);
 			let lastUpdateAt = 0;
 			// Set the moment a timed-out command is adopted. Chunks after that are the
