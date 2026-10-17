@@ -3,6 +3,7 @@ import type { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { caseInsensitivePaths } from "@labunbun/tools";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { builtInCommands, completeCommands, findCommand } from "../src/commands.ts";
 import {
@@ -13,6 +14,7 @@ import {
 	shortenHome,
 } from "../src/interactive.ts";
 import {
+	appendMemoryNoteAt,
 	buildTruncationNotice,
 	expandIncludes,
 	loadMemoryFiles,
@@ -92,6 +94,27 @@ describe("expandIncludes", () => {
 		writeFileSync(join(dir, "sub", "inner.md"), "INNER CONTENT");
 		const expanded = expandIncludes("@sub/inner.md", dir);
 		expect(expanded).toContain("INNER CONTENT");
+	});
+
+	/**
+	 * Case folding is a property of the filesystem, not of the string compare.
+	 * On a case-sensitive volume `root` and `ROOT` are two directories, and a
+	 * path through the second is outside the containment root however similar
+	 * it looks. Windows and macOS cannot stage this fixture (there the two
+	 * names are one directory), so the case is skipped there and carried by the
+	 * Linux CI job.
+	 */
+	test.skipIf(caseInsensitivePaths)("a case-variant sibling outside the root is rejected", () => {
+		const base = mkdtempSync(join(tmpdir(), "lbb-memcase-"));
+		const root = join(base, "root");
+		const outside = join(base, "ROOT");
+		mkdirSync(root, { recursive: true });
+		mkdirSync(outside, { recursive: true });
+		writeFileSync(join(outside, "secret.md"), "CASE SECRET");
+
+		const expanded = expandIncludes("@../ROOT/secret.md", root);
+		expect(expanded).toContain("include outside allowed directory");
+		expect(expanded).not.toContain("CASE SECRET");
 	});
 });
 
@@ -288,6 +311,29 @@ describe("the completeness note", () => {
 		const notice = buildTruncationNotice([], [join(cwd, "AGENTS.md")], cwd, home);
 		expect(notice).toContain("source completeness note");
 		expect(notice).toContain("not an instruction to read those files");
+	});
+});
+
+describe("appendMemoryNoteAt", () => {
+	test("creates the directory on first use and appends the same bytes each time", () => {
+		const home = tempDir("lbb-memnote-");
+		appendMemoryNoteAt(home, "first note");
+		appendMemoryNoteAt(home, "second note");
+		expect(readFileSync(userMemoryPath(home), "utf8")).toBe("- first note\n- second note\n");
+	});
+
+	test("refuses a .labunbun path that is not a directory", () => {
+		const home = tempDir("lbb-memnote2-");
+		writeFileSync(join(home, ".labunbun"), "not a directory");
+		expect(() => appendMemoryNoteAt(home, "note")).toThrow(/not a directory/);
+	});
+
+	test("the # shortcut writes through the injected home, not homedir()", () => {
+		// The write core is covered above; this is the one wiring fact the unit
+		// tests cannot see — the REPL passes the home the session was given.
+		const source = readFileSync(join(import.meta.dir, "..", "src", "interactive.ts"), "utf8");
+		expect(source).toContain("appendMemoryNoteAt(home, note)");
+		expect(source).not.toContain('join(homedir(), ".labunbun", "MEMORY.md")');
 	});
 });
 

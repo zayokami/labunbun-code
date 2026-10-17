@@ -4,7 +4,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import {
@@ -225,7 +225,13 @@ import {
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { createMcpToolRefreshHandler } from "./mcp-tool-refresh.ts";
-import { loadMemoryFiles, userMemoryPath, userRulesDir, withheldProjectMemoryFiles } from "./memory.ts";
+import {
+	appendMemoryNoteAt,
+	loadMemoryFiles,
+	userMemoryPath,
+	userRulesDir,
+	withheldProjectMemoryFiles,
+} from "./memory.ts";
 import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
 import {
@@ -2054,8 +2060,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		onMidRunText: (text) => beetleSurface.handleMention(text),
 		onMemoryShortcut: (note) => {
 			if (!note) return;
-			appendMemoryNote(note);
-			pushInfo(handle, `Remembered: ${note}`);
+			try {
+				appendMemoryNoteAt(home, note);
+				pushInfo(handle, `Remembered: ${note}`);
+			} catch (error) {
+				// A refused or failed write is shown rather than reported as saved.
+				pushInfo(handle, `Could not remember: ${error instanceof Error ? error.message : String(error)}`);
+			}
 		},
 		onCommand: (text) =>
 			handleCommandDispatch(text, {
@@ -2603,16 +2614,6 @@ function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined):
 function reportHookErrors(handle: ReplAppHandle | null, messages: string[]): void {
 	for (const message of messages) {
 		pushInfo(handle, `Warning: ${message}`);
-	}
-}
-
-function appendMemoryNote(note: string): void {
-	const path = join(homedir(), ".labunbun", "MEMORY.md");
-	try {
-		mkdirSync(dirname(path), { recursive: true });
-		appendFileSync(path, `- ${note}\n`, "utf8");
-	} catch {
-		// best-effort
 	}
 }
 

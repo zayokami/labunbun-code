@@ -27,9 +27,21 @@
  * The user tier is not gated: it is the user's own, read from the same home
  * whatever the cwd.
  */
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import {
+	appendFileSync,
+	closeSync,
+	constants,
+	lstatSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { caseInsensitivePaths } from "@labunbun/tools";
 import { isProjectTierTrusted } from "./project-trust.ts";
 
 /** The user's own memory file, `<home>/.labunbun/MEMORY.md`. */
@@ -96,9 +108,76 @@ function readIfExists(path: string): string | null {
 	}
 }
 
-/** Normalize for cross-platform, case-insensitive path comparison. */
+/** `O_NOFOLLOW` where the platform defines one; Windows has no such flag, and 0 is the flagless value. */
+const O_NOFOLLOW_OR_ZERO: number = constants.O_NOFOLLOW ?? 0;
+
+/**
+ * Append one `- note` line to `<home>/.labunbun/MEMORY.md` for the `#`
+ * shortcut, refusing every name that is not a plain file.
+ *
+ * The shortcut writes into the one document the loader reads as the user's
+ * own memory, so a `MEMORY.md` (or `.labunbun`) swapped for a symlink would
+ * make it write wherever the link points — including outside the home
+ * directory, with the content of the user's note. The target and its
+ * directory are checked with `lstat`, which describes the name and not what
+ * it points at, and the POSIX append repeats the refusal at the syscall with
+ * `O_NOFOLLOW`; Windows defines no such flag, so there the `lstat` guard is
+ * the defense. A refusal throws rather than being swallowed: a note the user
+ * believes was saved and was not is worse than an error line.
+ */
+export function appendMemoryNoteAt(home: string, note: string): void {
+	const dir = join(home, ".labunbun");
+	try {
+		const dirStats = lstatSync(dir);
+		if (dirStats.isSymbolicLink()) {
+			throw new Error(`Refusing to write a memory note: ${dir} is a symbolic link.`);
+		}
+		if (!dirStats.isDirectory()) {
+			throw new Error(`Refusing to write a memory note: ${dir} is not a directory.`);
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		mkdirSync(dir, { recursive: true });
+	}
+
+	const path = join(dir, "MEMORY.md");
+	try {
+		const stats = lstatSync(path);
+		if (stats.isSymbolicLink()) {
+			throw new Error(`Refusing to write a memory note: ${path} is a symbolic link.`);
+		}
+		if (!stats.isFile()) {
+			throw new Error(`Refusing to write a memory note: ${path} is not a regular file.`);
+		}
+	} catch (error) {
+		// A file that is not there yet is the ordinary creation case.
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+
+	const line = `- ${note}\n`;
+	if (O_NOFOLLOW_OR_ZERO === 0) {
+		// Windows: no `O_NOFOLLOW` to pass, and its `open` does not take the
+		// numeric flag set at all (Bun answers EINVAL). The `lstat` guard above
+		// is the defense there; the write itself is the plain append.
+		appendFileSync(path, line, "utf8");
+		return;
+	}
+	const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | O_NOFOLLOW_OR_ZERO, 0o666);
+	try {
+		writeFileSync(fd, line, "utf8");
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * Normalize for path comparison. Windows and macOS compare case-insensitively
+ * by default and are folded; a case-sensitive filesystem keeps case, so a
+ * differently-cased directory is a different directory rather than the root.
+ */
 function normalizeForCompare(path: string): string {
-	return path.replace(/\\/g, "/").toLowerCase();
+	const slashed = path.replace(/\\/g, "/");
+	return caseInsensitivePaths ? slashed.toLowerCase() : slashed;
 }
 
 /** Is `target` equal to or nested inside `root`? Both must already be resolved/absolute. */
@@ -106,6 +185,34 @@ function isWithinRoot(target: string, root: string): boolean {
 	const normalizedTarget = normalizeForCompare(target);
 	const normalizedRoot = normalizeForCompare(root).replace(/\/$/, "");
 	return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}/`);
+}
+
+/**
+ * `realpathSync` or `null` when the path cannot be resolved (missing file, a
+ * dangling link, a parent that is not a directory). A missing target reads
+ * nothing, so the caller's "not found" answer is already safe.
+ */
+function realPathOrNull(path: string): string | null {
+	try {
+		return realpathSync(path);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Does the candidate still sit inside the root once every link is resolved?
+ *
+ * The lexical test in `expandIncludes` sees `project/link/secret.md` as inside
+ * `project/` even when `link` is a directory symlink to somewhere else. This
+ * resolves both sides and compares the real locations, so an intermediate
+ * link that escapes the root is refused before `readIfExists` touches it.
+ */
+function includeStaysWithinRealRoot(includePath: string, root: string): boolean {
+	const realTarget = realPathOrNull(includePath);
+	if (realTarget === null) return true;
+	const realRoot = realPathOrNull(root) ?? resolve(root);
+	return isWithinRoot(realTarget, realRoot);
 }
 
 /**
@@ -127,7 +234,9 @@ export function expandIncludes(
 	const resolvedRoot = resolve(root);
 	return content.replace(/^@([\w./\\-]+)\s*$/gm, (_match, rawPath: string) => {
 		const includePath = resolve(baseDir, rawPath);
-		if (!isWithinRoot(includePath, resolvedRoot)) return `[include outside allowed directory: ${rawPath}]`;
+		if (!isWithinRoot(includePath, resolvedRoot) || !includeStaysWithinRealRoot(includePath, resolvedRoot)) {
+			return `[include outside allowed directory: ${rawPath}]`;
+		}
 		if (seen.has(includePath)) return `[circular include: ${rawPath}]`;
 		if (seen.size > MAX_INCLUDE_DEPTH * 10) return "[include depth exceeded]";
 		const text = readIfExists(includePath);
@@ -141,15 +250,19 @@ export function expandIncludes(
 function collectRules(rulesDir: string): Array<{ path: string; content: string }> {
 	const out: Array<{ path: string; content: string }> = [];
 	try {
-		if (existsSync(rulesDir)) {
-			for (const name of readdirSync(rulesDir).sort()) {
-				if (!name.endsWith(".md")) continue;
-				const content = readIfExists(join(rulesDir, name));
-				if (content !== null) out.push({ path: join(rulesDir, name), content });
-			}
+		// `lstat` describes the directory name itself. A rules directory swapped
+		// for a symlink or a junction would otherwise be followed and every `*.md`
+		// beyond the tree the walk reached would enter the prompt. A link or a
+		// non-directory collects nothing, the same answer as an absent directory.
+		const stats = lstatSync(rulesDir);
+		if (stats.isSymbolicLink() || !stats.isDirectory()) return out;
+		for (const name of readdirSync(rulesDir).sort()) {
+			if (!name.endsWith(".md")) continue;
+			const content = readIfExists(join(rulesDir, name));
+			if (content !== null) out.push({ path: join(rulesDir, name), content });
 		}
 	} catch {
-		// unreadable rules dir — skip
+		// missing or unreadable rules dir — skip
 	}
 	return out;
 }

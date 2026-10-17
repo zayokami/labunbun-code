@@ -15,10 +15,10 @@
  * one; the test names say which cases those are.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadMemoryFiles, userMemoryPath } from "../src/memory.ts";
+import { appendMemoryNoteAt, expandIncludes, loadMemoryFiles, userMemoryPath } from "../src/memory.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -119,4 +119,81 @@ describe("memory reads refuse links", () => {
 		expect(result.content).toBe("");
 		expect(result.files).toEqual([]);
 	});
+});
+
+describe("a rules directory is never followed through a link", () => {
+	test.skipIf(!canSymlinkDirs)(
+		"a linked rules directory contributes nothing (skipped where the platform forbids links)",
+		() => {
+			const { home } = userMemoryHome();
+			const outside = tempDir("lbb-memsym-rules-");
+			writeFileSync(join(outside, "secret.md"), "OUTSIDE RULE", "utf8");
+			symlinkSync(outside, join(home, ".labunbun", "rules"), process.platform === "win32" ? "junction" : "dir");
+
+			const result = loadMemoryFiles(tempDir("lbb-memsym-cwd-"), home);
+
+			expect(result.content).not.toContain("OUTSIDE RULE");
+			expect(result.files).toEqual([]);
+		},
+	);
+});
+
+describe("@include containment resolves links before reading", () => {
+	test.skipIf(!canSymlinkDirs)(
+		"an intermediate directory link that escapes the root is a placeholder (skipped where links are forbidden)",
+		() => {
+			const root = tempDir("lbb-memsym-inc-root-");
+			const outside = tempDir("lbb-memsym-inc-out-");
+			writeFileSync(join(outside, "secret.md"), "INCLUDE SECRET", "utf8");
+			symlinkSync(outside, join(root, "link"), process.platform === "win32" ? "junction" : "dir");
+
+			const expanded = expandIncludes("@link/secret.md", root);
+
+			expect(expanded).toContain("include outside allowed directory");
+			expect(expanded).not.toContain("INCLUDE SECRET");
+		},
+	);
+
+	test.skipIf(!canSymlinkFiles)(
+		"a direct file link that escapes the root is a placeholder (skipped where Windows forbids symlinks)",
+		() => {
+			const root = tempDir("lbb-memsym-inc2-");
+			const outside = tempDir("lbb-memsym-inc2-out-");
+			writeFileSync(join(outside, "secret.md"), "INCLUDE SECRET", "utf8");
+			symlinkSync(join(outside, "secret.md"), join(root, "linked.md"), "file");
+
+			const expanded = expandIncludes("@linked.md", root);
+
+			expect(expanded).toContain("include outside allowed directory");
+			expect(expanded).not.toContain("INCLUDE SECRET");
+		},
+	);
+});
+
+describe("the # note writer refuses links", () => {
+	test.skipIf(!canSymlinkFiles)(
+		"a symlinked MEMORY.md is refused and its target is untouched (skipped where Windows forbids symlinks)",
+		() => {
+			const { home, memory } = userMemoryHome();
+			const outside = tempDir("lbb-memsym-note-out-");
+			const target = join(outside, "target.md");
+			writeFileSync(target, "ORIGINAL\n", "utf8");
+			symlinkSync(target, memory, "file");
+
+			expect(() => appendMemoryNoteAt(home, "leak")).toThrow(/symbolic link/);
+			expect(readFileSync(target, "utf8")).toBe("ORIGINAL\n");
+		},
+	);
+
+	test.skipIf(!canSymlinkDirs)(
+		"a symlinked .labunbun directory is refused and nothing is created outside (skipped where links are forbidden)",
+		() => {
+			const home = tempDir("lbb-memsym-note2-home-");
+			const outside = tempDir("lbb-memsym-note2-out-");
+			symlinkSync(outside, join(home, ".labunbun"), process.platform === "win32" ? "junction" : "dir");
+
+			expect(() => appendMemoryNoteAt(home, "leak")).toThrow(/symbolic link/);
+			expect(existsSync(join(outside, "MEMORY.md"))).toBe(false);
+		},
+	);
 });
