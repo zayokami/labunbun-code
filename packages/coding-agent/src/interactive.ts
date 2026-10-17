@@ -1723,7 +1723,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		if (incomingPolicy) sessionRules.push(...sessionRulesFrom(incomingPolicy.rules));
 		const next = new AgentSession({
 			model: current?.model ?? startupModel,
-			systemPrompt,
+			// Rebuilt rather than the startup capture: `#` notes update the live
+			// memory, and the comment above promises the incoming session is told
+			// what the outgoing one was told.
+			systemPrompt: buildPrompt(memoryText),
 			tools: [...(current?.tools ?? allTools)],
 			store: loaded.store,
 			cwd,
