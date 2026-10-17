@@ -52,14 +52,19 @@ function makeHarness(): Harness {
 /**
  * The provider both seats can point at: one answers, one summarizes.
  *
- * The 24k window is the calibration, not a preference. The default threshold is
- * `max(window − output − 13k, 0.6·window)` — here `max(10k, 14.4k)` = 14.4k
+ * The 32k window is the calibration, not a preference. The default threshold is
+ * `max(window − output − 13k, 0.6·window)` — here `max(18k, 19.2k)` = 19.2k
  * tokens — which sits between what this harness carries before the first turn
  * (`~5k`: system prompt, tool schemas, the user prompt) and after one big Read
- * (`~21k`), so compaction fires exactly once, at a measurably reached moment,
- * with no `thresholdPercent` needed. That matters for the roles-only test: the
- * threshold knobs live under `settings.compaction`, and the case under test is
- * the one where that block does not exist.
+ * (`~23.6k`), so compaction fires exactly once, at a measurably reached moment,
+ * with no `thresholdPercent` needed. The rebuilt context after that summary is
+ * still the working set — the big result is the request being answered — and
+ * must stay under the hard limit (`window − 3k` = 29k) or the run refuses to
+ * send at all. A 24k window put the rebuilt context past that line and turned
+ * this seat-routing test into a test of the refusal; the larger window keeps
+ * the two questions apart. That matters for the roles-only test: the threshold
+ * knobs live under `settings.compaction`, and the case under test is the one
+ * where that block does not exist.
  */
 function roleProvider() {
 	return {
@@ -69,8 +74,8 @@ function roleProvider() {
 				baseUrl: "https://roleprov.invalid/v1",
 				apiKeyEnv: KEY_VAR,
 				models: [
-					{ id: "main", contextWindow: 24_000, maxOutputTokens: 1_000 },
-					{ id: "summarizer", contextWindow: 24_000, maxOutputTokens: 1_000 },
+					{ id: "main", contextWindow: 32_000, maxOutputTokens: 1_000 },
+					{ id: "summarizer", contextWindow: 32_000, maxOutputTokens: 1_000 },
 				],
 			},
 		],
@@ -178,7 +183,7 @@ describe("settings.roles in a -p run", () => {
 
 /**
  * The compaction alias, run for real: one tool result big enough to cross the
- * 24k window's default threshold, one summary, one resumed turn — and the
+ * 32k window's default threshold, one summary, one resumed turn — and the
  * model each of those requests went to. `[main, summarizer, main]` says the
  * middle request was a summary written by the summarizer seat; a run where the
  * seat was ignored reads `[main, main, main]`, because the manager falls back
