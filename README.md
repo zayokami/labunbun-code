@@ -140,6 +140,22 @@ Set `trimOldToolResults: false` to skip the first step. Use `/trim` to run the f
 
 The `compaction` settings change this behavior. Set `compaction.model` to choose the model that writes the summaries. Set `compaction.thresholdPercent` to compact at a percent of the window. Set `compaction.reserveTokens` to change the space that the trigger line keeps free. Set `compaction.enabled` to `false` to stop the automatic passes. The manual commands still work. `/autocompact` changes this setting from the prompt.
 
+### Memory files
+
+The tool reads memory from two tiers. The user tier is `~/.labunbun/MEMORY.md` and every `.md` file in `~/.labunbun/rules/`. The project tier is a walk from the working directory up to the root of the filesystem. At each directory the tool reads at most one of `LABUNBUN.md`, `AGENTS.md`, and `CLAUDE.md`, plus every `.md` file in `.labunbun/rules/`.
+
+The files are rendered from the root to the working directory, so the nearest file is last. The user tier comes first. The 40000-character budget is spent in the other order: the user tier first, then the project files from the working directory outward. A file that does not fit contributes its first part. Every farther file is left out. A note at the end names the files that were partly or not loaded.
+
+A memory file can include another file with a line of the form `@path`. The tool expands the include at that position. The included path must stay in the tree of the memory file where the include chain started. The tool reports a circular include, a missing include, and an include outside the tree.
+
+The project tier is behind the trust gate. The tool reads no project memory file, from any directory of the walk, until you approve this project with `/agents approve`. The tool prints the number of held-back files at startup. Restart the session after the approval.
+
+Type a line that starts with `#` to add a note to `~/.labunbun/MEMORY.md`. The tool appends the line, reads the memory files again, and updates the system prompt. The note applies from the next request, with no restart. This shortcut is in the terminal session only. A headless or ACP session reads the memory files once at startup.
+
+Use `/memory` to open `~/.labunbun/MEMORY.md` in your editor. Use `/memory rules` to open the rules directory. Use `/memory project` to open the nearest loaded project file. The tool uses `$VISUAL`, then `$EDITOR`. Without an editor, the tool prints the paths. Edits made this way need a restart. A `#` note is the exception.
+
+A subagent also receives the environment, the project memory, and the list of skills.
+
 ### Prompt cache
 
 A provider bills a prompt in two parts. The first part comes from the cache. The second part the provider reads again. The cache uses the start of the prompt as its key. Only an exact match is a hit.
@@ -195,6 +211,8 @@ The `Task` tool starts a subagent. The tool keeps the conversation of a finished
 Subagents use the permission dialog of the session. The dialog shows the subagent name. The `/subagents` command shows the subagent as `waiting` while the question is open. The `/tasks` command shows the session, its subagents, and its background shells as one tree.
 
 Put an agent definition in `~/.labunbun/agents/` or in `<project>/.labunbun/agents/`. The file name ends in `.md`. The file has a frontmatter block. The frontmatter key `name` gives the agent type. The frontmatter key `description` gives the text that the model reads. The frontmatter key `tools` gives a list of tool names. The frontmatter key `model` gives the model. The frontmatter key `maxTurns` gives a limit. The rest of the file is the system prompt of the subagent.
+
+The prompt of a subagent holds the environment, the project memory, and the list of skills. It is not a copy of the main prompt. The subagent does not get the output style or the language line, because its output is a report to the parent session.
 
 ### The four-agent band
 
@@ -309,6 +327,18 @@ The key `extends` names a built-in theme. That theme supplies each token that yo
 The `Theme` interface has the full token list. The interface is in `packages/tui/src/themes/tokens.ts`. Each token there describes what it colors.
 
 > **NOTE**: A broken theme file does not stop the session. Use `/doctor` to see which file failed and why.
+
+### Output styles
+
+An output style is a Markdown file that changes the voice of the session. Put your styles in `~/.labunbun/output-styles/`. Put the styles of one project in `<project>/.labunbun/output-styles/`. The file name without `.md` is the name of the style.
+
+The tool loads the user styles always. It loads the project styles only when this project is trusted. When a user style and a project style have the same name, the project style wins.
+
+Set `outputStyle` in the settings file to the name of a style. The tool adds the body of the file to the system prompt as the `# Output style` section. The section is an addition. It does not replace the instructions of the agent.
+
+A name that matches no file adds nothing and reports no error. Use `/doctor` to see the `Output style` row. The row warns when the name matches no loaded style.
+
+Set `language` in the settings file to set the language of the answers. The tool adds `Answer in <language>.` to the system prompt. The value is free text. Examples are `Chinese` and `zh-CN`.
 
 ### Editing in the terminal
 
@@ -568,6 +598,7 @@ Use these commands in the terminal.
 | `/todo` | Show the full task board: every task, its status, owner, blockers, and description. |
 | `/mcp [approve <name>\|prompts <server>\|prompt <server> <name>\|resources <server>\|resource <server> <uri>]` | List the MCP servers, approve one, or read a prompt or a resource. |
 | `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
+| `/memory [rules\|project]` | Open your memory files in your editor. Without an editor, print their paths. |
 | `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |
 | `/theme [name\|auto]` | Show the themes, or change the theme. |
 | `/vim [on\|off]` | Turn vim editing on or off. |
@@ -616,6 +647,7 @@ The server reports the `loadSession` capability. The editor can open a new sessi
 | `~/.labunbun/agents/` | Your agent definitions. |
 | `~/.labunbun/skills/` | Your skills. |
 | `~/.labunbun/themes/` | Your themes. |
+| `~/.labunbun/output-styles/` | Your output styles. |
 | `~/.labunbun/history.jsonl` | The prompts that you typed. Press ↑ to recall them. |
 | `~/.labunbun/projects/<dir>/` | The sessions, the MCP approvals, and the trust of one project. |
 | `<project>/.labunbun/settings.json` | The settings of this project. |
@@ -624,10 +656,13 @@ The server reports the `loadSession` capability. The editor can open a new sessi
 | `<project>/.labunbun/agents/` | The agent definitions of this project. |
 | `<project>/.labunbun/skills/` | The skills of this project. |
 | `<project>/.labunbun/themes/` | The themes of this project. |
+| `<project>/.labunbun/output-styles/` | The output styles of this project. Loaded after approval. |
 | `<project>/.mcp.json` | The MCP servers of this project. |
-| `<dir>/LABUNBUN.md` or `<dir>/AGENTS.md` | The project guide of one directory. |
+| `<dir>/LABUNBUN.md`, `<dir>/AGENTS.md`, or `<dir>/CLAUDE.md` | The project guide of one directory. The tool reads the first one of the three that exists. |
 
-The tool reads the memory files from the working directory up to the root of the filesystem. The nearest file has the highest priority. The files are rendered from the root to the working directory, so the nearest file is last. The budget is spent from the nearest file outward: if the files are too large, a file that does not fit contributes its first part, and farther files are left out. A note at the end names the files that were partly or not loaded. The total output is at most 40000 characters, the note included.
+The tool reads the memory files from the working directory up to the root of the filesystem. At each directory the tool reads at most one of `LABUNBUN.md`, `AGENTS.md`, and `CLAUDE.md`: the first one of the three that exists. The nearest file has the highest priority. The files are rendered from the root to the working directory, so the nearest file is last. The budget is spent from the nearest file outward: if the files are too large, a file that does not fit contributes its first part, and farther files are left out. A note at the end names the files that were partly or not loaded. The total output is at most 40000 characters, the note included.
+
+The tool does not load the memory files of a project at first. It loads them after `/agents approve` and a restart. At startup the tool prints the number of project memory files that it held back. A line in the prompt that starts with `#` is a memory note. The tool appends the note to `~/.labunbun/MEMORY.md` and updates the system prompt at once.
 
 ### Settings tiers
 
@@ -640,7 +675,7 @@ The tool reads the settings files in this order. A later file has a higher prior
 
 A project file is controlled by its repository. The tool does not read these keys from a project file:
 
-`model`, `fallbackModels`, `roles`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `compaction`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `permissions.allow`, `permissions.additionalDirectories`.
+`model`, `fallbackModels`, `roles`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `compaction`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `language`, `outputStyle`, `permissions.allow`, `permissions.additionalDirectories`.
 
 A repository must not choose its own model. A repository must not choose its own confinement. A repository must not approve its own tool calls. A repository must not turn the network off.
 
@@ -677,6 +712,8 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `pricing` | An object of model prices | User |
 | `cache` | An object of cache settings | User |
 | `beetle` | An object with the keys `models`, `maxTurns`, `maxCostUSD`, and `stallNoticeMinutes` | User |
+| `language` | The language of the answers, as free text. For example `Chinese` or `zh-CN`. | User |
+| `outputStyle` | The name of an output style file, without `.md`. | User |
 | `mcpServers` | An object of MCP servers | User |
 | `hooks` | An object of hooks | User |
 | `gamepad` | An object of controller settings | User |

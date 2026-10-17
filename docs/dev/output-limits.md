@@ -20,9 +20,9 @@
 ### What a cut keeps
 
 - The middle goes, not the end. The head says what the tool ran and shows the first lines of the file the model edits. The tail says what the build said about it and which test failed. A reader who has only one of the two cannot tell which case they are in. The notice stands at the cut between them (`packages/agent/src/output-limits.ts:81`).
-- `cutText` writes a result out in full on the first cut, when it has a spill path. The path goes on the first line. It is the only part of a cut result that the rest cannot rebuild. It must survive the second cut that the round budget may still apply (`packages/agent/src/output-limits.ts:81`).
-- The notice is cumulative for the same reason. The reader of a twice-cut result sees the same number as the reader of a once-cut one (`packages/agent/src/output-limits.ts:81`).
-- The pointer line and the notice are both charged on top of the text budget, not out of it. A notice that takes part of the text budget makes the lost count depend on how the notice itself renders. The same output then reports a different truncation at two budgets (`packages/agent/src/output-limits.ts:99`).
+- `cutText` writes a result out in full on the first cut, when it has a spill path. The path goes on the first line. It is the only part of a cut result that the rest cannot rebuild. It must survive the second cut that the round budget may still apply (`packages/agent/src/output-limits.ts:86-98`).
+- The notice is cumulative for the same reason. The reader of a twice-cut result sees the same number as the reader of a once-cut one (`packages/agent/src/output-limits.ts:114-120`).
+- The pointer line and the notice are both charged on top of the text budget, not out of it. A notice that takes part of the text budget makes the lost count depend on how the notice itself renders. The same output then reports a different truncation at two budgets (`packages/agent/src/output-limits.ts:99-103`).
 - `keep` is `limit` minus the pointer length. The head and the tail split the kept text evenly. The odd character goes to the head. The tail takes the floor (`packages/agent/src/output-limits.ts:104`, `packages/agent/src/output-limits.ts:111`).
 - The lost count comes from what survived, not from `keep`. `keep` can be larger than the body, because a second cut can ask for more characters than the body holds (`packages/agent/src/output-limits.ts:114`).
 - The notice is its own line, not added onto the line where the cut lands. The head is often half a source file and the tail a stack trace. A notice at the end of either runs into it mid-token (`packages/agent/src/output-limits.ts:122`).
@@ -31,17 +31,17 @@
 ### Spill
 
 - A `SpillWriter` returns the path to show, or null when the write fails. A failed spill is a lost convenience, and it is never a failed tool (`packages/agent/src/output-limits.ts:29`).
-- `formatSpillHeader` writes the first line, `[full output: N chars → path]` (`packages/agent/src/output-limits.ts:32`).
-- Callers that bound their own output before the pipeline sees it use the same header format. A shell captures a head and a tail and writes the whole stream out itself. The header that a second cut recognizes is then the header the first one wrote. A later spill finds a pointer that is already there and does not make a second file (`packages/agent/src/output-limits.ts:36`).
-- The guarantee that a spill cannot fail a tool lives in `cutText`. No writer has to give that guarantee. Whatever goes wrong on the way to disk, the call it belongs to returns its result (`packages/agent/src/output-limits.ts:89`).
+- `formatSpillHeader` writes the first line, `[full output: N chars → path]` (`packages/agent/src/output-limits.ts:36-38`).
+- Callers that bound their own output before the pipeline sees it use the same header format. A shell captures a head and a tail and writes the whole stream out itself. The header that a second cut recognizes is then the header the first one wrote. A later spill finds a pointer that is already there and does not make a second file (`packages/agent/src/output-limits.ts:36-43`).
+- The guarantee that a spill cannot fail a tool lives in `cutText`. No writer has to give that guarantee. Whatever goes wrong on the way to disk, the call it belongs to returns its result (`packages/agent/src/output-limits.ts:89-98`).
 
 ### The cheap compaction rung
 
-- `microcompact` replaces the oldest tool results with previews. With a writer, it writes the full text of a result before the preview replaces it, through the same `SpillWriter` the tools use. The first preview line points at the file, in the same `[full output: N chars → path]` format.
-- The write is one call per result. A result with more than one text block is written as one text: its blocks joined by a newline. The result gets one file, and the header appears once, on the first preview.
-- A result that already opens with a spill header is not spilled again. Its full text is already on disk, and the header stays in the text the preview keeps.
-- A writer that returns null or throws degrades to the plain preview. A failed spill is not a failed compaction: the preview is the one this rung made before it had a writer.
-- Without a writer the preview is unchanged. The full text stays in the session file, and the model has no pointer to it.
+- `microcompact` replaces the oldest tool results with previews. With a writer, it writes the full text of a result before the preview replaces it, through the same `SpillWriter` the tools use. The first preview line points at the file, in the same `[full output: N chars → path]` format (`packages/agent/src/compaction.ts:1450-1500`, `packages/agent/src/output-limits.ts:36-38`).
+- The write is one call per result. A result with more than one text block is written as one text: its blocks joined by a newline. The result gets one file, and the header appears once, on the first preview (`packages/agent/src/compaction.ts:1473-1485`, `:1487-1496`).
+- A result that already opens with a spill header is not spilled again. Its full text is already on disk, and the header stays in the text the preview keeps (`packages/agent/src/compaction.ts:1471-1473`, `packages/agent/src/output-limits.ts:40-43`).
+- A writer that returns null or throws degrades to the plain preview. A failed spill is not a failed compaction: the preview is the one this rung made before it had a writer (`packages/agent/src/compaction.ts:1477-1485`).
+- Without a writer the preview is unchanged. The full text stays in the session file, and the model has no pointer to it (`packages/agent/src/compaction.ts:1471-1472`, `:1487-1496`).
 
 ### The cut marker
 
@@ -52,33 +52,33 @@
 
 ### Taking a result apart
 
-- `takeApart` recognizes a spill header and an earlier cut marker in a result that may already show a cut (`packages/agent/src/output-limits.ts:55`).
-- `takeApart` removes the notice and both of the line breaks that hold it, and rejoins the two ends across the gap (`packages/agent/src/output-limits.ts:66`).
-- The break at the end goes too, and not for tidiness. The two breaks replaced the middle that is gone. If either one stays, it leaves a character in `body` that no original text had. `body.length + omitted` has to stay equal to the length the text had before any cut touched it (`packages/agent/src/output-limits.ts:66`).
-- A second cut measures its notice against that identity. Anything left behind here counts twice, once as shown text and once as lost text (`packages/agent/src/output-limits.ts:66`).
-- `Cuttable` is the result of that step. It holds `body` as it stands and the `header` path if the result already has one. `omitted` holds the characters already lost from an earlier cut (`packages/agent/src/output-limits.ts:56`).
+- `takeApart` recognizes a spill header and an earlier cut marker in a result that may already show a cut (`packages/agent/src/output-limits.ts:66-77`).
+- `takeApart` removes the notice and both of the line breaks that hold it, and rejoins the two ends across the gap (`packages/agent/src/output-limits.ts:72-76`).
+- The break at the end goes too, and not for tidiness. The two breaks replaced the middle that is gone. If either one stays, it leaves a character in `body` that no original text had. `body.length + omitted` has to stay equal to the length the text had before any cut touched it (`packages/agent/src/output-limits.ts:72-76`).
+- A second cut measures its notice against that identity. Anything left behind here counts twice, once as shown text and once as lost text (`packages/agent/src/output-limits.ts:72-76`).
+- `Cuttable` is the result of that step. It holds `body` as it stands and the `header` path if the result already has one. `omitted` holds the characters already lost from an earlier cut (`packages/agent/src/output-limits.ts:55-62`).
 
 ### Small cases and block splitting
 
 - `cutText` returns the text unchanged when it is not longer than the limit. This function bears the name of a cut. It is the wrong place to discover that it can lengthen a short string with a claim of a cut that never happened (`packages/agent/src/output-limits.ts:85`).
-- At one character of budget, or none, there is nothing to divide. The tail gets nothing and the cut is exactly the head-only one it used to be. A cut result with an empty head keeps only text that was already at the end (`packages/agent/src/output-limits.ts:105`).
+- At one character of budget, or none, there is nothing to divide. The tail gets nothing and the cut is exactly the head-only one it used to be. A cut result with an empty head keeps only text that was already at the end (`packages/agent/src/output-limits.ts:105-111`).
 - `cutContent` spreads one result's limit across its text blocks in order (`packages/agent/src/output-limits.ts:131`).
 
 ### The round budget
 
-- `capRoundResults` splits the round budget in proportion to size, with a floor reserved first for every result (`packages/agent/src/output-limits.ts:155`).
-- Proportional, because the result that carries the most output is usually the one the model works on. Floored, because a plain proportional split can hand a result a hundred characters and call that a preview. Reserved first: if floors come out as one goes, a round of many results can exceed the budget (`packages/agent/src/output-limits.ts:155`).
+- `capRoundResults` splits the round budget in proportion to size, with a floor reserved first for every result (`packages/agent/src/output-limits.ts:156-175`).
+- Proportional, because the result that carries the most output is usually the one the model works on. Floored, because a plain proportional split can hand a result a hundred characters and call that a preview. Reserved first: if floors come out as one goes, a round of many results can exceed the budget (`packages/agent/src/output-limits.ts:165-170`).
 - The split: `floor` is `MIN_ROUND_RESULT_CHARS` or an even share, whichever is smaller. `spare` is the budget minus the floors. Each result's limit is the floor plus a share of the spare, in proportion to its size (`packages/agent/src/output-limits.ts:165`, `packages/agent/src/output-limits.ts:170`).
 - A round that fits the budget, or that has no results, comes back unchanged (`packages/agent/src/output-limits.ts:163`).
-- `capRoundResults` spills results that are still whole and have somewhere to spill, and does not throw them away. The text is complete at this point: the tool's own limit did not have to cut it, only the turn's budget did. This is the last moment with a full copy of the output (`packages/agent/src/output-limits.ts:155`).
+- `capRoundResults` spills results that are still whole and have somewhere to spill, and does not throw them away. The text is complete at this point: the tool's own limit did not have to cut it, only the turn's budget did. This is the last moment with a full copy of the output (`packages/agent/src/output-limits.ts:168-174`).
 
 ### Streaming capture
 
-- A shell command's output can be arbitrarily large and arrives in chunks. A string that grows with it sets a memory bound that nobody chose. `createStreamCapture` keeps a window instead: a head and a tail, fixed at construction (`packages/tools/src/output-capture.ts:1`).
+- A shell command's output can be arbitrarily large and arrives in chunks. A string that grows with it sets a memory bound that nobody chose. `createStreamCapture` keeps a window instead: a head and a tail, fixed at construction (`packages/tools/src/output-capture.ts:46-84`).
 - When the middle no longer fits, the capture hands the full stream to an `OverflowSink`. `overflow(prefix)` receives the whole stream so far, exactly once. `chunk(chunk)` receives every later chunk, in arrival order (`packages/tools/src/output-capture.ts:30`).
-- The capture drops nothing before it crosses the bound. The head holds the start of the stream, the tail holds its end, and the total never exceeded their sum. The two buffers cover the whole stream exactly, so the seed handed to `overflow` is a lossless prefix (`packages/tools/src/output-capture.ts:1`).
-- The text that `finish()` yields carries the same one-line notice the pipeline's own cuts use, `formatCutMarker`. A result bounded here and cut again there keeps one cumulative count. The count does not restart (`packages/tools/src/output-capture.ts:1`).
-- `finish()` reports the bounded text, the number of characters the notice stands for, and the stream total. Its `dropped` count is always positive after that point: the total passed the two windows' sum, and neither window exceeds its cap (`packages/tools/src/output-capture.ts:75`).
+- The capture drops nothing before it crosses the bound. The head holds the start of the stream, the tail holds its end, and the total never exceeded their sum. The two buffers cover the whole stream exactly, so the seed handed to `overflow` is a lossless prefix (`packages/tools/src/output-capture.ts:52-73`).
+- The text that `finish()` yields carries the same one-line notice the pipeline's own cuts use, `formatCutMarker`. A result bounded here and cut again there keeps one cumulative count. The count does not restart (`packages/tools/src/output-capture.ts:75-82`).
+- `finish()` reports the bounded text, the number of characters the notice stands for, and the stream total. Its `dropped` count is always positive after that point: the total passed the two windows' sum, and neither window exceeds its cap (`packages/tools/src/output-capture.ts:75-81`).
 - `createTailBuffer` holds the last `maxChars` of a stream. It does not rebuild the whole stream on every chunk. Chunks leave whole from the front, once enough of them accumulate. The kept set stays near the cap, and it does not grow with the command's total output. Only `read()` joins, and it runs once per emission, not once per chunk. The tail can overshoot the cap by at most one chunk, and `read()` trims that (`packages/tools/src/output-capture.ts:9`).
 - `nextSpillPath` gives a fresh path for one spilled stream, labelled and unique across calls and across processes. The counter separates two spills in the same millisecond of one process. The pid separates two processes that write in the same directory (`packages/tools/src/output-capture.ts:93`).
 
@@ -92,11 +92,11 @@
 - **Why the marker matches anywhere.** A cut that keeps both ends puts the notice in the middle. The cost is one false-positive case, wider than before, as stated above (`packages/agent/src/output-limits.ts:47`).
 - **Why `takeApart` removes both breaks.** `body.length + omitted` is the identity a second cut measures against. A break left over counts once as shown text and once as lost text (`packages/agent/src/output-limits.ts:66`).
 - **Why the split gives the odd character to the head.** It is the whole deviation from a plain half each, and it keeps the smallest cases exact. At no budget there is nothing to divide (`packages/agent/src/output-limits.ts:105`).
-- **Why the split reserves the floors first.** Floors taken out as one goes let a round of many results exceed the budget that is meant to bound it (`packages/agent/src/output-limits.ts:155`).
-- **Why whole results go to a spill at the last moment.** The tool's own limit did not cut them, only the turn's budget did. This is the last point with a full copy of the output (`packages/agent/src/output-limits.ts:155`).
-- **Why the capture keeps a window, not a string that grows.** A string that keeps pace with the command's output sets a memory bound that nobody chose (`packages/tools/src/output-capture.ts:1`).
-- **Why the capture says nothing before it crosses the bound.** The head and the tail cover the whole stream exactly before the capture crosses the bound. There is no loss to report, and the seed handed to the sink is lossless (`packages/tools/src/output-capture.ts:1`).
-- **Why the capture marker matches the pipeline marker.** One notice format means one cumulative count when both layers cut the same result (`packages/tools/src/output-capture.ts:1`).
+- **Why the split reserves the floors first.** Floors taken out as one goes let a round of many results exceed the budget that is meant to bound it (`packages/agent/src/output-limits.ts:165-166`).
+- **Why whole results go to a spill at the last moment.** The tool's own limit did not cut them, only the turn's budget did. This is the last point with a full copy of the output (`packages/agent/src/output-limits.ts:172-173`).
+- **Why the capture keeps a window, not a string that grows.** A string that keeps pace with the command's output sets a memory bound that nobody chose (`packages/tools/src/output-capture.ts:46-84`).
+- **Why the capture says nothing before it crosses the bound.** The head and the tail cover the whole stream exactly before the capture crosses the bound. There is no loss to report, and the seed handed to the sink is lossless (`packages/tools/src/output-capture.ts:64-74`).
+- **Why the capture marker matches the pipeline marker.** One notice format means one cumulative count when both layers cut the same result (`packages/tools/src/output-capture.ts:75-82`).
 
 ## Known traps
 
@@ -106,7 +106,7 @@
 - `keep` can be larger than the body on a second cut that asks for more characters than the body holds. The lost count comes from what survived, for exactly that case (`packages/agent/src/output-limits.ts:114`).
 - The floor for a round is `min(MIN_ROUND_RESULT_CHARS, floor(budget / count))`. A round with very many results gets a smaller floor than the constant (`packages/agent/src/output-limits.ts:165`).
 - `formatCutMarker` writes one line with no newlines of its own. A caller that joins a head and a tail around it supplies the line breaks (`packages/agent/src/output-limits.ts:51`).
-- A spill writer that throws is caught inside `cutText` and treated as a null path. The tool call still returns its result (`packages/agent/src/output-limits.ts:92`).
+- A spill writer that throws is caught inside `cutText` and treated as a null path. The tool call still returns its result (`packages/agent/src/output-limits.ts:91-96`).
 
 ## Source map
 

@@ -12,6 +12,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [Crash consistency](crash-consistency.md): what survives a killed process — the files replaced by a rename, the files appended to, and the writes still made in place.
 - [Gemini subscription](gemini-subscription.md): the app-side sign-in for a Gemini subscription — the credential store, the loopback and paste login shapes, and where the app wires them.
 - [MCP client](mcp.md): connecting `.mcp.json` and settings servers — tool adaptation, list-change refreshes, the approval gate, and the `/mcp` reads.
+- [Memory and style](memory.md): the two memory tiers, the trust gate, the live `#` note, `/memory`, and the output-style files the prompt adds.
 - [Migration framework](migration-framework.md): how the framework reads another agent's files and writes them into labunbun.
 - [Migration sources](migration-sources.md): what the module for each source knows about the product it reads.
 - [Missions](missions.md): what the last run left behind — the close-out note, the shell ledger a resume probes, the subagent orphan notice, the `/tasks` tree, and the exit guard.
