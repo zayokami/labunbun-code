@@ -66,11 +66,12 @@
  *   - **Cursor-only moves use `EmacsOps.setCursor` and are not undoable**, exactly as in
  *     `VimEngine`.
  *
- * Out of scope, deliberately: rectangle mode, `M-z` / `M-h`, the two GNU transpose keys this
- * port leaves alone (`C-t`, `C-M-t`), `C-o` (`open-line`), incremental search, `C-q`, and the
- * rest of `ctl-x-map`. Their keys are listed in {@link RESERVED_KEYS} and consumed without
- * effect, so that they are *this engine's* and cannot fall through to the host as something
- * else.
+ * Out of scope, deliberately: rectangle mode, `M-z` / `M-h`, the GNU transpose key this port
+ * leaves alone (`C-M-t`), incremental search, `C-q`, and the rest of `ctl-x-map`. `C-t`
+ * (`transpose-chars`) and `C-o` (`open-line`) are the host's keys here — the watch panel and the
+ * transcript — so the engine does not declare them. The keys that *are* listed in
+ * {@link RESERVED_KEYS} are consumed without effect, so that they are *this engine's* and cannot
+ * fall through to the host as something else.
  *
  *   - **What `undo` does not do here**, in four places, each with the citation that says what
  *     Emacs does instead. None of them is a decision taken for convenience; two of them are one
@@ -760,8 +761,8 @@ export function emacsCasify(text: string, action: EmacsCaseAction): string {
 /**
  * Keys Emacs binds, that this batch does not implement, and that are consumed anyway. The
  * contract for a modeless engine is "unbound means yours", so a bound-but-unimplemented key has to
- * be swallowed: letting `C-t` fall through would hand the host a keypress the user believes is
- * transpose, and letting `M-x` fall through would hand it a bare Escape-prefixed letter.
+ * be swallowed: letting `C-M-t` fall through would hand the host a keypress the user believes is
+ * `transpose-sexps`, and letting `M-x` fall through would hand it a bare Escape-prefixed letter.
  *
  * Each entry is `(key, the command waiting for it)`, so the next batch is a list edit rather than
  * an archaeology exercise. `C-x`-prefixed keys live in {@link CTL_X_RESERVED}, because the `C-x`
@@ -788,10 +789,8 @@ export function emacsCasify(text: string, action: EmacsCaseAction): string {
  *     `key.return` branch.
  */
 export const RESERVED_KEYS: ReadonlyArray<readonly [string, string]> = [
-	["C-t", "transpose-chars (bindings.el:1596)"],
 	["C-M-t", "transpose-sexps (bindings.el:1598)"],
 	["C-q", "quoted-insert (bindings.el:1230)"],
-	["C-o", "open-line (bindings.el:1228)"],
 	["C-g", "keyboard-quit (bindings.el:1221)"],
 	["M-z", "zap-to-char (bindings.el:1236)"],
 	["M-h", "mark-paragraph (bindings.el:1710)"],

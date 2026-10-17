@@ -108,24 +108,16 @@ export function shortcutGroups(opts: {
 				// hand-written arrow chain is the same class of bug: a fifth row would
 				// leave the overlay promising a cycle it no longer has.
 				["Shift+Tab", `cycle permission mode (${MODE_CHOICES.map((c) => c.label).join(" → ")})`],
-				// This row said "taken" until the claim was measured, and the
-				// measurement said otherwise. `EmacsEngine` does reserve `C-o`
-				// (`emacs.ts`, `RESERVED_KEYS`), but the claim is made inside the
-				// prompt's own `useInput`, and ink hands every key to every active
-				// hook separately (`node_modules/ink/build/hooks/use-input.js:115-123`):
-				// the engine silences the prompt's later branches and nothing else.
-				// The REPL's handler still receives the key, and the transcript opens
-				// under emacs exactly as it does with no editor — measured, in the
-				// frame, in `packages/tui/test/watch-panel.test.tsx`. The honest row
-				// says both facts. (The `Ctrl+R` row above is the case where "taken"
+				// Both keys below are the host's in every editor. `C-o` and `C-t`
+				// used to be reserved by `EmacsEngine`; the claims never stopped the
+				// REPL from receiving the keys (ink hands every key to every active
+				// hook separately, `node_modules/ink/build/hooks/use-input.js:115-123`),
+				// and the engine no longer declares them, so the rows name the host
+				// action plainly. (The `Ctrl+R` row above is the case where "taken"
 				// *is* the truth, because history search is a prompt-level branch and
 				// that is the one the engine suppresses.)
-				["Ctrl+O", emacs ? "transcript — the engine also claims C-o, and the REPL still gets the key" : "transcript"],
-				// The same correction one key later: `C-t` is reserved
-				// `transpose-chars` there, and the panel opens anyway. Under vim both
-				// keys work without a caveat — a ctrl combo that is not one of the few
-				// the engine runs is handed to the host on purpose.
-				["Ctrl+T", emacs ? "watch panel — the engine also claims C-t, and the REPL still gets the key" : "watch panel"],
+				["Ctrl+O", "transcript"],
+				["Ctrl+T", "watch panel"],
 				// The one host key neither engine contests — vim's ctrl block
 				// forwards everything but C-r, and the emacs engine binds no C-v at
 				// all — so unlike the two rows above this one needs no "taken"
@@ -162,8 +154,7 @@ export function shortcutGroups(opts: {
 		});
 	}
 	if (emacs) {
-		// Only what the engine *runs*. It also claims `C-t`, `M-z` and the rest of its reserved
-		// table — `C-o` among them, where the binding is `open-line`, not the `C-x C-o` below —
+		// Only what the engine *runs*. It also claims `M-z` and the rest of its reserved table,
 		// consuming them so they cannot fall through as stray characters, so naming them here as
 		// if they worked would be the same lie in a new place. They are left out rather than
 		// listed as pending.

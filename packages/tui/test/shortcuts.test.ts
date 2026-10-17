@@ -148,46 +148,34 @@ describe("shortcutGroups", () => {
 		expect(ctrlR("none")).toBe("search history");
 	});
 
-	test("the Ctrl+T row records the engine's claim without denying the key", () => {
-		// This row said "unreachable under emacs" for as long as the `Ctrl+O` one did,
-		// and both were wrong in the same direction — checked here against the frame,
-		// in `watch-panel.test.tsx` with the engine on. `C-t` is still reserved
-		// `transpose-chars` (`emacs.ts`), but the claim is made inside the prompt's
-		// own `useInput`; ink delivers the key to every active hook separately
-		// (`ink/build/hooks/use-input.js:115-123`), so the REPL still gets it and the
-		// panel opens. The row must say both halves, and it must not say "taken" —
-		// that word is true of `Ctrl+R`, whose command really is a prompt-level branch.
+	test("the Ctrl+T row names the watch panel under every editor", () => {
+		// This row used to record the emacs engine's claim on `C-t` while saying the
+		// key still reached the panel. The claim is gone: `C-t` is the host's key,
+		// the engine no longer reserves it, and the row says what the key does.
 		const ctrlT = (editor: "none" | "vim" | "emacs") =>
 			shortcutGroups({ editor, vimMode: "normal" })
 				.find((g) => g.title === "Prompt")
 				?.rows.find(([k]) => k === "Ctrl+T")?.[1];
 		expect(ctrlT("none")).toBe("watch panel");
-		// Vim hands a ctrl combo it does not run to the host (`vim.ts`), so the row
-		// is the same one there as at an empty prompt.
 		expect(ctrlT("vim")).toBe("watch panel");
-		expect(ctrlT("emacs")).toContain("C-t");
-		expect(ctrlT("emacs")).toContain("still gets the key");
-		expect(ctrlT("emacs")).not.toContain("taken");
-		// The engine's claim is real even though its consequence is not.
-		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-t");
+		expect(ctrlT("emacs")).toBe("watch panel");
+		// The new contract: the engine does not declare the key at all.
+		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("C-t");
 	});
 
-	test("the Ctrl+O row records the engine's claim without denying the key", () => {
-		// The same falsified sentence, ten lines up in `shortcuts.ts`. Under emacs
-		// `C-o` is reserved `open-line` (`emacs.ts`, `RESERVED_KEYS`) — but that
-		// silences the prompt's own branches, not the REPL's, and `Ctrl+O` is a
-		// REPL branch, so the transcript opens. Measured with the engine on in
-		// `watch-panel.test.tsx`; the row says what the measurement found.
+	test("the Ctrl+O row names the transcript under every editor", () => {
+		// The same withdrawal one key earlier: `C-o` was reserved `open-line`, but
+		// the transcript is a REPL branch that the engine never owned, so the key
+		// always reached it. The engine no longer lists `C-o` either.
 		const ctrlO = (editor: "none" | "vim" | "emacs") =>
 			shortcutGroups({ editor, vimMode: "normal" })
 				.find((g) => g.title === "Prompt")
 				?.rows.find(([k]) => k === "Ctrl+O")?.[1];
 		expect(ctrlO("none")).toBe("transcript");
 		expect(ctrlO("vim")).toBe("transcript");
-		expect(ctrlO("emacs")).toContain("C-o");
-		expect(ctrlO("emacs")).toContain("still gets the key");
-		expect(ctrlO("emacs")).not.toContain("taken");
-		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-o");
+		expect(ctrlO("emacs")).toBe("transcript");
+		// The new contract: the engine does not declare the key at all.
+		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("C-o");
 	});
 
 	// The jump key's row, and the second one whose wording depends on the engine —

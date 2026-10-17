@@ -840,14 +840,15 @@ describe("Alt+1..9 at the REPL", () => {
 
 describe("the emacs engine and the REPL's own keys", () => {
 	// The `Ctrl+T`/`Ctrl+O` "taken" rows in `shortcuts.ts` were wrong, and this
-	// is the measurement that says so. `EmacsEngine` does claim both keys as
-	// reserved, but that claim is made inside the prompt's own `useInput`: ink
-	// hands every key to every active hook separately
+	// is the measurement that refuted them. `C-t` and `C-o` are host-owned —
+	// the watch panel and the transcript — and the engine no longer declares
+	// either key. Even when it did, the claim was made inside the prompt's own
+	// `useInput`: ink hands every key to every active hook separately
 	// (`node_modules/ink/build/hooks/use-input.js:115-123`), so the engine's
-	// consumption silences the *prompt's* later branches and nothing else. The
+	// consumption silenced the *prompt's* later branches and nothing else. The
 	// REPL's handler never asked the engine and is not asking now, so the panel
 	// and the transcript open under emacs exactly as they do without it.
-	test("a key the engine claims is still delivered to the REPL", async () => {
+	test("host-owned Ctrl+T and Ctrl+O still reach the REPL", async () => {
 		const h = replSetup({ emacs: true });
 		await h.write("a draft");
 

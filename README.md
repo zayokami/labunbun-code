@@ -350,7 +350,7 @@ The kill ring has these rules:
 
 The engine uses the Emacs rule for words. A boundary is a change of script. `M-f` stops inside CJK text. `foo-bar` is 3 words.
 
-The engine takes these keys and does not use them: `C-t`, `M-z`, `C-s`, `C-r`. The engine uses them for nothing. They do not reach the terminal as characters. `C-r` does history search everywhere except in this editor.
+The engine takes these keys and does not use them: `M-z`, `C-s`, `C-r`. The engine uses them for nothing. They do not reach the terminal as characters. `C-r` does history search everywhere except in this editor. `C-t` and `C-o` are the host's keys: they open the watch panel and the transcript.
 
 ### DualShock 4 controller
 
@@ -574,7 +574,7 @@ Use these commands in the terminal.
 
 The command `/migrate` is the previous name of `/yoshi`. The command `/quit` is an alias of `/exit`.
 
-Press Ctrl+T to show the watch panel. The panel shows a background shell's tail, the subagent listing, or the session facts, and it takes no keys of its own. Press Ctrl+V while the panel is open to cycle the source: the shell tails in start order, then the subagent listing, then the session facts, wrapping back to the first shell. Press Alt+1 to Alt+9 while the panel is open to jump to the shell with that number. Each shell header shows its number on the left. The tool shows the last running shell, or the last shell that ended. The panel is a snapshot from the two-second poll, and it says so. Press Ctrl+T or Escape to close it. These keys do nothing while a dialog, a question, the command picker, or the transcript is open. Under the Emacs editor, the engine also claims `C-t`, and the key still reaches the panel. There, `Alt+1` to `Alt+9` arms a count in the prompt, so the jump does not occur. A terminal that turns Ctrl+V into paste — Windows Terminal does by default — takes the key before the app sees it.
+Press Ctrl+T to show the watch panel. The panel shows a background shell's tail, the subagent listing, or the session facts, and it takes no keys of its own. Press Ctrl+V while the panel is open to cycle the source: the shell tails in start order, then the subagent listing, then the session facts, wrapping back to the first shell. Press Alt+1 to Alt+9 while the panel is open to jump to the shell with that number. Each shell header shows its number on the left. The tool shows the last running shell, or the last shell that ended. The panel is a snapshot from the two-second poll, and it says so. Press Ctrl+T or Escape to close it. These keys do nothing while a dialog, a question, the command picker, or the transcript is open. Under the Emacs editor, `Alt+1` to `Alt+9` arms a count in the prompt, so the jump does not occur. A terminal that turns Ctrl+V into paste — Windows Terminal does by default — takes the key before the app sees it.
 
 ### Headless output
 

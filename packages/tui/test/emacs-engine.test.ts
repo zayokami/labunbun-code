@@ -279,7 +279,6 @@ describe("emacs: motion", () => {
 
 	test("a key Emacs binds but this batch does not is consumed, not typed", () => {
 		const e = editor("", 0);
-		expect(e.press("t", C)).toBe(true);
 		expect(e.press("t", M)).toBe(true);
 		expect(e.press("t", CM)).toBe(true);
 		expect(e.press("q", C)).toBe(true);
@@ -1188,10 +1187,8 @@ describe("emacs: the reserved tables", () => {
 		// is the second thing that would have caught it; the parametrised rows above were the
 		// first.
 		expect(RESERVED_KEYS.map(([token]) => token)).toEqual([
-			"C-t",
 			"C-M-t",
 			"C-q",
-			"C-o",
 			"C-g",
 			"M-z",
 			"M-h",
@@ -1212,6 +1209,17 @@ describe("emacs: the reserved tables", () => {
 			"M-=",
 		]);
 		expect(CTL_X_RESERVED.map(([member]) => member)).toEqual(["t", "C-@", "C-SPC", " ", "n", "h", "=", "r"]);
+	});
+
+	test("C-t and C-o are declined, so the watch panel and the transcript keep their keys", () => {
+		// The host owns both keys. A declined key is the engine's "this is yours" answer: it
+		// runs no command, so the buffer, point and `last-command` are untouched.
+		const e = editor("abc", 1);
+		expect(e.press("t", C)).toBe(false);
+		expect(e.press("o", C)).toBe(false);
+		expect(e.state.text).toBe("abc");
+		expect(e.state.cursor).toBe(1);
+		expect(e.engine.lastCommand).toBeNull();
 	});
 
 	test("a reserved key is claimed by the table, and leaves no prefix argument behind", () => {
@@ -1240,12 +1248,13 @@ describe("emacs: the reserved tables", () => {
 		// the row was mis-keyed as well as unimplemented; the new command explains the move.
 		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("M-t");
 		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("M-o");
-		// `C-o` is the key the `shortcuts.ts` rows cite when they explain what the engine
-		// claims, so it belongs in *this* table and saying so here is what keeps the two files
-		// from disagreeing: a reader of the shortcut list can check the claim one layer down.
-		// The claim is real; the consequence "the transcript is unreachable" was the part that
-		// was wrong, and the measure of that lives in `watch-panel.test.tsx`.
-		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-o");
+		// `C-t` and `C-o` are the host's keys — the watch panel and the transcript — so the
+		// engine neither declares nor consumes them. Before the cleanup the table claimed both
+		// and the frame measurement showed the REPL still received them
+		// (`watch-panel.test.tsx`); removing the declarations makes the tables say what was
+		// already true of the key.
+		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("C-t");
+		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("C-o");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-o");
 		// The control for all of it: the two keys that *are* implemented still work through the
 		// same `C-x` prefix, so "not in the table" is not "not claimed". A table that had quietly
