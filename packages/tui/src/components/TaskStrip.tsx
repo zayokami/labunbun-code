@@ -2,7 +2,8 @@ import { Box, Text } from "ink";
 import { useTheme } from "../theme.ts";
 import type { UiTask } from "../ui-state.ts";
 
-const ICONS: Record<UiTask["status"], string> = {
+/** Glyph declared for each task status. */
+export const ICONS: Record<UiTask["status"], string> = {
 	pending: "☐",
 	in_progress: "◐",
 	completed: "☑",
@@ -35,7 +36,7 @@ export function TaskStrip({ tasks }: { tasks: UiTask[] }) {
 			{active?.activeForm && <Text color={theme.accent}>▸ {active.activeForm}</Text>}
 			{visible.map((task) => (
 				<Text key={task.id} color={task.status === "in_progress" ? theme.accent : theme.pending}>
-					{ICONS[task.status]} #{task.id} {task.subject}
+					{`${ICONS[task.status]} #${task.id} ${task.subject}${task.owner ? ` · ${task.owner}` : ""}`}
 				</Text>
 			))}
 		</Box>
