@@ -2,7 +2,8 @@ import { dirname } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
 import { guardWritablePath } from "./containment.ts";
-import type { Operations } from "./operations.ts";
+import { stalenessOf } from "./edit.ts";
+import type { FileStat, Operations } from "./operations.ts";
 import type { ReadFileState } from "./read-file-state.ts";
 import { decideWrite } from "./sandbox/simulated.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
@@ -24,6 +25,7 @@ export function createWriteTool(
 		}),
 		prompt:
 			"- Prefer Edit over Write when changing existing files.\n" +
+			"- An existing file must have been read in full with Read this session — Write refuses to overwrite content you were not shown. New files need no read.\n" +
 			"- Write the COMPLETE intended content — this replaces the whole file.\n" +
 			"- Use absolute paths.",
 		isConcurrencySafe: () => false,
@@ -65,6 +67,18 @@ export function createWriteTool(
 			} catch (error) {
 				return { content: [{ type: "text", text: String(error) }], isError: true };
 			}
+
+			// The read gate. It runs before `mkdir` and before any bytes move, so
+			// a refusal leaves the filesystem exactly as it was. `readState` is
+			// optional: an embedder that builds this tool without one keeps the
+			// previous behavior, and `createAllTools` always passes the store that
+			// Read writes and Edit reads.
+			// Long-form design notes: docs/dev/tools.md
+			if (readState) {
+				const refusal = await readGate(path, ops, readState);
+				if (refusal) return { content: [{ type: "text", text: refusal }], isError: true };
+			}
+
 			try {
 				await ops.mkdir(dirname(path));
 				await ops.writeTextFileAtomic(path, input.content);
@@ -87,6 +101,68 @@ export function createWriteTool(
 			}
 		},
 	});
+}
+
+/**
+ * The read gate in front of a write over an existing file: why this write must
+ * be refused, or `null` when it may proceed.
+ *
+ * An absent target is created without a read — there is no content that could
+ * have been shown to the model. A target that is not a regular file is left to
+ * the write below, which fails with the backend's own error as before. Every
+ * other answer from `stat` means the read record decides.
+ *
+ * The staleness half is Edit's `stalenessOf`, not a copy, so the two tools
+ * cannot drift. A record that reached that call passed the full-read and
+ * partial-view checks, which is the branch where the comparison is by content;
+ * an mtime-only touch with byte-identical content passes exactly as it does for
+ * Edit (the Windows file-watcher carve-out that function documents).
+ */
+async function readGate(path: string, ops: Operations, readState: ReadFileState): Promise<string | null> {
+	let stat: FileStat;
+	try {
+		stat = await ops.stat(path);
+	} catch (error) {
+		// Only "this path does not exist" lets a write create it. Any other
+		// failure cannot say the file is absent, and treating it as absent would
+		// let this write replace a file nobody was shown.
+		if (isMissing(error)) return null;
+		return `Write: could not check whether ${path} exists (${message(error)}). Nothing was written — read it first or check the path and retry.`;
+	}
+	// A directory or another non-file is not content this gate can protect; the
+	// write below fails with the backend's own error, as it did before.
+	if (!stat.isFile) return null;
+
+	const seen = readState.getState(path);
+	if (!seen) {
+		return `Write: ${path} was not read this session. Read it with Read (the whole file, no offset/limit) and try again — Write replaces the whole file, and it will not overwrite content it was never shown.`;
+	}
+	if (!seen.fullRead) {
+		return `Write: the last Read of ${path} was a range (offset/limit), so it is not the whole file. Read the whole file and retry — this write replaces every line, not just the page you read.`;
+	}
+	if (seen.partialView) {
+		return `Write: the last Read of ${path} was a partial view — the file was cut before you saw all of it (a long line, a file over the read window, or a result over the size limit). Read the whole file and retry — Write would replace content you were never shown.`;
+	}
+
+	let content: string;
+	try {
+		content = await ops.readTextFile(path);
+	} catch (error) {
+		// It vanished between the stat and the read: the create case again.
+		if (isMissing(error)) return null;
+		return `Write: could not read ${path} to confirm it is unchanged since your read (${message(error)}). Nothing was written; read it again and retry.`;
+	}
+	const stale = await stalenessOf(path, ops, seen, content);
+	if (stale) {
+		return `Write: ${path} changed since you read it (${stale}). Read it again and retry — Write will not overwrite content that no longer matches what you were shown.`;
+	}
+	return null;
+}
+
+/** Whether a stat/read failure means the path is absent, rather than "cannot tell". */
+function isMissing(error: unknown): boolean {
+	const code = (error as { code?: unknown } | null | undefined)?.code;
+	return code === "ENOENT" || code === "ENOTDIR";
 }
 
 function message(error: unknown): string {

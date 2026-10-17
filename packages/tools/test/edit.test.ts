@@ -390,33 +390,60 @@ describe("a file the model wrote is a file it may edit", () => {
 		expect(readFileSync(file, "utf8")).toBe("const a = 2;\n");
 	});
 
-	test("writing over a cut read refreshes the baseline the next edit uses", async () => {
-		// The cut view's `partialView` is carried through the Write's re-record
-		// (the record still says the model never saw those bytes), so the next
-		// edit's staleness rule is mtime — and the mtime that matters is the one
-		// the write just produced. A pre-write baseline would read the write
-		// itself as "changed since your read".
+	test("writing over a cut read is refused until the file is read in full", async () => {
+		// A cut Read records `fullRead: true, partialView: true`: the window was
+		// not asked for, but the model did not receive the file's bytes. Write
+		// refuses that record outright — replacing the whole file with content the
+		// model never saw is the silent overwrite the gate exists to stop. The
+		// refusal must not mutate the record: it is still the evidence the next
+		// attempt is judged against.
 		const dir = tempDir();
 		const file = join(dir, "rewritten.ts");
 		const { read, state } = readEditPair(dir);
-		writeFileSync(file, overTheReadWindow());
+		const original = overTheReadWindow();
+		writeFileSync(file, original);
 		await call(read, { file_path: file });
+		expect(state.getState(resolveCanonical(file, dir))?.partialView).toBe(true);
 
 		const write = createWriteTool(dir, defaultOperations(), [], state);
 		const edited = createEditTool(dir, defaultOperations(), state);
-		const wrote = await call(write, { file_path: file, content: "const a = 1;\n" });
-		expect(wrote.isError).toBeFalsy();
-		// The premise of the row: the cut-view flag really did ride through.
-		expect(state.getState(resolveCanonical(file, dir))?.partialView).toBe(true);
+		const refused = await call(write, { file_path: file, content: "const a = 1;\n" });
+		expect(refused.isError).toBe(true);
+		expect(textOf(refused)).toContain("partial view");
+		expect(readFileSync(file, "utf8")).toBe(original);
+		// The refusal is not a `forget`: the baseline survives exactly as Read
+		// left it, including the cut content the model was shown.
+		const afterRefusal = state.getState(resolveCanonical(file, dir));
+		expect(afterRefusal?.partialView).toBe(true);
+		expect(afterRefusal?.content).toBe(overTheReadWindow().split("\n").slice(0, 2000).join("\n"));
+
+		// A 2100-line file cannot be read in full under Read's own 2000-line
+		// window, so the fixture shrinks to a body a full Read can actually show.
+		// That is the "read the whole file and retry" the refusal asked for.
+		const body = "const a = 1;\n";
+		writeFileSync(file, body);
+		await call(read, { file_path: file });
+		expect(state.getState(resolveCanonical(file, dir))?.fullRead).toBe(true);
+		expect(state.getState(resolveCanonical(file, dir))?.partialView).toBe(false);
+
+		const wrote = await call(write, { file_path: file, content: "const a = 2;\n" });
+		expect(wrote.isError, wrote.isError ? textOf(wrote) : undefined).toBeUndefined();
+		// The Write re-recorded the whole-file badge and the new bytes, so the next
+		// Edit does not see the Write itself as "changed since your read". A
+		// pre-write content or mtime baseline would read the write as a change.
+		const afterWrite = state.getState(resolveCanonical(file, dir));
+		expect(afterWrite?.fullRead).toBe(true);
+		expect(afterWrite?.partialView).toBe(false);
+		expect(afterWrite?.content).toBe("const a = 2;\n");
 
 		const result = await call(edited, {
 			file_path: file,
-			old_string: "const a = 1;",
-			new_string: "const a = 2;",
+			old_string: "const a = 2;",
+			new_string: "const a = 3;",
 		});
 
 		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
-		expect(readFileSync(file, "utf8")).toBe("const a = 2;\n");
+		expect(readFileSync(file, "utf8")).toBe("const a = 3;\n");
 	});
 });
 

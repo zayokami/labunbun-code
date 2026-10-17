@@ -264,7 +264,7 @@ The default window cuts the long file at 2000 lines with no offset and no limit.
 
 The recorder reads the mtime for the record, as the baseline that the staleness check compares for a view it cannot compare by content. A `stat` that loses a race with a deletion costs only the baseline, because the content that the model saw is still what gets recorded.
 
-Write creates the parent directories and writes the whole file. Its two checks are `guardWritablePath` and `decideWrite`, and neither can widen what the other allows. Each one can only refuse.
+Write creates the parent directories and writes the whole file. Its path checks are `guardWritablePath` and `decideWrite`, and neither can widen what the other allows. Each one can only refuse. A third check, the read gate, runs before any bytes move; it is described after the record it consults.
 
 `guardWritablePath` is unconditional. It refuses metadata of the version-control kind, whatever the mode says. It refuses anything outside the workspace whatever the mode says. It matches on the path, so it catches a `.git` at any depth. A link to a `.git` is caught too, without a scan that has to find it first.
 
@@ -295,6 +295,14 @@ The tool rejected the other option, to strip first and then compare, because a p
 A Write is the one case in which a file the model never read is still a file whose whole content it knows. The model just authored all of it. Without the record, the Edit gate refuses the next edit to a file that the session created itself. That is the shape of every "create then fix" task.
 
 This call is the only production writer of that record, and until it existed the documented rule had no caller. The fresh mtime comes along for the same reason as the content. A pre-write baseline on a record that now describes the bytes after the write refuses the next edit as a changed one.
+
+The read gate in front of an overwrite is the other half. It applies only when a store was passed to the tool. `createAllTools` always passes it (`packages/tools/src/index.ts:181`), so every entry point is gated; a bare two-argument factory keeps the old behavior for an embedder or a unit test that never opted in.
+
+A target that does not exist is created without a read. `ops.stat` answers `ENOENT` or `ENOTDIR`, and the write creates the parents. A target that is not a regular file is left to the write, which fails the way it did before. Every other stat failure refuses: "cannot tell" is not "absent", and treating it as absent would let the write replace a file nobody was shown.
+
+An existing file has to satisfy three things. This session recorded a read of the path. That read was the whole file, with no `offset` and no `limit`. And the model received its bytes: `partialView` is false. Each refusal names the Read call that fixes it. A cut view is refused even when the read was not paged, because `fullRead` alone does not say that the model saw the file; the reference build rejects the same flag.
+
+The record then has to describe the file on disk. The gate reads the file and calls the same `stalenessOf` that Edit uses, so the two tools cannot drift. A record that passed the three checks above takes that function's content-comparison branch: identical bytes pass even when the mtime moved, which is Edit's documented carve-out for file-watchers; different bytes refuse, and the refusal moves no bytes. A stale record never becomes a silent overwrite, and the refusal leaves the record as the Read wrote it. Only a successful write replaces it.
 
 `ReadFileState` is what the model was really shown by a Read, kept per session. An edit tool can then refuse a file that nobody read.
 
@@ -580,7 +588,7 @@ The same executor goes to the background manager. A backgrounded command then jo
 
 `readState` is one per tool set. `createAllTools` runs once per host: the REPL (`packages/coding-agent/src/interactive.ts:636`), a headless run (`packages/coding-agent/src/headless.ts:316`), and each ACP live session (`packages/coding-agent/src/acp.ts:975-982`). A second tool set in the same process is then a second call and a second store. A module-level singleton is readable from any conversation. A tool set that outlives its conversation is why the app passes its own and clears it. The `/resume` case inherits the array, so the store must follow the conversation and not the process. `taskStore` is an option of the same object (`packages/tools/src/index.ts:112`), and the four task tools exist only when it is present (`:185`); each host passes the store it bound to its own conversation, and ACP passes the one it created for the live session (`acp.ts:974-975`, `:997-1002`).
 
-Edit's first gate reads the same store that Read writes. The gate refuses an edit on a file that this session never read. The two tools must look at one store, or the gate refuses everything. Write takes the same read-only root list, and not because it may write there. A root that the policy calls readable only is exactly the root that `decideWrite` must refuse. A policy that only Read knows about is a policy that the shell and the write tools disagree with.
+Edit's first gate reads the same store that Read writes, and Write's read gate reads it too. Edit refuses an edit on a file that this session never read. The tools must look at one store, or the gates refuse everything. Write takes the same read-only root list, and not because it may write there. A root that the policy calls readable only is exactly the root that `decideWrite` must refuse. A policy that only Read knows about is a policy that the shell and the write tools disagree with.
 
 `spillDir` is where a tool that bounds its own output writes what did not fit. The cases are the Bash exec overflow and a Glob match list that passes its cap. It must sit under a `readOnlyRoots` entry, because a spill that the model cannot read back is a file for nobody. It must sit under the root of tool-output too, so the same retention sweep prunes it. With no `spillDir`, Bash still spills at the pipeline and Glob falls back to a count.
 
@@ -629,7 +637,7 @@ The comments also state the measured costs and the run or date that measured the
 | `packages/tools/src/background.ts` | The background shell manager and the output tools. |
 | `packages/tools/src/edit.ts` | The Edit tool: the read gate, the match, and the splice. |
 | `packages/tools/src/read.ts` | The Read tool: its limits, its read-only roots, and failure text. |
-| `packages/tools/src/write.ts` | The Write tool and its path checks. |
+| `packages/tools/src/write.ts` | The Write tool, its path checks, and its read gate. |
 | `packages/tools/src/read-file-state.ts` | The per-session store of read files and their times. |
 | `packages/tools/src/containment.ts` | Path normalisation, the containment checks, and the protected segments. |
 | `packages/tools/src/tasks.ts` | The task store and the four task tools. |

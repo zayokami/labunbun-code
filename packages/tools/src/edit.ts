@@ -258,8 +258,13 @@ function errorResult(text: string): EditToolResult {
 // ---------------------------------------------------------------------------
 
 // Long-form design notes: docs/dev/tools.md
-/** Why the recorded read no longer describes the file, or `null` when it does. */
-async function stalenessOf(
+/**
+ * Why the recorded read no longer describes the file, or `null` when it does.
+ * Exported for Write's read gate: one staleness rule for both tools means the
+ * two cannot drift, and a record that passed Write's full-read checks reaches
+ * the content-comparison branch here exactly as a full Edit read does.
+ */
+export async function stalenessOf(
 	path: string,
 	ops: Operations,
 	seen: ReadFileStateEntry,
