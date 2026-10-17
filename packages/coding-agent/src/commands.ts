@@ -163,7 +163,21 @@ export function builtInCommands(): Command[] {
 				// verification back to a command's return value.
 				const verification = ctx.compaction.lastVerification();
 				const receipt = verification ? compactionReceiptLines(verification) : [];
-				return [headline, ...receipt].join("\n");
+				// A summary can succeed and still leave the context unsendable — the
+				// summary itself can be large, or the turn it had to keep can be. The
+				// headline already reported the saving; saying nothing more would read
+				// as a fixed session right before the next request is refused. The
+				// limit comes from the manager, which is the arithmetic the loop and
+				// the automatic path use; recomputing it here could disagree.
+				const hardLimit = ctx.compaction.limits().hardLimit;
+				const overLimit =
+					after >= hardLimit
+						? [
+								`Warning: the compacted context is still ~${after.toLocaleString()} tokens, over this model's hard limit of ${hardLimit.toLocaleString()}; ` +
+									"the next request may still be refused. Run /trim to drop old tool results, or use a model with a larger window.",
+							]
+						: [];
+				return [headline, ...receipt, ...overLimit].join("\n");
 			},
 		},
 		{

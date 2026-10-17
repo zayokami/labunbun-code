@@ -1534,6 +1534,165 @@ describe("the cheap rung", () => {
 	});
 });
 
+describe("the hard-limit rescue", () => {
+	/** A window whose hard limit (17k) is within reach of a few thousand tokens. */
+	const SMALL = { contextWindow: 20_000, maxOutputTokens: 1_000, microcompactFirst: true };
+	const HARD = hardContextLimit(SMALL);
+
+	function resultText(message: AgentMessage | undefined): string {
+		return message?.role === "toolResult"
+			? message.content.map((block) => (block.type === "text" ? block.text : "")).join("")
+			: "";
+	}
+
+	/** A user message's own text, for reading the boundary a pass wrote. */
+	function userTextOf(message: AgentMessage | undefined): string {
+		return message?.role === "user" && typeof message.content === "string" ? message.content : "";
+	}
+
+	/**
+	 * The suffix `shrinkTail` leaves alone: the last user message and exactly
+	 * three tool results, each a little over the 2,000-character preview budget —
+	 * so the cheap rung's usual keep-last-three keeps them whole — and a tail
+	 * well under its 20k-token budget.
+	 */
+	function intactSuffix(): AgentMessage[] {
+		return [
+			userMessage("the current request"),
+			toolResultMessage("t1", "Bash", [textContent("x".repeat(2_500))]),
+			toolResultMessage("t2", "Bash", [textContent("x".repeat(2_500))]),
+			toolResultMessage("t3", "Bash", [textContent("x".repeat(2_500))]),
+		];
+	}
+
+	test("a summary that leaves the context over the hard limit previews every result, newest included", async () => {
+		// The suffix is the working set and is normally left whole — the cheap rung
+		// keeps its three newest results even when it trims older ones. Past the hard
+		// limit nothing can be sent, so the newest results stop being protected:
+		// previews of all three are the last lever that does not delete the turn.
+		const messages: AgentMessage[] = [userMessage("the earlier request"), ...intactSuffix()];
+		const context: Context = { systemPrompt: "sys", messages };
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-rescue-")),
+			mkdtempSync(join(tmpdir(), "lbb-rescue-home-")),
+		);
+		for (const message of messages) store.appendMessage(message);
+
+		const spills: SpillRequest[] = [];
+		// ~19.5k tokens after the rebuild: over the 17k hard limit, and the summary
+		// is what put it there.
+		const summary = "s".repeat(70_000);
+		const manager = new CompactionManager(SMALL, {
+			streamFn: fauxProvider([{ text: `<summary>${summary}</summary>`, usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			store,
+			spillOutput: (request) => {
+				spills.push(request);
+				return "/tmp/resort.txt";
+			},
+		});
+
+		const compacted = await manager.compact(context, { trigger: "manual" });
+
+		// Every result is a preview now, header included; the newest three would have
+		// stayed whole under the rung's default keep.
+		const results = compacted.messages.filter((message) => message.role === "toolResult");
+		expect(results).toHaveLength(3);
+		for (const message of results) {
+			const text = resultText(message);
+			expect(text.startsWith("[full output: 2500 chars → /tmp/resort.txt]\n")).toBe(true);
+			expect(text).toContain("[... truncated by microcompact ...]");
+			expect(text.length).toBeLessThanOrEqual(2_000);
+		}
+		expect(spills.map((call) => call.callId)).toEqual(["t1", "t2", "t3"]);
+
+		// The record carries the trimmed size, not the size the untrimmed rebuild
+		// would have left — that is the number everything downstream measures from.
+		const record = store.compactions().at(-1);
+		expect(record?.postTokens).toBe(estimateContextUsage(compacted));
+		const boundary = compacted.messages[0];
+		if (!boundary) throw new Error("expected the boundary to lead the compacted context");
+		const untrimmed = estimateContextUsage({
+			...context,
+			messages: [boundary, ...keepSuffix(context.messages)],
+		});
+		expect(untrimmed).toBeGreaterThanOrEqual(HARD); // the rescue ran for a reason
+		expect(record?.postTokens).toBeLessThan(untrimmed);
+	});
+
+	test("a suffix that cannot be made smaller blocks with the summary's context", async () => {
+		// The request at the front of the suffix is never elided: a turn that is one
+		// enormous user message is irreducible by every rung. The summary still ran
+		// and was recorded, so the refusal carries its context — the next run gets to
+		// start from the summary instead of replaying the history that just failed.
+		const summary = "1. Primary Request: keep going";
+		const manager = new CompactionManager(SMALL, {
+			streamFn: fauxProvider([{ text: `<summary>${summary}</summary>`, usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+		});
+		const messages: AgentMessage[] = [userMessage("x".repeat(200_000))]; // ~50k tokens
+
+		const decision = await manager.check({ systemPrompt: "", messages }, { force: true });
+
+		expect(decision?.action).toBe("blocked");
+		if (decision?.action !== "blocked") throw new Error("expected a blocked decision");
+		const context = decision.context;
+		if (!context) throw new Error("expected the pass's context to ride with the refusal");
+		// The boundary leads and is the summary that was just written.
+		expect(isCompactionBoundary(context.messages[0])).toBe(true);
+		expect(userTextOf(context.messages[0])).toContain(summary);
+		expect(context.messages[1]).toBe(messages[0]); // the request survives verbatim
+
+		// The message names the measured total and the hard limit, and says which
+		// part is still over: the conversation, since the summary and the rescue trim
+		// already had their turn.
+		const used = estimateContextUsage(context);
+		expect(used).toBeGreaterThanOrEqual(HARD);
+		expect(decision.message).toContain(
+			`The context is ${used.toLocaleString()} tokens against a hard limit of ${HARD.toLocaleString()}.`,
+		);
+		expect(decision.message).toContain(
+			"The conversation alone is still over that limit after the summary and previews.",
+		);
+	});
+
+	test("the blocked message says when the fixed part of the request is over the limit", () => {
+		// A session can be over its window while its messages look small: the system
+		// prompt and the tool schemas ride on every request. No amount of summarizing
+		// or trimming reduces those, so the advice has to be about them rather than
+		// about the conversation.
+		const config = { contextWindow: 8_000, maxOutputTokens: 1_000 };
+		const manager = new CompactionManager(config, {
+			streamFn: fauxProvider([{ text: "unused" }]).streamFn,
+			summarizerModel: SUMMARIZER,
+		});
+		const context: Context = {
+			systemPrompt: "s".repeat(30_000), // ~7,500 tokens alone
+			messages: [userMessage("hi")],
+			tools: [{ name: "Read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+		};
+
+		const message = manager.blockedMessage(context);
+		const breakdown = contextBreakdown(context);
+		const fixed = breakdown.systemPromptTokens + breakdown.toolSchemaTokens;
+		const limit = hardContextLimit(config);
+
+		expect(fixed).toBeGreaterThanOrEqual(limit); // the fixture's point
+		expect(breakdown.toolSchemaTokens).toBeGreaterThan(0);
+		expect(message).toContain(
+			`The context is ${breakdown.usedTokens.toLocaleString()} tokens against a hard limit of ${limit.toLocaleString()}.`,
+		);
+		expect(message).toContain(
+			`The system prompt and tool schemas alone take ${fixed.toLocaleString()} tokens, over that limit; ` +
+				"compaction cannot reduce that part.",
+		);
+		expect(message).toContain("Use a model with a larger window, or load fewer tools, skills, or memory files.");
+		expect(message).not.toContain("The conversation alone is still over");
+		// Without a context the old, unmeasured wording is what a caller still gets.
+		expect(manager.blockedMessage()).not.toContain("The context is");
+	});
+});
+
 describe("the boundary's transcript pointer", () => {
 	function textOf(message: AgentMessage | undefined): string {
 		return message?.role === "user" && typeof message.content === "string" ? message.content : "";

@@ -766,6 +766,31 @@ describe("context overflow", () => {
 		expect(session.messages.at(-1)).toMatchObject({ role: "user", content: "still here" });
 	});
 
+	test("a blocked check carrying a context adopts the summary before ending", async () => {
+		// The second half of the contract: a summary can run, be recorded, and still
+		// leave the rebuilt context over the hard limit. Ending without adopting it
+		// would drop the one piece of progress the pass made — the next run would
+		// replay the history that just failed instead of starting from the summary.
+		const boundary = userMessage("[Conversation compacted] the summary so far");
+		const kept = userMessage("the request after the summary");
+		let adopted: AgentMessage[] | undefined;
+		const { session, sent, events } = sessionWith(async (context) => {
+			adopted = [boundary, kept];
+			return { action: "blocked", message: "M", context: { ...context, messages: adopted } };
+		});
+
+		expect(await session.prompt("go")).toBe("error");
+		expect(sent).toHaveLength(0);
+		const end = events.find((event) => event.type === "agent_end");
+		expect(end?.type === "agent_end" ? end.errorMessage : undefined).toBe("M");
+		// Adopted, not merely reported: the live history is exactly the context the
+		// pass produced, boundary and summary included.
+		if (!adopted) throw new Error("expected the pass's context to be adopted");
+		expect(session.messages).toBe(adopted);
+		expect(session.messages[0]).toBe(boundary);
+		expect(JSON.stringify(session.messages)).toContain("Conversation compacted");
+	});
+
 	test("a compact decision is what gets sent, and it replaces the live history", async () => {
 		const boundary = userMessage("[Conversation compacted] the summary so far");
 		const { session, sent } = sessionWith(async (context) => ({

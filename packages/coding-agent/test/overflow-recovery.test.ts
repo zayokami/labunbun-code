@@ -9,7 +9,7 @@
  * zero network, no real credential, nothing billed.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COMPACTION_DISABLED_NOTICE } from "@labunbun/agent";
@@ -20,6 +20,49 @@ afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+/** One compaction line from a session file, as the app wrote it. */
+interface CompactionLine {
+	trigger?: string;
+	postTokens?: number;
+}
+
+/**
+ * Every compaction record under a sessions root, read from the files the app
+ * itself appended — the same surface `--continue` reads. The helper's `written`
+ * array is a stub; this is the durable record the "the summary really ran"
+ * assertion needs.
+ */
+function readCompactions(root: string): CompactionLine[] {
+	const out: CompactionLine[] = [];
+	const walk = (dir: string) => {
+		let entries: import("node:fs").Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			const full = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				walk(full);
+				continue;
+			}
+			if (!entry.name.endsWith(".jsonl")) continue;
+			for (const line of readFileSync(full, "utf8").split("\n")) {
+				if (!line) continue;
+				try {
+					const parsed = JSON.parse(line) as { type?: string; trigger?: string; postTokens?: number };
+					if (parsed.type === "compaction") out.push(parsed);
+				} catch {
+					// A partial line from a session still being written is not a record.
+				}
+			}
+		}
+	};
+	walk(root);
+	return out;
+}
+
 /**
  * Script steps are consumed one per model call, in order. `writeSettings` drops a
  * user settings file into the isolated home; the app reads hooks from there.
@@ -29,9 +72,16 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 	roots.push(home);
 	options.writeSettings?.(home);
 	const cwd = home;
+	// The prompts travel through a file rather than through the script: `--eval`
+	// takes its program as one command-line argument, and Windows caps that at
+	// 32k characters — a fixture whose point is an enormous prompt cannot be
+	// spelled inline.
+	const promptsPath = join(home, "prompts.json");
+	writeFileSync(promptsPath, JSON.stringify(options.prompts ?? ["new question", "and again"]));
 
 	const script = `
 		import { mock } from "bun:test";
+		import { readFileSync } from "node:fs";
 		import * as ai from "@labunbun/ai";
 		import * as tui from "@labunbun/tui";
 		const requests = [];
@@ -83,7 +133,7 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 						if (state.contextActivity !== shown) { activity.push(state.contextActivity); shown = state.contextActivity; }
 					} },
 					waitUntilExit: async () => {
-						for (const text of ${JSON.stringify(options.prompts ?? ["new question", "and again"])}) {
+						for (const text of JSON.parse(readFileSync(${JSON.stringify(promptsPath)}, "utf8"))) {
 							replies.push(await session.prompt(text));
 							counts.push(requests.length);
 						}
@@ -109,18 +159,21 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 		proc.exited,
 	]);
 	expect(exitCode, stderr).toBe(0);
+	const parsed = JSON.parse(stdout.trim()) as {
+		exitCode: number;
+		requests: { messages: AgentMessage[]; model: string }[];
+		replies: string[];
+		counts: number[];
+		infos: string[];
+		// "cleared" crosses the process boundary as null: the field is set back
+		// to undefined, which JSON has no word for.
+		activity: (string | null)[];
+	};
 	return {
-		...(JSON.parse(stdout.trim()) as {
-			exitCode: number;
-			requests: { messages: AgentMessage[]; model: string }[];
-			replies: string[];
-			counts: number[];
-			infos: string[];
-			// "cleared" crosses the process boundary as null: the field is set back
-			// to undefined, which JSON has no word for.
-			activity: (string | null)[];
-		}),
+		...parsed,
 		stderr,
+		// Read from the files the child wrote, under the isolated home it was given.
+		compactions: readCompactions(join(home, ".labunbun", "projects")),
 	};
 }
 
@@ -275,5 +328,65 @@ describe("recovering from a refusal for size", () => {
 		// The turns themselves still ran: a compaction that fails is a loss of
 		// headroom, not a broken session, as long as the request still fits.
 		expect(replies).toEqual(["completed", "completed", "completed", "completed", "completed"]);
+	}, 30_000);
+
+	test("a summary that still does not fit ends the run without resending the oversized prompt", async () => {
+		// The hole this closes: a summary succeeds, the rebuilt context is still
+		// past the hard limit, and the session ends without adopting the summary —
+		// or worse, sends the refused request again. The prompt here is one enormous
+		// user message, the request at index 0 of the retained suffix, which no rung
+		// is allowed to elide: the summary cannot fix a turn that is itself the
+		// problem, so the run ends and the summary stays as the next run's start.
+		const huge = "q".repeat(900_000); // ~225k tokens against a 197k hard limit
+		const { requests, replies, compactions } = await run(
+			JSON.stringify([
+				{ overflow: "prompt is too long: 250000 tokens > 200000 maximum" },
+				{ text: "<summary>1. Primary Request: keep going</summary>" },
+			]),
+			{
+				// A 200k window, like the refusal above pretends this provider has. The
+				// default registry model carries a 1M window, and a 225k-token prompt
+				// would fit it — the scene needs the limit the summary cannot clear.
+				// Automatic compaction is off so the request reaches the provider at
+				// all: a pre-send estimate that already saw the size would summarize
+				// before sending, which is the other order of this story and a
+				// different behavior. A refusal still forces the pass — off is not a
+				// way to end a run.
+				writeSettings: (home: string) => {
+					mkdirSync(join(home, ".labunbun"), { recursive: true });
+					writeFileSync(
+						join(home, ".labunbun", "settings.json"),
+						JSON.stringify({
+							model: "test/small",
+							compaction: { enabled: false },
+							providers: {
+								openaiCompatible: [
+									{
+										id: "test",
+										baseUrl: "https://example.invalid/v1",
+										apiKeyEnv: "TEST_KEY",
+										models: [{ id: "small", contextWindow: 200_000, maxOutputTokens: 8_192 }],
+									},
+								],
+							},
+						}),
+					);
+				},
+				prompts: [huge],
+			},
+		);
+
+		expect(replies[0]).toBe("error");
+		// Two calls: the refusal, then the summary. No third request carrying the
+		// same oversized prompt — sending it again is the failure, not a retry.
+		expect(requests).toHaveLength(2);
+		expect(JSON.stringify(requests[1]?.messages)).toContain("You are summarizing");
+		expect(requests.filter((request) => JSON.stringify(request.messages).includes("q".repeat(1_000)))).toHaveLength(1);
+		// The summary was real work even though the run could not be saved by it:
+		// its record is in the session file, so `--continue` starts from it rather
+		// than from the history that just failed.
+		const overflowRecords = compactions.filter((record) => record.trigger === "overflow");
+		expect(overflowRecords).toHaveLength(1);
+		expect(overflowRecords[0]?.postTokens).toBeGreaterThan(197_000);
 	}, 30_000);
 });

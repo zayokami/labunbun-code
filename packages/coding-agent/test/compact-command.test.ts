@@ -12,7 +12,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, CompactionManager, type CompactionTrigger, SessionStore } from "@labunbun/agent";
+import {
+	AgentSession,
+	CompactionManager,
+	type CompactionTrigger,
+	estimateContextUsage,
+	SessionStore,
+} from "@labunbun/agent";
 import {
 	type AgentMessage,
 	assistantMessage,
@@ -88,7 +94,7 @@ function makeHarness(
 		pushInfo: (info: string) => infos.push(info),
 	} as LocalCommandContext;
 
-	return { ctx, session, store, infos, prompted, command: compactCommand() };
+	return { ctx, session, store, compaction, infos, prompted, command: compactCommand() };
 }
 
 describe("/compact", () => {
@@ -159,6 +165,26 @@ describe("/compact", () => {
 
 		expect(seen).toEqual(["manual"]);
 		expect((result ?? "").startsWith("Conversation compacted:")).toBe(true);
+	});
+
+	test("warns when the compacted context is still over the hard limit", async () => {
+		// A summary can be real work and still not fit: the summary itself can be
+		// large, or the turn it had to keep can be. The headline would then read as a
+		// fixed session right before the next request is refused, so the command has
+		// to say the context is still over the line — with the numbers, from the
+		// manager's own limits.
+		const h = makeHarness(`<summary>${"x".repeat(800_000)}</summary>`);
+
+		const result = (await h.command.call(h.ctx, "")) ?? "";
+
+		// The measurement the command made, against the limit the manager reports.
+		const after = estimateContextUsage(h.session.currentContext());
+		const limit = h.compaction.limits().hardLimit;
+		expect(after).toBeGreaterThanOrEqual(limit); // the fixture's point
+		expect(result.split("\n")).toContain(
+			`Warning: the compacted context is still ~${after.toLocaleString()} tokens, over this model's hard limit of ${limit.toLocaleString()}; ` +
+				"the next request may still be refused. Run /trim to drop old tool results, or use a model with a larger window.",
+		);
 	});
 
 	test("records the compaction so the summary can be audited", async () => {

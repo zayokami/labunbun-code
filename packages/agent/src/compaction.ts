@@ -973,7 +973,10 @@ export class CompactionManager {
 
 	/**
 	 * The loop's decision point: compact when the threshold says so, and refuse
-	 * to send at all when the request cannot fit and no space could be freed.
+	 * to send at all when the request cannot fit and no space could be freed —
+	 * including after a summary that ran and still left the rebuilt context past
+	 * the hard limit, whose context rides along on the refusal so the caller can
+	 * keep what the pass produced.
 	 *
 	 * A refusal matters more than it looks. The provider's 400 arrives as a
 	 * generic error, and with a fallback chain configured the same oversized
@@ -999,9 +1002,21 @@ export class CompactionManager {
 		try {
 			const pass = await this.#pass(context, options);
 			if (!pass) return null;
-			return pass.kind === "compact"
-				? { action: "compact", context: pass.context }
-				: { action: "reduced", context: pass.context, cleared: pass.cleared };
+			// A `reduced` pass can never be over hard: both rungs that produce one
+			// are gated under the hard limit, where previews are a way to stay under
+			// the threshold rather than to escape a refusal.
+			if (pass.kind === "reduced") return { action: "reduced", context: pass.context, cleared: pass.cleared };
+			// A summary is real progress even when it is not enough. The rebuilt
+			// context is measured against the hard limit for the same reason the
+			// request was refused in the first place: what can be sent is the whole
+			// point, and a pass that leaves the context unsendable must say so. Its
+			// context rides along so the caller can adopt the summary — the record is
+			// already written, and the next run should start from it rather than from
+			// the history that just failed.
+			if (estimateContextUsage(pass.context) >= hardContextLimit(this.#config)) {
+				return { action: "blocked", message: this.blockedMessage(pass.context), context: pass.context };
+			}
+			return { action: "compact", context: pass.context };
 		} catch {
 			// A cancel is not a failure to report as one: the request it would name
 			// as unfixable ("the conversation no longer fits") is the one the user
@@ -1011,7 +1026,7 @@ export class CompactionManager {
 			// The failure is already counted in #consecutiveFailures. Below the hard
 			// limit the turn goes ahead as it always did — the provider's own error is
 			// the report, and it may well fit after all.
-			return overHard ? { action: "blocked", message: this.blockedMessage() } : null;
+			return overHard ? { action: "blocked", message: this.blockedMessage(context) } : null;
 		}
 	}
 
@@ -1049,6 +1064,27 @@ export class CompactionManager {
 				transcriptPath: this.#deps.store?.path,
 			});
 			const messages = [boundary, ...suffix];
+			// The suffix is normally left whole because it is the working set: the
+			// request being answered and the results it is still using. Past the hard
+			// limit, though, nothing can be sent at all, so this is the one moment
+			// every tool result may be replaced by a preview — the newest included,
+			// which the cheap rung's usual keep-last-N never reaches. The trade is
+			// detail against a request that exists: the setting still gates it (the
+			// same `microcompactFirst` permission `/trim` acts under), and a trim that
+			// frees nothing leaves the context over the limit, which is what the
+			// caller then reports as blocked.
+			let rebuilt = messages;
+			let postTokens = estimateContextUsage({ ...context, messages: rebuilt });
+			if (postTokens >= hardContextLimit(this.#config) && this.#config.microcompactFirst) {
+				const trimmed = microcompact(rebuilt, 0, TRIM_PER_RESULT_BUDGET, this.#deps.spillOutput);
+				const trimmedTokens = estimateContextUsage({ ...context, messages: trimmed });
+				// Adopted only when it is strictly smaller: a rewrite that frees nothing
+				// costs the detail for no room.
+				if (trimmedTokens < postTokens) {
+					rebuilt = trimmed;
+					postTokens = trimmedTokens;
+				}
+			}
 
 			// A success clears the count, manual or automatic: the breaker is a
 			// statement about this session's compaction working, and it has just been
@@ -1068,7 +1104,11 @@ export class CompactionManager {
 				this.#rapidRefills = 0;
 			}
 			this.#checksSinceCompact = 0;
-			this.#lastPostTokens = estimateContextUsage({ ...context, messages });
+			// The final number, after the rescue trim. Every reader of it — the
+			// anti-thrash growth floor, the store record, the size report — is asking
+			// what this pass actually left behind, and a trimmed pass left less than
+			// the untrimmed rebuild would have.
+			this.#lastPostTokens = postTokens;
 			const preservedFiles = preservedFilesWithHashes(context.messages, this.#deps.readFile);
 			// The record is a pass's durable half, and the one part that could
 			// silently not happen: appendCompaction refuses when the suffix is not
@@ -1115,7 +1155,7 @@ export class CompactionManager {
 			// on this news sees the one being reported rather than the previous one.
 			await this.#deps.onPhase?.({ kind: "done", preTokens, postTokens: this.#lastPostTokens, trigger, verification });
 
-			return { ...context, messages };
+			return { ...context, messages: rebuilt };
 		} catch (error) {
 			// A cancel is not a failure of the mechanism: counting it would let three
 			// Esc presses trip the breaker and switch automatic compaction off for
@@ -1137,8 +1177,35 @@ export class CompactionManager {
 	 * The commands it names are ones the app dispatches: advice that ends in
 	 * "unknown command" is worse than none, and this is read at the moment the
 	 * session is stuck.
+	 *
+	 * `context`, when the caller has one, turns the general statement into a
+	 * measured one: the total against the hard limit, and — when the fixed part
+	 * of every request is already over that line — the fact that no summary can
+	 * shrink it. That distinction is the difference between advice that can work
+	 * ("run /trim") and advice that cannot ("summarize again"), and it is
+	 * invisible from the transcript alone: a session with a large system prompt
+	 * or toolset is over its window while its messages look small.
 	 */
-	blockedMessage(): string {
+	blockedMessage(context?: Context): string {
+		let measured = "";
+		if (context) {
+			const breakdown = contextBreakdown(context);
+			const limit = hardContextLimit(this.#config);
+			measured += `The context is ${breakdown.usedTokens.toLocaleString()} tokens against a hard limit of ${limit.toLocaleString()}. `;
+			const fixed = breakdown.systemPromptTokens + breakdown.toolSchemaTokens;
+			if (fixed >= limit) {
+				// Not "trim harder": the part that is over the limit is the part every
+				// request pays before the transcript is counted, and no compaction can
+				// reduce it. The fixes are outside the conversation.
+				measured +=
+					`The system prompt and tool schemas alone take ${fixed.toLocaleString()} tokens, over that limit; ` +
+					"compaction cannot reduce that part. Use a model with a larger window, or load fewer tools, skills, or memory files. ";
+			} else if (breakdown.messageTokens >= limit) {
+				// The summary and the rescue trim already had their turn, so the
+				// remaining advice is about what the conversation still carries.
+				measured += "The conversation alone is still over that limit after the summary and previews. ";
+			}
+		}
 		// The refill trip is checked first and told in its own words: the summaries
 		// worked, and the transcript walked back over them, so "failed N times"
 		// would be a false report of a working mechanism — and the advice has to
@@ -1148,6 +1215,7 @@ export class CompactionManager {
 			return (
 				`The context refilled within ${RAPID_REFILL_CHECKS} requests of each of the last ${MAX_RAPID_REFILLS} compactions, so automatic compaction is switched off for this session, ` +
 				`and the conversation no longer fits in this model's ${this.#config.contextWindow.toLocaleString()} token window. ` +
+				measured +
 				"A single oversized tool result or file read can refill a window that fast; reading it in pieces avoids it. " +
 				"Run /compact to summarize it now, /trim to drop old tool results for free, " +
 				"or exit and start a new session."
@@ -1158,6 +1226,7 @@ export class CompactionManager {
 			: "Automatic compaction could not free enough space";
 		return (
 			`${cause}, and the conversation no longer fits in this model's ${this.#config.contextWindow.toLocaleString()} token window. ` +
+			measured +
 			"Run /compact to summarize it now, /trim to drop old tool results for free, " +
 			"or exit and start a new session."
 		);
@@ -1390,7 +1459,11 @@ export function microcompact(
 	});
 	if (toolResultIndices.length <= keepLastN) return messages;
 
-	const cutoff = new Set(toolResultIndices.slice(-keepLastN));
+	// `slice(-0)` is `slice(0)`, which would keep every result — the opposite of
+	// what a keep-last-N of zero means. Zero is the hard-limit rescue's way of
+	// saying "the newest results are not protected any more", so it gets its own
+	// path: an empty cutoff, and every result over the budget is fair game.
+	const cutoff = keepLastN > 0 ? new Set(toolResultIndices.slice(-keepLastN)) : new Set<number>();
 	const room = Math.max(0, perResultBudget - MICROCOMPACT_MARKER.length);
 	return messages.map((message, i) => {
 		if (cutoff.has(i) || message.role !== "toolResult") return message;

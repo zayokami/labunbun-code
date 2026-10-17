@@ -427,7 +427,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				const veto = await options.preCompact?.(checkOptions?.force ? "overflow" : "auto");
 				if (veto?.blocked) {
 					options.report(`Compaction skipped by PreCompact hook${veto.reason ? `: ${veto.reason}` : ""}`);
-					return checkOptions?.force ? { action: "blocked", message: compaction.blockedMessage() } : null;
+					return checkOptions?.force ? { action: "blocked", message: compaction.blockedMessage(context) } : null;
 				}
 				// The clock advances only when the manager is actually consulted:
 				// a check a veto sent home early must not eat the idle window the

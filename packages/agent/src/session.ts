@@ -398,7 +398,12 @@ export class AgentSession {
 						// Nothing was sent. Ending the run here is the whole point: the
 						// alternative is a provider 400 with no explanation, repeated on
 						// every later turn because the history that caused it is still
-						// the history.
+						// the history. A blocked check may still carry a context a pass
+						// produced — a summary that ran and was not enough. The summary
+						// is real work and already recorded; adopting it is what makes
+						// the next run start smaller instead of replaying the history
+						// that just failed.
+						if (decision.context) this.applyCompaction(decision.context);
 						errorMessage = decision.message;
 						reason = "error";
 						break;

@@ -493,11 +493,20 @@ export interface TrimmedToolResults {
  * `reduced` is not a lesser `compact`: it made no model call and wrote no
  * summary, so a caller that treats the two alike will report one that did not
  * happen. Both are a context to send instead of the one that was offered.
+ *
+ * `blocked` may still carry a context a pass produced. A summary that is real
+ * work but left the rebuilt context past the hard limit is exactly that shape:
+ * the caller must adopt the context before ending the run, because the
+ * transcript the summary replaced is gone from the model's view and dropping
+ * the new one too would make the pass look like it changed nothing — the next
+ * run would start from the history that just failed instead of from the
+ * summary that was paid for. The message remains the whole explanation for the
+ * user; the context is only for the session to keep.
  */
 export type CompactionCheck =
 	| { action: "compact"; context: Context }
 	| { action: "reduced"; context: Context; cleared: TrimmedToolResults }
-	| { action: "blocked"; message: string };
+	| { action: "blocked"; message: string; context?: Context };
 
 // ---------------------------------------------------------------------------
 // Agent events
