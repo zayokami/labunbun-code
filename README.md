@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml/badge.svg)](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml)
 
-LaBunbun Code is a terminal coding agent. It runs on Bun and pnpm.
+LaBunbun Code is a terminal coding agent.
 
 ```bash
 labunbun                              # start the interactive session
