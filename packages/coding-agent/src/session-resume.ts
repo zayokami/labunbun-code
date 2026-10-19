@@ -4,11 +4,17 @@
  */
 import { SessionStore } from "@labunbun/agent";
 import { type AgentMessage, repairToolPairing } from "@labunbun/ai";
+import { readSessionTitle } from "./session-title.ts";
 
 export interface SessionSummary {
 	path: string;
 	sessionId: string;
 	mtimeMs: number;
+	/**
+	 * The user's name for the session, when `/rename` gave it one. It lives in
+	 * a sidecar, so reading it does not touch the transcript.
+	 */
+	title?: string;
 	/** First user message — used as the picker label. */
 	firstUserText: string;
 	messageCount: number;
@@ -39,6 +45,7 @@ export function listSessions(cwd?: string, home?: string): SessionSummary[] {
 		const firstUser = messages.find((m) => m.role === "user");
 		return {
 			...entry,
+			title: readSessionTitle(entry.path),
 			firstUserText: firstUser ? textOf(firstUser).slice(0, 80) : "(empty session)",
 			messageCount: messages.length,
 			truncated: store.truncated,

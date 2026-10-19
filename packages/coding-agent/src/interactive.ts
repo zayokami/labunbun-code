@@ -260,6 +260,7 @@ import {
 	enclosingRepositoryRoot,
 	withheldDefinitionNotice,
 } from "./project-trust.ts";
+import { createPreviewRequester } from "./session-preview.ts";
 import {
 	damagedSessionNotice,
 	exitSummaryLine,
@@ -271,6 +272,7 @@ import {
 	type SessionSummary,
 	shortSessionId,
 } from "./session-resume.ts";
+import { normalizeSessionTitle, readSessionTitle, writeSessionTitle } from "./session-title.ts";
 import {
 	applyCatalogSettings,
 	applySettingsEnv,
@@ -1773,6 +1775,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		readState.clear();
 		handle.setTasks(taskStore.summary());
 		handle.setSession(next);
+		// The incoming session's own sidecar: a title belongs to the conversation
+		// it names, and carrying the outgoing one across would label the wrong
+		// transcript in the terminal bar. No sidecar clears it.
+		// A handle from an older caller, or a test double, may not carry the
+		// method; a missing title setter must not fail a resume.
+		handle.setSessionTitle?.(readSessionTitle(loaded.store.path));
 		attachSessionListeners(next);
 		refreshContextInfo(next);
 		sessionRef = next;
@@ -1969,6 +1977,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		].sort(([a], [b]) => a.localeCompare(b)),
 		completeFiles: (query) => fileCompleter(query),
 		dirName: basename(cwd),
+		// Read before mounting, so the first frame already carries the name the
+		// session was given rather than replacing the directory a moment later.
+		sessionTitle: readSessionTitle(store.path),
 		cwd,
 		// Handed over even when the pad is switched off: the bridge is inert until
 		// something enables the service, and `/gamepad on` has to reach a tree that
@@ -3234,6 +3245,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/permissions", "Show the active permission mode and rules"],
 		["/plan", "Show the plan recorded in this session: its state, steps, and full text"],
 		["/ps", "List background shells and show what one has printed"],
+		["/rename", "Title this session, shown in /resume and the terminal title: /rename [<title>|--clear]"],
 		["/resume", "Resume an earlier session in this directory (pick from a list)"],
 		["/rewind", "Restore a file from a checkpoint: /rewind [number]"],
 		["/status", "Show model, context usage, cost, and settings at a glance"],
@@ -3604,6 +3616,43 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			pushInfo(ctx.handle, lines.join("\n") || "(none)");
 			return true;
 		}
+		case "/rename": {
+			const target = ctx.sessionStore();
+			if (!target) {
+				pushInfo(ctx.handle, "No session to rename.");
+				return true;
+			}
+			const arg = text.split(/\s+/).slice(1).join(" ").trim();
+			if (!arg) {
+				const current = readSessionTitle(target.path);
+				pushInfo(
+					ctx.handle,
+					current
+						? `This session is titled "${current}". Use /rename <title> to change it, or /rename --clear to remove it.`
+						: "This session has no title. Use /rename <title> to give it one.",
+				);
+				return true;
+			}
+			try {
+				if (arg === "--clear") {
+					writeSessionTitle(target.path, undefined);
+					ctx.handle?.setSessionTitle(undefined);
+					pushInfo(ctx.handle, "Session title cleared.");
+					return true;
+				}
+				const title = normalizeSessionTitle(arg);
+				if (!title) {
+					pushInfo(ctx.handle, "A title needs at least one visible character.");
+					return true;
+				}
+				writeSessionTitle(target.path, title);
+				ctx.handle?.setSessionTitle(title);
+				pushInfo(ctx.handle, `Session renamed: ${title}`);
+			} catch (error) {
+				pushInfo(ctx.handle, `Rename failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return true;
+		}
 		case "/resume": {
 			if (!session || !ctx.handle) return true;
 			if (session.isRunning) {
@@ -3623,11 +3672,36 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			void (async () => {
 				const handleRef = ctx.handle;
 				if (!handleRef) return;
-				const items = sessions.map((s) => ({
-					label: `${shortSessionId(s.sessionId)}  ${new Date(s.mtimeMs).toLocaleString()}`,
-					description: `${formatMessageCount(s)} msgs — ${s.firstUserText}`,
-				}));
-				const index = await handleRef.pickFromList("Resume a session", items);
+				const items = sessions.map((s) => {
+					const date = new Date(s.mtimeMs).toLocaleString();
+					// A titled session leads with the name the user gave it; the id
+					// stays in the description because it is still what `--resume`
+					// takes. An untitled row keeps the old shape byte for byte.
+					return s.title
+						? {
+								label: s.title,
+								description: `${shortSessionId(s.sessionId)} · ${date} · ${formatMessageCount(s)} msgs — ${s.firstUserText}`,
+							}
+						: {
+								label: `${shortSessionId(s.sessionId)}  ${date}`,
+								description: `${formatMessageCount(s)} msgs — ${s.firstUserText}`,
+							};
+				});
+				// One requester per picker: the cache lives as long as the list is
+				// open (moving back to a row should not re-read it), and reset()
+				// drops the pending read when the list closes.
+				const previewer = createPreviewRequester();
+				let index: number | null;
+				try {
+					index = await handleRef.pickFromList("Resume a session", items, {
+						preview: (row) => {
+							const session = sessions[row];
+							return session ? previewer.request(session.path) : Promise.resolve(null);
+						},
+					});
+				} finally {
+					previewer.reset();
+				}
 				if (index === null) return;
 				await ctx.hotSwapSession(sessions[index]);
 			})().catch((error) => {

@@ -186,18 +186,9 @@ export class SessionStore {
 			}
 		}
 		for (const line of text.split("\n")) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			let entry: unknown;
-			try {
-				entry = JSON.parse(trimmed);
-			} catch {
-				store.#skippedLines++;
-				continue;
-			}
-			// Parsed JSON is not yet an entry: `{}` parses, and an entry with no id
-			// would join the chain as a node nothing can point at.
-			if (!isEntryShaped(entry)) {
+			if (!line.trim()) continue;
+			const entry = parseSessionLine(line);
+			if (!entry) {
 				store.#skippedLines++;
 				continue;
 			}
@@ -473,6 +464,29 @@ function readHead(path: string, maxBytes: number): string {
 	} finally {
 		closeSync(descriptor);
 	}
+}
+
+/**
+ * One line of a session file as an entry, or null when the line is blank or is
+ * not one. Parsed JSON is not yet an entry: `{}` parses, and an entry with no
+ * id would join the chain as a node nothing can point at.
+ *
+ * Exported for readers that walk the file themselves — the session preview
+ * reads a tail rather than the whole file, and it must accept exactly the
+ * lines `load` accepts. A second parser would be a second set of rules for
+ * what a session is, and the two would disagree the first time the format
+ * gained a field.
+ */
+export function parseSessionLine(line: string): SessionEntry | null {
+	const trimmed = line.trim();
+	if (!trimmed) return null;
+	let entry: unknown;
+	try {
+		entry = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+	return isEntryShaped(entry) ? entry : null;
 }
 
 /**

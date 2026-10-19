@@ -126,6 +126,7 @@ export {
 	type CompactionTrigger,
 	newEntryId,
 	type PreservedFile,
+	parseSessionLine,
 	type SessionEntry,
 	SessionStore,
 	sanitizeCwd,
