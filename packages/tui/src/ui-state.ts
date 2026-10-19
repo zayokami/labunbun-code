@@ -19,7 +19,11 @@ import type { Theme } from "./themes/tokens.ts";
 export type UiEntry =
 	/** `steered` marks a message sent into a running turn rather than as a new one. */
 	| { kind: "user"; text: string; steered?: boolean }
-	| { kind: "assistant"; text: string }
+	/**
+	 * `incomplete` says the turn ended mid-answer — a stream failure or an abort
+	 * kept the partial text, so the row must not read as the model's full reply.
+	 */
+	| { kind: "assistant"; text: string; incomplete?: true }
 	| {
 			kind: "toolUse";
 			callId: string;
@@ -27,6 +31,15 @@ export type UiEntry =
 			inputPreview: string;
 			resultText?: string;
 			isError?: boolean;
+			/**
+			 * The result was cut off by the abort path, not produced: the call
+			 * did not finish its work, so the row is a cancellation, not a failure.
+			 */
+			interrupted?: true;
+			/** Result length before the display cap, so a cut can be sized. */
+			resultTotalChars?: number;
+			/** True when `resultText` was cut at `RESULT_TEXT_CAP`. */
+			resultTruncated?: boolean;
 	  }
 	| { kind: "error"; text: string }
 	| { kind: "info"; text: string };
@@ -120,6 +133,13 @@ export interface ActivityView {
 	range: ActivityRange;
 }
 
+/** A backoff the ladder is waiting out, as the status row needs it. */
+export interface UiRetry {
+	attempt: number;
+	untilMs: number;
+	message: string;
+}
+
 export interface UiState {
 	entries: UiEntry[];
 	streamingText: string;
@@ -133,6 +153,18 @@ export interface UiState {
 	 */
 	liveOutputs: Record<string, string>;
 	statusPhase: StatusPhase;
+	/**
+	 * A retry the ladder is waiting out, stamped with the wall clock at which the
+	 * next attempt is due.
+	 *
+	 * The clock is in the value rather than derived from a tick because the
+	 * status row must be able to count down between renders: `untilMs - now` is
+	 * the only thing that changes while a long backoff runs, and the reducer is
+	 * not called again until the attempt resumes. Cleared by the first sign of
+	 * the stream coming back (any message update, a turn boundary, the run's
+	 * end), so a finished wait cannot leave the line claiming it is still going.
+	 */
+	retry?: UiRetry;
 	dialog: PermissionDialogState | null;
 	question: QuestionDialogState | null;
 	/**
@@ -161,6 +193,13 @@ export interface UiState {
 	 * compaction rather than restarting at every phase it moves through.
 	 */
 	contextActivitySince?: number;
+	/**
+	 * Whether Escape stops the activity above. A manual `/compact` runs behind a
+	 * command-level abort signal; a summarization the loop started on its own
+	 * does not, and offering the key for it would promise a cancellation that
+	 * does not exist. Absent means not cancellable.
+	 */
+	contextActivityCancellable?: boolean;
 	/**
 	 * The `/status` card, shown over the prompt until Esc or the next submit.
 	 * Not modal: it reports on the run, it does not block it.
@@ -303,10 +342,11 @@ export interface PermissionDialogState {
 	 * The answer, with the two standing extras. `alwaysAllow` records a session
 	 * grant for the scope the user was looking at; `alwaysAsk` records a session
 	 * ask rule instead — they are opposite answers and never both true
-	 * (permission-options). Optional so a caller that predates the fourth answer
-	 * still resolves the plain ones.
+	 * (permission-options). `message` is what the fourth answer collected: the
+	 * sentence the model should act on instead. Optional so a caller that
+	 * predates the fourth answer still resolves the plain ones.
 	 */
-	resolve: (allow: boolean, alwaysAllow: boolean, alwaysAsk?: boolean) => void;
+	resolve: (allow: boolean, alwaysAllow: boolean, alwaysAsk?: boolean, message?: string) => void;
 }
 
 export interface UiQuestion {
@@ -439,10 +479,57 @@ export function toolFullView(_toolName: string, input: unknown): string {
 	return `${text.slice(0, INPUT_FULL_MAX)}\n… (${text.length - INPUT_FULL_MAX} more characters)`;
 }
 
+/** Characters of a dropped message shown in its preview line. */
+const DROPPED_PREVIEW_CHARS = 200;
+
+/** Dropped messages named one by one before the rest are only counted. */
+const DROPPED_PREVIEW_MAX = 10;
+
+/**
+ * The text of what an abort discarded, from the event that carries it.
+ *
+ * The run's own report is authoritative; the store's queue is the fallback for
+ * an event from a host that predates the payload. Steering is listed after
+ * follow-ups because that is the order the turn would have delivered them in.
+ */
+function droppedQueueTexts(event: Extract<AgentEvent, { type: "agent_end" }>, queued: QueuedMessage[]): string[] {
+	if (event.interrupted) return [...event.interrupted.followUp, ...event.interrupted.steering];
+	return queued.map((message) => message.text);
+}
+
+/** One dropped message, flattened to a line and bounded for the transcript. */
+function previewDropped(text: string): string {
+	const oneLine = text.replace(/\s+/g, " ").trim();
+	return oneLine.length > DROPPED_PREVIEW_CHARS ? `${oneLine.slice(0, DROPPED_PREVIEW_CHARS)}…` : oneLine;
+}
+
 export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 	switch (event.type) {
 		case "agent_start":
-			return { ...state, statusPhase: "thinking" };
+			return { ...state, statusPhase: "thinking", retry: undefined };
+
+		case "retry":
+			// The attempt just failed and the next one is `delayMs` away. Stamped
+			// here so the status row can count down without another event.
+			return {
+				...state,
+				retry: { attempt: event.attempt, untilMs: Date.now() + event.delayMs, message: event.message },
+			};
+
+		case "fallback":
+			// A descent is otherwise invisible until an answer arrives from a model
+			// the user did not pick. A durable line, not a status phrase: by the time
+			// the answer is read, the switch is part of the transcript's history.
+			return {
+				...state,
+				entries: [
+					...state.entries,
+					{
+						kind: "info",
+						text: `[model fallback] ${event.from.provider}/${event.from.id} → ${event.to.provider}/${event.to.id}: ${event.reason}`,
+					},
+				],
+			};
 
 		case "turn_start":
 			// A turn only starts after the loop has drained both queues into the
@@ -454,28 +541,32 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				streamingText: "",
 				thinkingText: "",
 				statusPhase: "thinking",
+				retry: undefined,
 				queued: state.queued.length > 0 ? [] : state.queued,
 			};
 
 		case "message_update": {
 			// Incremental append from the delta itself — rejoining the full
-			// content array per delta is O(n²) on long responses.
+			// content array per delta is O(n²) on long responses. Any update means
+			// the attempt that was being waited out has started answering, so the
+			// retry line goes regardless of what the delta carries.
+			const resumed = state.retry ? { ...state, retry: undefined } : state;
 			const ae = event.assistantMessageEvent;
 			switch (ae.type) {
 				case "thinking_start":
-					return { ...state, thinkingText: "" };
+					return { ...resumed, thinkingText: "" };
 				case "thinking_delta":
-					return { ...state, thinkingText: state.thinkingText + ae.delta };
+					return { ...resumed, thinkingText: resumed.thinkingText + ae.delta };
 				case "text_start":
-					return { ...state, statusPhase: "responding", streamingText: "" };
+					return { ...resumed, statusPhase: "responding", streamingText: "" };
 				case "text_delta":
 					return {
-						...state,
+						...resumed,
 						statusPhase: "responding",
-						streamingText: state.streamingText + ae.delta,
+						streamingText: resumed.streamingText + ae.delta,
 					};
 				default:
-					return state;
+					return resumed;
 			}
 		}
 
@@ -484,10 +575,19 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				...state,
 				entries: [
 					...state.entries,
-					...(state.streamingText ? [{ kind: "assistant", text: state.streamingText } as UiEntry] : []),
+					...(state.streamingText
+						? [
+								{
+									kind: "assistant",
+									text: state.streamingText,
+									...(event.message.incomplete ? { incomplete: true as const } : {}),
+								} as UiEntry,
+							]
+						: []),
 				],
 				streamingText: "",
 				thinkingText: "",
+				retry: undefined,
 				statusPhase: event.toolResults.length > 0 ? "tools" : "idle",
 			};
 
@@ -515,11 +615,13 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 
 		case "tool_execution_end": {
 			const content = Array.isArray(event.result.content) ? event.result.content : [];
-			const resultText = content
+			const full = content
 				.filter((b) => b.type === "text")
 				.map((b) => b.text)
-				.join("\n")
-				.slice(0, RESULT_TEXT_CAP);
+				.join("\n");
+			// Measured before the cut: a reader of the transcript needs to know how
+			// much is missing, and the cut string cannot tell them that.
+			const resultText = full.slice(0, RESULT_TEXT_CAP);
 			// The result supersedes the stream: keeping both would hold every
 			// command's output in memory for the life of the session.
 			const liveOutputs = { ...state.liveOutputs };
@@ -530,7 +632,14 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				pendingTools: state.pendingTools.filter((p) => p.callId !== event.callId),
 				entries: state.entries.map((entry) =>
 					entry.kind === "toolUse" && entry.callId === event.callId
-						? { ...entry, resultText, isError: event.result.isError }
+						? {
+								...entry,
+								resultText,
+								isError: event.result.isError,
+								resultTotalChars: full.length,
+								resultTruncated: full.length > RESULT_TEXT_CAP,
+								...(event.result.interrupted ? { interrupted: true as const } : {}),
+							}
 						: entry,
 				),
 			};
@@ -539,28 +648,53 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 		case "agent_end": {
 			const entries = [...state.entries];
 			if (state.streamingText) {
-				entries.push({ kind: "assistant", text: state.streamingText });
+				// The text on screen belongs to the run's last assistant message,
+				// which is the one the failure or abort marked. Reaching for the
+				// last rather than any member: an earlier turn can be incomplete
+				// too, and inheriting its marker would misdate this one.
+				const last = [...event.messages].reverse().find((message) => message.role === "assistant");
+				entries.push({
+					kind: "assistant",
+					text: state.streamingText,
+					...(last?.role === "assistant" && last.incomplete ? { incomplete: true as const } : {}),
+				});
 			}
 			if (event.reason === "error" && event.errorMessage) {
-				entries.push({ kind: "error", text: `Error: ${event.errorMessage}` });
+				// The kind is classified, but the next move belongs to the host:
+				// `/login`, `/model`, `/compact` are commands this layer has never
+				// heard of. The remedy is printed under the error rather than
+				// replacing it, so the cause stays readable on its own.
+				entries.push({
+					kind: "error",
+					text: `Error: ${event.errorMessage}${event.errorRemedy ? `\n${event.errorRemedy}` : ""}`,
+				});
 			} else if (event.reason === "aborted") {
 				// The run these were queued for is gone, and the session dropped
 				// them with it. Saying so is the difference between a message that
-				// was refused and one that was silently thrown away.
-				const dropped = state.queued.length;
+				// was refused and one that was silently thrown away — and the
+				// previews say *which* messages, which a count alone cannot.
+				const dropped = droppedQueueTexts(event, state.queued);
+				const count = dropped.length;
 				entries.push({
 					kind: "info",
 					text:
-						dropped > 0
-							? `[interrupted · ${dropped} queued message${dropped === 1 ? "" : "s"} dropped]`
-							: "[interrupted]",
+						count > 0
+							? `[interrupted · ${count} queued message${count === 1 ? "" : "s"} dropped · type a new message to continue]`
+							: "[interrupted · type a new message to continue]",
 				});
+				for (const text of dropped.slice(0, DROPPED_PREVIEW_MAX)) {
+					entries.push({ kind: "info", text: `Dropped: "${previewDropped(text)}"` });
+				}
+				if (count > DROPPED_PREVIEW_MAX) {
+					entries.push({ kind: "info", text: `… and ${count - DROPPED_PREVIEW_MAX} more` });
+				}
 			}
 			return {
 				...state,
 				entries,
 				streamingText: "",
 				thinkingText: "",
+				retry: undefined,
 				pendingTools: [],
 				liveOutputs: {},
 				statusPhase: "idle",
@@ -614,9 +748,11 @@ export function entriesFromMessages(messages: readonly AgentMessage[]): UiEntry[
 			// of text is one row, and a message with nothing but tool calls gets
 			// no assistant row at all.
 			let textRun: string[] = [];
-			const flushText = (): void => {
+			const flushText = (incomplete = false): void => {
 				const text = textRun.join("\n");
-				if (text.trim().length > 0) entries.push({ kind: "assistant", text });
+				if (text.trim().length > 0) {
+					entries.push({ kind: "assistant", text, ...(incomplete ? { incomplete: true as const } : {}) });
+				}
 				textRun = [];
 			};
 			for (const block of message.content) {
@@ -634,13 +770,19 @@ export function entriesFromMessages(messages: readonly AgentMessage[]): UiEntry[
 					entries.push(row);
 				}
 			}
-			flushText();
+			// Only the trailing run can be the one the cut landed on: text
+			// followed by a tool call was finished before the call was made.
+			flushText(message.incomplete === true);
 			continue;
 		}
 		const row = toolRows.get(message.toolCallId);
 		if (!row) continue;
 		row.resultText = textOfBlocks(message.content).slice(0, RESULT_TEXT_CAP);
 		row.isError = message.isError;
+		// No `resultTruncated` from a restored transcript: the stored text was
+		// already capped when it was written, so its length proves nothing about
+		// what the call really printed.
+		if (message.interrupted) row.interrupted = true;
 	}
 	return entries;
 }

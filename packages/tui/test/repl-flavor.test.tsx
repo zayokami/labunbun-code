@@ -190,7 +190,13 @@ describe("the finished-run footer, wired", () => {
 		await run;
 		await delay(20);
 		expect(h.footers()).toHaveLength(0);
-		expect(h.store.get().entries.some((entry) => entry.kind === "info" && entry.text === "[interrupted]")).toBe(true);
+		expect(
+			h.store
+				.get()
+				.entries.some(
+					(entry) => entry.kind === "info" && entry.text === "[interrupted · type a new message to continue]",
+				),
+		).toBe(true);
 		h.unmount();
 	}, 20_000);
 

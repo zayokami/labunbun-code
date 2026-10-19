@@ -148,6 +148,75 @@ describe("QuestionDialog", () => {
 		d.unmount();
 	});
 
+	test("a single-choice question offers Other, and a multi-select does not", async () => {
+		const single = open(SINGLE);
+		await delay(30);
+		expect(single.frame()).toContain("Other…");
+		single.unmount();
+
+		const multi = open(MULTI);
+		await delay(30);
+		expect(multi.frame()).not.toContain("Other…");
+		multi.unmount();
+	});
+
+	test("Other collects the answer that was typed", async () => {
+		const d = open(SINGLE);
+		await delay(30);
+		d.stdin.write("\x1b[B"); // down to Patch it
+		await delay(30);
+		d.stdin.write("\x1b[B"); // down to Other
+		await delay(30);
+		d.stdin.write("\r");
+		await delay(30);
+		expect(d.answers()).toBeUndefined();
+		expect(d.frame()).toContain("Your answer:");
+
+		d.stdin.write("something else");
+		await delay(30);
+		expect(d.frame()).toContain("something else");
+		d.stdin.write("\r");
+		await delay(30);
+		expect(d.answers()).toEqual(["something else"]);
+		d.unmount();
+	});
+
+	test("an empty Other is not an answer, and Esc returns to the list", async () => {
+		const d = open(SINGLE);
+		await delay(30);
+		d.stdin.write("\x1b[B\x1b[B\r"); // to Other, open the field
+		await delay(30);
+		d.stdin.write("\r"); // empty submit does nothing
+		await delay(30);
+		expect(d.answers()).toBeUndefined();
+		expect(d.frame()).toContain("type an answer first");
+
+		// Esc backs out to the options rather than cancelling the question: the
+		// person who opened the field by mistake has not answered "no answer".
+		d.stdin.write("\x1b");
+		await delay(30);
+		expect(d.frame()).not.toContain("Your answer:");
+		expect(d.answers()).toBeUndefined();
+
+		// The highlight is still on Other, and Enter reopens the field.
+		d.stdin.write("\r");
+		await delay(30);
+		expect(d.frame()).toContain("Your answer:");
+		d.unmount();
+	});
+
+	test("a move and Enter that lands on Other opens the field, not an answer", async () => {
+		// The same coalesced-read case the options themselves pin: the ref must be
+		// what the Enter reads, or a quick ↓↓+Enter answers "Patch it".
+		const d = open(SINGLE);
+		await delay(30);
+		d.stdin.write("\x1b[B\x1b[B\r");
+		await delay(30);
+		expect(d.answers()).toBeUndefined();
+		expect(d.frame()).toContain("Your answer:");
+		d.unmount();
+	});
+
 	test("the next question starts with nothing toggled", async () => {
 		let answers: string[] | null | undefined;
 		const { stdin, lastFrame, unmount } = render(

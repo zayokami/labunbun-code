@@ -361,6 +361,40 @@ describe("PermissionDialog and the pad", () => {
 		r.unmount();
 	});
 
+	test("the feedback field is keyboard territory; ○ steps back and ✕ sends the plain no", async () => {
+		// A controller cannot type the sentence the row exists to collect. The two
+		// keys it does have still mean something honest: ○ leaves the field
+		// unanswered, and ✕ gives the no an empty field would.
+		const pad = fakePad({ allowApprove: true });
+		const answers: Array<[boolean, boolean]> = [];
+		const view = await show(
+			<PermissionDialog
+				toolName="Bash"
+				inputPreview="Allow Bash?"
+				onResolve={(allow, alwaysAllow) => answers.push([allow, alwaysAllow])}
+				pad={pad}
+			/>,
+		);
+		const frame = () => (view.lastFrame() ?? "").replace(/\s+/g, " ");
+
+		view.stdin.write("4");
+		await delay(40);
+		expect(frame()).toContain("Tell the model what to do differently:");
+		expect(frame()).toContain("✕ plain deny · ○ back");
+
+		await press(pad, padAction("cancel", { button: "circle" }));
+		expect(answers).toEqual([]);
+		expect(frame()).not.toContain("Tell the model what to do differently:");
+
+		// Reopened with the keyboard, where the sentence could actually be typed.
+		view.stdin.write("4");
+		await delay(40);
+		await press(pad, padAction("confirm"));
+		expect(answers).toEqual([[false, false]]);
+
+		view.unmount();
+	});
+
 	test("a dialog with no pad at all is the dialog it always was", async () => {
 		const answers: Array<[boolean, boolean]> = [];
 		const view = await show(
@@ -507,6 +541,47 @@ describe("QuestionDialog and the pad", () => {
 		expect(q.answers).toEqual([]);
 
 		q.unmount();
+	});
+
+	test("the pad's highlight never lands on Other, and its ✕ cannot confirm it", async () => {
+		const pad = fakePad();
+		const q = await question(pad, [SINGLE_QUESTION]);
+
+		// Two downs over two options wrap back to the first: a row that can only
+		// be confirmed into nothing is a row that looks broken on a controller.
+		await press(pad, padAction("down"));
+		await press(pad, padAction("down"));
+		expect(q.frame()).toContain(`${DARK_THEME.marks.selected} one`);
+
+		q.unmount();
+	});
+
+	test("while the Other field is open, ✕ does nothing and ○ steps back", async () => {
+		const pad = fakePad();
+		const answers: Array<string[] | null> = [];
+		const view = await show(
+			<QuestionDialog questions={[SINGLE_QUESTION]} resolve={(a) => answers.push(a)} pad={pad} />,
+		);
+		const frame = () => (view.lastFrame() ?? "").replace(/\s+/g, " ");
+
+		// Keyboard-only: down past both options and Enter opens the field.
+		view.stdin.write("\x1b[B\x1b[B\r");
+		await delay(40);
+		expect(frame()).toContain("Your answer:");
+
+		await press(pad, padAction("confirm"));
+		expect(answers).toEqual([]);
+		expect(frame()).toContain("Your answer:");
+
+		await press(pad, padAction("cancel", { button: "circle" }));
+		expect(answers).toEqual([]);
+		expect(frame()).not.toContain("Your answer:");
+
+		// Back on the list, ○ is the cancel-everything it always was.
+		await press(pad, padAction("cancel", { button: "circle" }));
+		expect(answers).toEqual([null]);
+
+		view.unmount();
 	});
 
 	/**

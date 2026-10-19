@@ -17,7 +17,14 @@ import { permissionOptions } from "../src/permission-options.ts";
 import { shortcutGroups } from "../src/shortcuts.ts";
 import { createStore } from "../src/store.ts";
 import { DARK_THEME, HIGH_CONTRAST_DARK, type Theme, ThemeContext } from "../src/theme.ts";
-import { initialUiState, reduceEvent, toolPreview, type UiBackgroundShell, type UiState } from "../src/ui-state.ts";
+import {
+	initialUiState,
+	RESULT_TEXT_CAP,
+	reduceEvent,
+	toolPreview,
+	type UiBackgroundShell,
+	type UiState,
+} from "../src/ui-state.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -77,8 +84,66 @@ describe("MessageList", () => {
 			),
 		);
 		const frame = lastFrame() ?? "";
-		expect(frame).toContain("...");
+		// The preview says how much it is not showing, and where the rest is.
+		expect(frame).toContain("600 more characters · Ctrl+O for transcript");
 		expect(frame).not.toContain("x".repeat(500)); // full output never rendered
+	});
+
+	test("transcript mode says the reducer capped the stored output", () => {
+		// Ctrl+O lifts the *preview* cap; it cannot lift the reducer's, because the
+		// rest of the string was never kept. Saying which cap is in force is the
+		// difference between "scroll further" and "this is all there is".
+		const { lastFrame } = render(
+			withTheme(
+				<MessageList
+					full
+					entries={[
+						{
+							kind: "toolUse",
+							callId: "c1",
+							toolName: "Bash",
+							inputPreview: "cat big.log",
+							resultText: "x".repeat(RESULT_TEXT_CAP),
+							resultTotalChars: RESULT_TEXT_CAP + 25,
+							resultTruncated: true,
+						},
+					]}
+				/>,
+			),
+		);
+		expect(lastFrame() ?? "").toContain("(output capped at 16,000 characters)");
+	});
+
+	test("a response that ended early says so instead of looking finished", () => {
+		const { lastFrame } = render(
+			withTheme(<MessageList entries={[{ kind: "assistant", text: "half an ans", incomplete: true }]} />),
+		);
+		expect(lastFrame() ?? "").toContain("(response ended early; output is partial)");
+	});
+
+	test("an interrupted tool result reads as stopped, not as failed", () => {
+		// `isError` is true on the wire because pairing needs it, but the call did
+		// not fail — it was stopped. The row must not wear the failure mark.
+		const { lastFrame } = render(
+			withTheme(
+				<MessageList
+					entries={[
+						{
+							kind: "toolUse",
+							callId: "c1",
+							toolName: "Bash",
+							inputPreview: "sleep 99",
+							resultText: "half a line",
+							isError: true,
+							interrupted: true,
+						},
+					]}
+				/>,
+			),
+		);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("(interrupted; output is partial)");
+		expect(frame).not.toContain(DARK_THEME.marks.error);
 	});
 
 	// State cannot rely on color alone: a colorblind reader, or anyone piping the
@@ -627,6 +692,81 @@ describe("PermissionDialog", () => {
 		unmount();
 	});
 
+	test("the fourth answer opens a field instead of denying on the spot", async () => {
+		// The row promises to tell the model what to do differently; a denial that
+		// resolved before anything was typed would leave that promise unkept.
+		const decisions: Array<[boolean, boolean, boolean | undefined, string | undefined]> = [];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Bash"
+					inputPreview="git status"
+					onResolve={(allow, always, ask, message) => decisions.push([allow, always, ask, message])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("4");
+		await delay(30);
+		expect(decisions).toEqual([]);
+		expect(flatFrame(lastFrame() ?? "")).toContain("Tell the model what to do differently:");
+
+		stdin.write("use git status instead");
+		await delay(30);
+		expect(flatFrame(lastFrame() ?? "")).toContain("use git status instead");
+
+		stdin.write("\r");
+		await delay(30);
+		expect(decisions).toEqual([[false, false, false, "use git status instead"]]);
+		unmount();
+	});
+
+	test("submitting the field empty is the plain deny it always was", async () => {
+		const decisions: Array<[boolean, boolean, boolean | undefined, string | undefined]> = [];
+		const { stdin, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Bash"
+					inputPreview="git status"
+					onResolve={(allow, always, ask, message) => decisions.push([allow, always, ask, message])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("4");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(decisions).toEqual([[false, false, false, undefined]]);
+		unmount();
+	});
+
+	test("Esc in the field goes back to the list rather than answering twice", async () => {
+		const decisions: Array<[boolean, boolean, boolean | undefined, string | undefined]> = [];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Bash"
+					inputPreview="git status"
+					onResolve={(allow, always, ask, message) => decisions.push([allow, always, ask, message])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("4");
+		await delay(30);
+		stdin.write("\x1b");
+		await delay(30);
+		expect(decisions).toEqual([]);
+		expect(flatFrame(lastFrame() ?? "")).not.toContain("Tell the model what to do differently:");
+
+		// Back on the list, and the first row still answers normally.
+		stdin.write("\r");
+		await delay(30);
+		expect(decisions).toEqual([[true, false, false, undefined]]);
+		unmount();
+	});
+
 	test("without a scoped rule the label promises only the tool", async () => {
 		const { lastFrame, unmount } = render(
 			withTheme(<PermissionDialog toolName="WebFetch" inputPreview="url" onResolve={() => {}} />),
@@ -869,7 +1009,191 @@ describe("ui-state reducer", () => {
 
 		let aborted: UiState = initialUiState();
 		aborted = reduceEvent(aborted, { type: "agent_end", reason: "aborted", messages: [] });
-		expect(aborted.entries.at(-1)).toMatchObject({ kind: "info", text: "[interrupted]" });
+		expect(aborted.entries.at(-1)).toMatchObject({
+			kind: "info",
+			text: "[interrupted · type a new message to continue]",
+		});
+	});
+});
+
+describe("retry, fallback, and partial results", () => {
+	const partial = (text: string) =>
+		({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			provider: "faux",
+			model: "faux-1",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			stopReason: "pending",
+			timestamp: 0,
+		}) as any;
+	const delta = (text: string) => ({
+		type: "message_update" as const,
+		message: partial(text),
+		assistantMessageEvent: { type: "text_delta" as const, contentIndex: 0, delta: text, partial: partial(text) },
+	});
+	const result = (text: string, extra: { isError?: boolean; interrupted?: true } = {}) => ({
+		type: "tool_execution_end" as const,
+		callId: "c1",
+		toolName: "Bash",
+		result: {
+			role: "toolResult" as const,
+			toolCallId: "c1",
+			toolName: "Bash",
+			content: [{ type: "text" as const, text }],
+			isError: extra.isError ?? false,
+			...(extra.interrupted ? { interrupted: true as const } : {}),
+			timestamp: 0,
+		},
+	});
+
+	test("a scheduled retry is stamped and yields to the first stream event", () => {
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, { type: "agent_start" });
+		const before = Date.now();
+		state = reduceEvent(state, { type: "retry", attempt: 2, delayMs: 5_000, message: "rate limited" });
+		expect(state.retry).toMatchObject({ attempt: 2, message: "rate limited" });
+		expect(state.retry?.untilMs).toBeGreaterThanOrEqual(before + 5_000);
+		expect(state.statusPhase).toBe("thinking");
+
+		state = reduceEvent(state, delta("hello"));
+		expect(state.retry).toBeUndefined();
+		expect(state.streamingText).toBe("hello");
+	});
+
+	test("a retry that never sees a stream is cleared when the run ends", () => {
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, { type: "agent_start" });
+		state = reduceEvent(state, { type: "retry", attempt: 3, delayMs: 1_000, message: "boom" });
+		state = reduceEvent(state, { type: "agent_end", reason: "error", messages: [], errorMessage: "boom" });
+		expect(state.retry).toBeUndefined();
+	});
+
+	test("a fallback leaves a durable line naming both models and the reason", () => {
+		const state = reduceEvent(initialUiState(), {
+			type: "fallback",
+			from: { provider: "anthropic", id: "big-model" },
+			to: { provider: "openai", id: "small-model" },
+			reason: "overloaded",
+			errorKind: "overload",
+		});
+		expect(state.entries).toEqual([
+			{ kind: "info", text: "[model fallback] anthropic/big-model → openai/small-model: overloaded" },
+		]);
+	});
+
+	test("the host's remedy is printed under the error, not instead of it", () => {
+		const state = reduceEvent(initialUiState(), {
+			type: "agent_end",
+			reason: "error",
+			messages: [],
+			errorMessage: "rate limited",
+			errorKind: "rate_limit",
+			errorRemedy: "Wait a minute, then retry — or switch with /model.",
+		});
+		expect(state.entries.at(-1)).toEqual({
+			kind: "error",
+			text: "Error: rate limited\nWait a minute, then retry — or switch with /model.",
+		});
+	});
+
+	test("a turn that ended early marks its assistant row incomplete", () => {
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, { type: "agent_start" });
+		state = reduceEvent(state, delta("half an ans"));
+		state = reduceEvent(state, {
+			type: "turn_end",
+			message: { ...partial("half an ans"), incomplete: true },
+			toolResults: [],
+		});
+		expect(state.entries.at(-1)).toEqual({ kind: "assistant", text: "half an ans", incomplete: true });
+	});
+
+	test("agent_end marks the last assistant message, and only when it was partial", () => {
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, { type: "agent_start" });
+		state = reduceEvent(state, delta("cut off"));
+		state = reduceEvent(state, {
+			type: "agent_end",
+			reason: "error",
+			messages: [partial("an earlier complete answer"), { ...partial("cut off"), incomplete: true }],
+			errorMessage: "socket closed",
+		});
+		expect(state.entries.find((entry) => entry.kind === "assistant")).toMatchObject({
+			text: "cut off",
+			incomplete: true,
+		});
+	});
+
+	test("a tool result the interrupt cut short keeps its text and says why", () => {
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, {
+			type: "tool_execution_start",
+			callId: "c1",
+			toolName: "Bash",
+			input: { command: "sleep 99" },
+		});
+		state = reduceEvent(state, result("half\na line", { isError: true, interrupted: true }));
+		expect(state.entries[0]).toMatchObject({
+			kind: "toolUse",
+			resultText: "half\na line",
+			isError: true,
+			interrupted: true,
+		});
+	});
+
+	test("a long result remembers how much was cut, though the row keeps the head", () => {
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, {
+			type: "tool_execution_start",
+			callId: "c1",
+			toolName: "Bash",
+			input: { command: "cat big.log" },
+		});
+		const huge = "x".repeat(RESULT_TEXT_CAP + 25);
+		state = reduceEvent(state, result(huge));
+		expect(state.entries[0]).toMatchObject({
+			resultText: huge.slice(0, RESULT_TEXT_CAP),
+			resultTotalChars: huge.length,
+			resultTruncated: true,
+		});
+	});
+
+	test("an abort names what it dropped, with previews, and stops at ten", () => {
+		const queued = Array.from({ length: 12 }, (_, i) => ({
+			id: `q${i}`,
+			text: i === 0 ? `first\n  line ${"y".repeat(300)}` : `message ${i}`,
+			mode: "queue" as const,
+		}));
+		const aborted = reduceEvent(
+			{ ...initialUiState(), queued },
+			{ type: "agent_end", reason: "aborted", messages: [] },
+		);
+		const infos = aborted.entries.map((entry) => (entry.kind === "info" ? entry.text : ""));
+		expect(infos[0]).toBe("[interrupted · 12 queued messages dropped · type a new message to continue]");
+		expect(infos.filter((text) => text.startsWith("Dropped:"))).toHaveLength(10);
+		expect(infos.at(-1)).toBe("… and 2 more");
+		const first = infos[1] ?? "";
+		expect(first).toContain("first line "); // folded to one line
+		expect(first).not.toContain("\n");
+		expect(first.length).toBeLessThan(240); // 200 characters plus the label
+		expect(first.endsWith('…"')).toBe(true);
+	});
+
+	test("the run's own account of what it dropped wins over the store's queue", () => {
+		const queued = [{ id: "q1", text: "queued copy", mode: "queue" as const }];
+		const aborted = reduceEvent(
+			{ ...initialUiState(), queued },
+			{
+				type: "agent_end",
+				reason: "aborted",
+				messages: [],
+				interrupted: { followUp: ["the run's copy"], steering: [] },
+			},
+		);
+		const texts = aborted.entries.map((entry) => (entry.kind === "info" ? entry.text : ""));
+		expect(texts).toContain('Dropped: "the run\'s copy"');
+		expect(texts).not.toContain('Dropped: "queued copy"');
 	});
 });
 

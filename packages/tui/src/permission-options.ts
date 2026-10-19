@@ -23,6 +23,45 @@
  */
 import { relative, resolve } from "node:path";
 
+/**
+ * The answer to an approval request.
+ *
+ * Boolean is the whole vocabulary the queue used to speak, and every caller
+ * that predates the feedback option still speaks it; the object form exists so
+ * the fourth answer can be a denial with a sentence attached. Callers that only
+ * need the decision read `allow`, and a boolean is normalized to that same
+ * reading, so the two forms are interchangeable at every seat but the one that
+ * forwards the message.
+ */
+export type PermissionReply =
+	| boolean
+	| { allow: boolean; alwaysAllow?: boolean; alwaysAsk?: boolean; message?: string };
+
+/** The decision part of a reply, whichever form it arrived in. */
+export function replyAllowed(reply: PermissionReply): boolean {
+	return typeof reply === "boolean" ? reply : reply.allow;
+}
+
+/** The feedback a reply carries; empty and whitespace-only messages are not feedback. */
+export function replyMessage(reply: PermissionReply): string | undefined {
+	if (typeof reply === "boolean") return undefined;
+	const message = reply.message?.trim();
+	return message ? message : undefined;
+}
+
+/** How much of a denial's sentence reaches the tool result. */
+export const MAX_DENIAL_MESSAGE_CHARS = 2000;
+
+/**
+ * The sentence a denial hands the model, bounded so a pasted essay cannot
+ * crowd out the rest of the turn. The fallback is the wording every denial
+ * used before the field existed, so the ordinary no reads the same.
+ */
+export function replyDenyMessage(reply: PermissionReply, fallback = "User denied permission"): string {
+	const message = replyMessage(reply);
+	return message ? message.slice(0, MAX_DENIAL_MESSAGE_CHARS) : fallback;
+}
+
 export interface PermissionOption {
 	label: string;
 	allow: boolean;
@@ -33,6 +72,12 @@ export interface PermissionOption {
 	 * the session's policy and the other narrows it, and no answer does both.
 	 */
 	alwaysAsk: boolean;
+	/**
+	 * Choosing this option opens a text field, and what is typed rides back with
+	 * the answer. The label already promised to tell the model what to do
+	 * differently; this is the seat that makes the promise true.
+	 */
+	collectsFeedback?: true;
 }
 
 const FILE_TOOLS = new Set(["Edit", "Write", "Read", "NotebookEdit"]);
@@ -116,6 +161,12 @@ export function permissionOptions(toolName: string, input: unknown, cwd?: string
 		{ label: "Yes, just this once", allow: true, alwaysAllow: false, alwaysAsk: false },
 		{ label: alwaysAllowLabel(toolName, input, cwd), allow: true, alwaysAllow: true, alwaysAsk: false },
 		{ label: alwaysAskLabel(toolName, input, cwd), allow: true, alwaysAllow: false, alwaysAsk: true },
-		{ label: "No, and tell the model what to do differently", allow: false, alwaysAllow: false, alwaysAsk: false },
+		{
+			label: "No, and tell the model what to do differently",
+			allow: false,
+			alwaysAllow: false,
+			alwaysAsk: false,
+			collectsFeedback: true,
+		},
 	];
 }

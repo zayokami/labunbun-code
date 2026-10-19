@@ -22,7 +22,12 @@ export interface PermissionDialogProps {
 	 * the widest truthful wording is used (the bare tool).
 	 */
 	options?: PermissionOption[];
-	onResolve: (allow: boolean, alwaysAllow: boolean, alwaysAsk?: boolean) => void;
+	/**
+	 * The answer. `message` is what the fourth option collected: the sentence
+	 * the model should act on instead. Absent or blank means a plain denial,
+	 * which is the same answer the queue received before the field existed.
+	 */
+	onResolve: (allow: boolean, alwaysAllow: boolean, alwaysAsk?: boolean, message?: string) => void;
 	/** Requests queued behind this one, including it (see PermissionDialogState). */
 	queueLength?: number;
 	/**
@@ -81,6 +86,13 @@ export function PermissionDialog({
 	const body = expanded && inputFull ? inputFull : inputPreview;
 	/** The row a held ✕ takes — the one that stops the asking — or -1 for none. */
 	const standing = answers.findIndex((answer) => answer.alwaysAllow);
+	/**
+	 * The fourth answer's text field. A string, possibly empty, while the field
+	 * is up; null while the option list owns the keys. Kept apart from the list
+	 * rather than as a fifth row, because it is not an answer — it is the tail of
+	 * the option that was chosen.
+	 */
+	const [feedback, setFeedback] = useState<string | null>(null);
 
 	/** Move the highlight, wrapping. */
 	const step = (delta: number): void => {
@@ -89,9 +101,33 @@ export function PermissionDialog({
 		setSelected(next);
 	};
 
+	/**
+	 * Take one option. The feedback row opens its field instead of answering:
+	 * the label promised a sentence, and a denial without one is what the plain
+	 * no already is.
+	 */
+	const choose = (answer: PermissionOption): void => {
+		if (answer.collectsFeedback) {
+			setFeedback("");
+			return;
+		}
+		onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
+	};
+
 	const openedAt = useRef(Date.now());
 	usePadAction(pad, (action) => {
 		if (action.phase === "release" || !isAimedAt(action, openedAt.current)) return false;
+		// The field is keyboard territory: a controller has no way to type the
+		// sentence it exists to collect. ○ goes back to the list and ✕ sends the
+		// plain no — the answer the row gives when the field is left empty.
+		if (feedback !== null) {
+			if (action.kind === "cancel") {
+				setFeedback(null);
+				return true;
+			}
+			if (action.kind === "confirm") onResolve(false, false);
+			return true;
+		}
 		// Denying is always safe, and always the pad's to do: a controller that
 		// could only say yes would be worse than one that said nothing.
 		if (action.kind === "cancel") {
@@ -126,17 +162,51 @@ export function PermissionDialog({
 		}
 		const standing = answers.find((answer) => answer.alwaysAllow);
 		const answer = action.phase === "hold" && standing ? standing : answers[selectedRef.current % answers.length];
+		// A pad cannot type, so the feedback row can only be the plain no here.
+		if (answer.collectsFeedback) {
+			onResolve(false, false);
+			return true;
+		}
 		onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
 		return true;
 	});
 
 	useInput((input, key) => {
+		if (feedback !== null) {
+			// The field's keys, and only these: Esc steps back to the list rather
+			// than denying, so a person who opened the field by mistake has not
+			// answered the question differently from the one they meant.
+			if (key.escape) {
+				setFeedback(null);
+				return;
+			}
+			if (key.return) {
+				const message = feedback.trim();
+				onResolve(false, false, false, message || undefined);
+				return;
+			}
+			if (key.backspace || key.delete) {
+				setFeedback((text) => (text ?? "").slice(0, -1));
+				return;
+			}
+			// Modifiers are commands, not text. Control characters (Tab included)
+			// are dropped; anything else printable is appended, so a pasted line
+			// arrives whole (the same filter PlanReviewDialog uses).
+			if (key.ctrl || key.meta) return;
+			const printable = [...input]
+				.filter((char) => {
+					const code = char.codePointAt(0) ?? 0;
+					return code >= 0x20 && code !== 0x7f;
+				})
+				.join("");
+			if (printable) setFeedback((text) => (text ?? "") + printable);
+			return;
+		}
 		if (key.upArrow) step(-1);
 		else if (key.downArrow) step(1);
 		else if (key.ctrl && input === "a") setExpanded((e) => !e);
 		else if (key.return) {
-			const answer = answers[selectedRef.current % answers.length];
-			onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
+			choose(answers[selectedRef.current % answers.length]);
 		} else if (key.escape) {
 			onResolve(false, false);
 		} else if (input === "y") {
@@ -145,7 +215,7 @@ export function PermissionDialog({
 			onResolve(false, false);
 		} else if (input === "1" || input === "2" || input === "3" || input === "4") {
 			const answer = answers[Number(input) - 1];
-			if (answer) onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
+			if (answer) choose(answer);
 		}
 	});
 
@@ -195,27 +265,38 @@ export function PermissionDialog({
 					</Text>
 				))}
 			</Box>
-			<Box marginTop={1}>
-				<Text dimColor>
-					↑/↓ select · Enter confirm · Esc deny
-					{inputFull ? ` · Ctrl+A ${expanded ? "collapse" : "show full input"}` : ""}
-					{/* The pad's answers, named next to the keyboard's the way the wheel
-					    and the on-screen keyboard name them. The hold is the part that has
-					    to be said out loud: nobody holds a button by accident, so the one
-					    gesture that grants a standing allowance is the one no user finds
-					    by trying buttons. It points at the numbered row a hold would take
-					    rather than promising an "always" the list is not offering.
-					    A ✕ that does nothing reads as a broken controller, so the refusal
-					    says why — the setting is one the user chose, not one to guess — and
-					    ○ stays named, because a pad that can only refuse is still a pad
-					    that can answer the question. */}
-					{pad
-						? pad.allowApprove
-							? ` · ✕ confirm${standing >= 0 ? ` · hold ✕ row ${standing + 1}` : ""} · ○ deny`
-							: " · pad may not approve · ○ deny"
-						: ""}
-				</Text>
-			</Box>
+			{feedback !== null ? (
+				<Box flexDirection="column" marginTop={1}>
+					<Text color={theme.permission}>Tell the model what to do differently:</Text>
+					<Text color={theme.toolArgs}>{feedback.length > 0 ? feedback : " "}</Text>
+					<Text dimColor>
+						Enter submit{feedback.trim() ? "" : " (empty = plain deny)"} · Esc back
+						{pad ? " · ✕ plain deny · ○ back" : ""}
+					</Text>
+				</Box>
+			) : (
+				<Box marginTop={1}>
+					<Text dimColor>
+						↑/↓ select · Enter confirm · Esc deny
+						{inputFull ? ` · Ctrl+A ${expanded ? "collapse" : "show full input"}` : ""}
+						{/* The pad's answers, named next to the keyboard's the way the wheel
+						    and the on-screen keyboard name them. The hold is the part that has
+						    to be said out loud: nobody holds a button by accident, so the one
+						    gesture that grants a standing allowance is the one no user finds
+						    by trying buttons. It points at the numbered row a hold would take
+						    rather than promising an "always" the list is not offering.
+						    A ✕ that does nothing reads as a broken controller, so the refusal
+						    says why — the setting is one the user chose, not one to guess — and
+						    ○ stays named, because a pad that can only refuse is still a pad
+						    that can answer the question. */}
+						{pad
+							? pad.allowApprove
+								? ` · ✕ confirm${standing >= 0 ? ` · hold ✕ row ${standing + 1}` : ""} · ○ deny`
+								: " · pad may not approve · ○ deny"
+							: ""}
+					</Text>
+				</Box>
+			)}
 		</Box>
 	);
 }

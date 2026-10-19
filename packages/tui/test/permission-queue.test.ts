@@ -474,3 +474,42 @@ describe("the policy gate on the cascade", () => {
 		expect(await second).toBe(false);
 	});
 });
+
+describe("a denial with a sentence", () => {
+	test("the fourth answer's text reaches the caller intact", async () => {
+		const { queue, current } = harness();
+		const answer = queue.request("Bash", { command: "rm -rf build" });
+
+		current()?.resolve(false, false, false, "use `rm -r build` instead");
+		expect(await answer).toEqual({
+			allow: false,
+			alwaysAllow: false,
+			alwaysAsk: false,
+			message: "use `rm -r build` instead",
+		});
+	});
+
+	test("an empty field is the boolean denial, not an object with no message", async () => {
+		// A caller that only reads the decision must never meet a shape it does
+		// not know because someone pressed Enter on an empty field.
+		const { queue, current } = harness();
+		const answer = queue.request("Bash", { command: "ls" });
+
+		current()?.resolve(false, false, false, "   ");
+		expect(await answer).toBe(false);
+	});
+
+	test("abort and clear still answer with the boolean they always did", async () => {
+		const { queue, current } = harness();
+		const controller = new AbortController();
+		const aborted = queue.request("Write", { file_path: "a" }, undefined, controller.signal);
+		const cleared = queue.request("Write", { file_path: "b" });
+
+		controller.abort();
+		expect(await aborted).toBe(false);
+		expect(current()?.inputPreview).toContain('"b"');
+		queue.clear();
+		expect(await cleared).toBe(false);
+		expect(current()).toBeNull();
+	});
+});

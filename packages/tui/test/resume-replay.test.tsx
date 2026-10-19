@@ -108,6 +108,42 @@ describe("history on connect", () => {
 		unsubscribe();
 	});
 
+	test("a resumed transcript keeps the markers a turn ended with", () => {
+		// The flags ride on the messages, not on live events, so a resume has to
+		// read them off the stored pair: an interrupted call must not come back
+		// looking failed, and a half-written answer must not come back looking
+		// finished.
+		const session = sessionWith(
+			userMessage("try it"),
+			assistantMessage({
+				content: [{ type: "toolCall", id: "call_1", name: "Bash", arguments: JSON.stringify({ command: "sleep 99" }) }],
+				stopReason: "toolUse",
+			}),
+			{ ...toolResultMessage("call_1", "Bash", [{ type: "text", text: "half a line" }], true), interrupted: true },
+			assistantMessage({
+				content: [{ type: "text", text: "half an ans" }],
+				stopReason: "aborted",
+				incomplete: true,
+			}),
+		);
+		const store = createStore<UiState>(initialUiState());
+		const unsubscribe = connectSessionToStore(session, store);
+
+		expect(store.get().entries).toMatchObject([
+			{ kind: "user", text: "try it" },
+			{ kind: "toolUse", toolName: "Bash", resultText: "half a line", isError: true, interrupted: true },
+			{ kind: "assistant", text: "half an ans", incomplete: true },
+		]);
+
+		// And the markers reach the screen, not just the state object.
+		const view = renderRepl(session, store);
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain("(interrupted; output is partial)");
+		expect(frame).toContain("(response ended early; output is partial)");
+		unsubscribe();
+		view.unmount();
+	});
+
 	test("a compaction boundary is a marker line, not something the user said", () => {
 		// The exact sentence `compactionBoundary` writes — pinned as a literal
 		// because it is the model's only clue, so a change to it should be a

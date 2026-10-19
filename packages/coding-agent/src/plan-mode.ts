@@ -13,6 +13,7 @@ import {
 } from "@labunbun/agent";
 import { type Model, textContent } from "@labunbun/ai";
 import type { TaskStore } from "@labunbun/tools";
+import { type PermissionReply, replyAllowed } from "@labunbun/tui";
 import { z } from "zod";
 import { sameModel } from "./model-roles.ts";
 import { formatPlanAttachment, type PlanSnapshot, type PlanStep } from "./plan-snapshot.ts";
@@ -79,8 +80,13 @@ export interface PlanLifecycle {
 }
 
 export interface PlanApprovalUi {
-	/** Present a permission dialog; resolves to false when refused or canceled. */
-	requestPermission(toolName: string, input: unknown, signal?: AbortSignal): Promise<boolean>;
+	/**
+	 * Present a permission dialog; resolves to a denial when refused or
+	 * canceled. The object form is a denial that carries a sentence, which this
+	 * fallback has no way to use — the plan was answered, not explained — so it
+	 * reads only the decision.
+	 */
+	requestPermission(toolName: string, input: unknown, signal?: AbortSignal): Promise<PermissionReply>;
 	/**
 	 * Present the plan review surface, when the host has one.
 	 *
@@ -231,7 +237,7 @@ export function createPlanModeCallbacks(
 				// permission dialog — the same question, minus the sentence.
 				decision = ui.requestPlanReview
 					? await ui.requestPlanReview(plan, signal)
-					: (await ui.requestPermission("ExitPlanMode", { plan }, signal))
+					: replyAllowed(await ui.requestPermission("ExitPlanMode", { plan }, signal))
 						? { approved: true }
 						: { approved: false };
 			} catch {

@@ -18,6 +18,7 @@ import {
 } from "./components/REPL.tsx";
 import { inputTrace } from "./input-trace.ts";
 import { permissionDiff } from "./permission-diff.ts";
+import type { PermissionReply } from "./permission-options.ts";
 import { createPermissionQueue } from "./permission-queue.ts";
 import { createPlanReviewSlot } from "./plan-review-slot.ts";
 import { createQuestionSlot } from "./question-slot.ts";
@@ -61,6 +62,12 @@ export interface ReplAppOptions {
 	onMidRunText?: (text: string) => boolean;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
+	/**
+	 * Cancel the long-running command, when one is running. Escape asks this
+	 * before it asks the session, because a manual `/compact` runs while the
+	 * session is idle and only the command holds the work to stop.
+	 */
+	onCancelCommand?: () => boolean;
 	/**
 	 * Called after Shift+Tab moves the session's two axes, with the row it landed
 	 * on. The app layer records the change — the session file is where a restart
@@ -138,8 +145,18 @@ export interface ReplAppHandle {
 	 * abort it leaves the queue and resolves false, so a stopped subagent
 	 * cannot leave its question on the screen. The session's own calls pass
 	 * neither.
+	 *
+	 * The reply is a `PermissionReply`: a boolean for every answer that only
+	 * decides, and the object form for a denial that carries the sentence the
+	 * user typed into the fourth option. A caller that only needs the decision
+	 * reads it through `replyAllowed`.
 	 */
-	requestPermission: (toolName: string, input: unknown, source?: string, signal?: AbortSignal) => Promise<boolean>;
+	requestPermission: (
+		toolName: string,
+		input: unknown,
+		source?: string,
+		signal?: AbortSignal,
+	) => Promise<PermissionReply>;
 	/** Show a structured question dialog; resolves with answers or null on cancel. */
 	askUser: (
 		questions: Array<{
@@ -467,6 +484,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				onSubmitText={options.onSubmitText}
 				onMidRunText={options.onMidRunText}
 				onMemoryShortcut={options.onMemoryShortcut}
+				onCancelCommand={options.onCancelCommand}
 				onModeChange={options.onModeChange}
 				commandSuggestions={options.commandSuggestions}
 				completeFiles={options.completeFiles}

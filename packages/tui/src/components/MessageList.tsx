@@ -5,7 +5,7 @@ import { type CodeToken, highlightCode } from "../highlight.ts";
 import { LIVE_OUTPUT_LINES, LIVE_PREVIEW_MAX, liveOutputLines, livePreviewTargets } from "../live-output.ts";
 import { type Block, type ColumnAlign, type InlineSpan, parseBlocks } from "../markdown.ts";
 import { type Theme, useTheme } from "../theme.ts";
-import type { UiEntry } from "../ui-state.ts";
+import { RESULT_TEXT_CAP, type UiEntry } from "../ui-state.ts";
 
 // biome-ignore format: keep the regex on one line so the ignore comment below stays attached
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching raw C0/C1 control bytes is the point
@@ -38,11 +38,14 @@ function UserMessageView({ text, steered = false }: { text: string; steered?: bo
 	);
 }
 
-function AssistantMessageView({ text }: { text: string }) {
+function AssistantMessageView({ text, incomplete }: { text: string; incomplete?: boolean }) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1} flexDirection="column">
 			{renderMarkdownLite(stripAnsi(text), theme)}
+			{/* The text above is what had arrived when the stream stopped; without
+			    this line it reads as a finished answer that happens to be short. */}
+			{incomplete ? <Text color={theme.warning}>(response ended early; output is partial)</Text> : null}
 		</Box>
 	);
 }
@@ -233,8 +236,11 @@ function ToolUseView({
 }) {
 	const theme = useTheme();
 	// The entry keeps no status field: a result landing *is* the state change, so
-	// "still running" and "no result yet" are the same fact.
-	const state = entry.resultText === undefined ? "running" : entry.isError ? "error" : "done";
+	// "still running" and "no result yet" are the same fact. An interrupted
+	// result is a third state: `isError` is true because the wire pairing needs
+	// it, but the call did not fail — it was stopped, and the row says so.
+	const state =
+		entry.resultText === undefined ? "running" : entry.interrupted ? "interrupted" : entry.isError ? "error" : "done";
 	return (
 		<Box marginBottom={1} flexDirection="column">
 			<Text>
@@ -242,7 +248,15 @@ function ToolUseView({
 					// The running dot borrows the tool name's own color, dimmed, so the
 					// row reads as one call waking up; done and error keep the state
 					// colors, and the dim is the second, color-independent channel.
-					color={state === "running" ? theme.toolName : state === "error" ? theme.error : theme.success}
+					color={
+						state === "running"
+							? theme.toolName
+							: state === "interrupted"
+								? theme.warning
+								: state === "error"
+									? theme.error
+									: theme.success
+					}
 					dimColor={state === "running"}
 				>
 					{TOOL_DOT}{" "}
@@ -253,7 +267,14 @@ function ToolUseView({
 				{entry.inputPreview ? <Text color={theme.toolArgs}>({entry.inputPreview})</Text> : null}
 			</Text>
 			{entry.resultText !== undefined ? (
-				<ResultLines text={entry.resultText} isError={entry.isError} full={full} />
+				<ResultLines
+					text={entry.resultText}
+					isError={entry.isError}
+					interrupted={entry.interrupted}
+					full={full}
+					totalChars={entry.resultTotalChars}
+					truncated={entry.resultTruncated}
+				/>
 			) : liveText ? (
 				<LiveOutputLines text={liveText} />
 			) : null}
@@ -343,20 +364,63 @@ export function resultLineColor(line: string, isError: boolean | undefined, diff
  * a multi-line result reads as one group hanging from its call rather than as
  * rows that happen to follow it.
  */
-function ResultLines({ text, isError, full }: { text: string; isError?: boolean; full?: boolean }) {
+/** Output characters the compact view shows before deferring to Ctrl+O. */
+const RESULT_PREVIEW_CHARS = 400;
+
+/** A count as prose: 16000 is read as a number only with its separators. */
+function formatChars(n: number): string {
+	return n.toLocaleString("en-US");
+}
+
+function ResultLines({
+	text,
+	isError,
+	interrupted,
+	full,
+	totalChars,
+	truncated,
+}: {
+	text: string;
+	isError?: boolean;
+	interrupted?: boolean;
+	full?: boolean;
+	/** Length before the reducer's cap; `totalChars` of undefined means `text` is all there is. */
+	totalChars?: number;
+	/** The reducer cut the stored text at `RESULT_TEXT_CAP`. */
+	truncated?: boolean;
+}) {
 	const theme = useTheme();
 	const sanitized = stripAnsi(text);
-	const capped = full || sanitized.length <= 400 ? sanitized || "(no output)" : `${sanitized.slice(0, 397)}...`;
-	const lines = capped.split("\n");
+	// The number a reader needs is what the tool printed, not what was stored:
+	// the reducer's cap is invisible in the string it leaves behind.
+	const total = Math.max(totalChars ?? sanitized.length, sanitized.length);
+	const visible = full || total <= RESULT_PREVIEW_CHARS ? sanitized : sanitized.slice(0, RESULT_PREVIEW_CHARS);
+	const lines = (visible || "(no output)").split("\n");
 	const diff = looksLikeDiff(lines);
+	const notes: string[] = [];
+	if (!full && total > RESULT_PREVIEW_CHARS) {
+		notes.push(`… ${formatChars(total - RESULT_PREVIEW_CHARS)} more characters · Ctrl+O for transcript`);
+	}
+	if (full && truncated) notes.push(`(output capped at ${formatChars(RESULT_TEXT_CAP)} characters)`);
+	if (interrupted) notes.push("(interrupted; output is partial)");
 	return (
 		<Box flexDirection="column">
-			{lines.map((line, i) => (
-				// biome-ignore lint/suspicious/noArrayIndexKey: capped is a fixed string slice split into immutable, never-reordered lines
-				<Text key={i} color={resultLineColor(line, isError, diff, theme)} bold={isError ? theme.bold.error : undefined}>
-					<Text dimColor>{i === 0 ? RESULT_LEAD : RESULT_INDENT}</Text>
-					{/* The error mark goes behind the lead — `  ⎿  ✗ text` — so it reads as the state of the output, not of the call. */}
-					{isError && i === 0 ? `${theme.marks.error} ${line}` : line}
+			{lines.map((line, i) => {
+				const color = interrupted ? theme.warning : resultLineColor(line, isError, diff, theme);
+				const bold = isError && !interrupted ? theme.bold.error : undefined;
+				return (
+					// biome-ignore lint/suspicious/noArrayIndexKey: capped is a fixed string slice split into immutable, never-reordered lines
+					<Text key={i} color={color} bold={bold}>
+						<Text dimColor>{i === 0 ? RESULT_LEAD : RESULT_INDENT}</Text>
+						{/* The error mark goes behind the lead — `  ⎿  ✗ text` — so it reads as the state of the output, not of the call. */}
+						{isError && !interrupted && i === 0 ? `${theme.marks.error} ${line}` : line}
+					</Text>
+				);
+			})}
+			{notes.map((note) => (
+				<Text key={note} color={interrupted ? theme.warning : theme.textMuted} dimColor>
+					{RESULT_INDENT}
+					{note}
 				</Text>
 			))}
 		</Box>
@@ -455,7 +519,7 @@ export const EntryView = memo(function EntryView({
 		case "user":
 			return <UserMessageView text={entry.text} steered={entry.steered} />;
 		case "assistant":
-			return <AssistantMessageView text={entry.text} />;
+			return <AssistantMessageView text={entry.text} incomplete={entry.incomplete} />;
 		case "toolUse":
 			return <ToolUseView entry={entry} full={full} liveText={liveText} />;
 		case "error":

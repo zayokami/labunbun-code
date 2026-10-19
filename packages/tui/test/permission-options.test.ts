@@ -10,7 +10,16 @@
  */
 import { describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
-import { alwaysAllowLabel, alwaysAskLabel, permissionOptions, ruleSpecifierFor } from "../src/permission-options.ts";
+import {
+	alwaysAllowLabel,
+	alwaysAskLabel,
+	MAX_DENIAL_MESSAGE_CHARS,
+	permissionOptions,
+	replyAllowed,
+	replyDenyMessage,
+	replyMessage,
+	ruleSpecifierFor,
+} from "../src/permission-options.ts";
 
 /**
  * A workspace root in the spelling *this* platform resolves. A literal
@@ -142,5 +151,52 @@ describe("permissionOptions", () => {
 		for (const option of permissionOptions("Bash", { command: "git status" }, CWD)) {
 			expect(option.alwaysAllow && option.alwaysAsk).toBe(false);
 		}
+	});
+
+	test("only the denial collects a sentence, and it says so", () => {
+		const options = permissionOptions("Bash", { command: "git status" }, CWD);
+		expect(options[0].collectsFeedback).toBeUndefined();
+		expect(options[1].collectsFeedback).toBeUndefined();
+		expect(options[2].collectsFeedback).toBeUndefined();
+		// The promise on the row and the field it opens are one flag apart from
+		// drifting: a row that says "tell the model" and opens nothing, or a
+		// grant that unexpectedly asks for prose.
+		expect(options[3].collectsFeedback).toBe(true);
+	});
+});
+
+describe("normalizing a reply", () => {
+	test("a boolean stays a boolean", () => {
+		// Every stub and every non-feedback path still answers this way; the union
+		// exists for the one path that carries a sentence.
+		expect(replyAllowed(true)).toBe(true);
+		expect(replyAllowed(false)).toBe(false);
+		expect(replyMessage(true)).toBeUndefined();
+		expect(replyMessage(false)).toBeUndefined();
+	});
+
+	test("the object form carries the decision and the sentence", () => {
+		const reply = { allow: false, alwaysAllow: false, alwaysAsk: false, message: "  use `git status` instead  " };
+		expect(replyAllowed(reply)).toBe(false);
+		expect(replyMessage(reply)).toBe("use `git status` instead");
+	});
+
+	test("a blank sentence is no sentence", () => {
+		expect(replyMessage({ allow: false, message: "   " })).toBeUndefined();
+		expect(replyMessage({ allow: false, message: "" })).toBeUndefined();
+		expect(replyMessage({ allow: false })).toBeUndefined();
+	});
+
+	test("denials fall back to the sentence the pipeline always used", () => {
+		expect(replyDenyMessage(false)).toBe("User denied permission");
+		expect(replyDenyMessage({ allow: false })).toBe("User denied permission");
+		expect(replyDenyMessage({ allow: false, message: "nope" })).toBe("nope");
+	});
+
+	test("a long sentence is cut at the documented bound", () => {
+		// The text ends up in a tool result, which the model reads as input; an
+		// unbounded paste would be a way to put arbitrary content there.
+		const long = "x".repeat(MAX_DENIAL_MESSAGE_CHARS + 100);
+		expect(replyDenyMessage({ allow: false, message: long })).toHaveLength(MAX_DENIAL_MESSAGE_CHARS);
 	});
 });

@@ -79,6 +79,13 @@ export interface ReplProps {
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
 	/**
+	 * Cancel the long-running command, when one is running (`/compact` is the
+	 * case this exists for). Return true when the press was taken: the command
+	 * runs with its own abort signal and the session is idle while it does, so
+	 * neither the editor nor `session.abort()` has anything to stop.
+	 */
+	onCancelCommand?: () => boolean;
+	/**
 	 * Called after Shift+Tab moves the session's two axes, with the row it moved
 	 * to. The app layer needs this to record the change: the session has no event
 	 * for `setMode`, and everything `/mode` does about a change — the prompt's
@@ -108,7 +115,7 @@ export interface ReplProps {
 }
 
 const KEYS_HELP = `Keys:
-  Enter send · Shift+Enter newline · ↑/↓ history · Esc interrupt · Ctrl+C exit (twice when idle)`;
+  Enter send · Shift+Enter newline · ↑/↓ history · Esc interrupt · Ctrl+O transcript · Ctrl+C exit (twice when idle)`;
 
 /**
  * Appended to the key list when modal editing is on. Without it `/help` promised
@@ -196,6 +203,7 @@ export function REPL({
 	onSubmitText,
 	onMidRunText,
 	onMemoryShortcut,
+	onCancelCommand,
 	onModeChange,
 	commandSuggestions,
 	completeFiles,
@@ -214,6 +222,8 @@ export function REPL({
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const contextActivity = useStore(store, (s) => s.contextActivity);
 	const contextActivitySince = useStore(store, (s) => s.contextActivitySince);
+	const contextActivityCancellable = useStore(store, (s) => s.contextActivityCancellable);
+	const retry = useStore(store, (s) => s.retry);
 	const statusCard = useStore(store, (s) => s.statusCard);
 	const activity = useStore(store, (s) => s.activity);
 	const backgroundShells = useStore(store, (s) => s.backgroundShells);
@@ -673,6 +683,10 @@ export function REPL({
 			// cancel (an @-list, insert mode, a half-typed vim command) that is not
 			// an interrupt. Only what it declines to use reaches the session.
 			if (escapeRef.current?.()) return;
+			// A command can be the thing that is running while the session is not:
+			// a manual `/compact` owns its own abort signal. Asked before the
+			// session so the press stops the work that is actually in flight.
+			if (onCancelCommand?.()) return;
 			if (getSession().isRunning) {
 				getSession().abort();
 				return;
@@ -893,6 +907,8 @@ export function REPL({
 							contextInfo={contextInfo}
 							activity={contextActivity}
 							activitySince={contextActivitySince}
+							activityCancellable={contextActivityCancellable}
+							retry={retry}
 							thinkingMs={thinkingMs}
 							outputEstimate={estimateOutputTokens(streamingText.length)}
 							pad={padStatus}

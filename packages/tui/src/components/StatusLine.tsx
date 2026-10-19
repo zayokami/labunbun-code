@@ -5,7 +5,7 @@ import { formatElapsed } from "../elapsed.ts";
 import { thinkingWord } from "../flavor.ts";
 import { formatTokens } from "../format.ts";
 import { useTheme } from "../theme.ts";
-import type { PendingTool, StatusPhase, UiBackgroundShell } from "../ui-state.ts";
+import type { PendingTool, StatusPhase, UiBackgroundShell, UiRetry } from "../ui-state.ts";
 
 /** Braille spinner, shared with the terminal title so both turn at one rate. */
 export const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -113,6 +113,8 @@ export function StatusLine({
 	outputEstimate,
 	activity,
 	activitySince,
+	activityCancellable,
+	retry,
 	thinkingMs,
 	pad,
 }: {
@@ -135,6 +137,18 @@ export function StatusLine({
 	 * the word by itself.
 	 */
 	activitySince?: number;
+	/**
+	 * Whether Esc stops the activity — a manual `/compact` builds a command-level
+	 * abort signal, a background summarization does not. The row offers the key
+	 * only when the key does something.
+	 */
+	activityCancellable?: boolean;
+	/**
+	 * A backoff the request ladder is waiting out. Takes the label while it is
+	 * set and counts down on the same tick as the spinner, so a silence that is
+	 * really a scheduled retry reads as one instead of as a hang.
+	 */
+	retry?: UiRetry;
 	/**
 	 * How long the current thinking span has run, for the word ladder. Only the
 	 * thinking label climbs it, and only while no `activity` holds the label —
@@ -200,21 +214,30 @@ export function StatusLine({
 		);
 	}
 	if (phase === "idle") {
-		// No duration: the clock measures turns, and this is not one. Esc is not
-		// offered either — there is nothing for it to interrupt but a command.
+		// No duration: the clock measures turns, and this is not one. Esc is
+		// offered only when it is wired to the command — a manual compaction can
+		// be cancelled, a summarization the loop started on its own cannot.
 		return (
 			<Text color={theme.accent}>
 				{FRAMES[frame]} {activityLabel}{" "}
 				<Text dimColor>
 					({modelName}
-					{contextPart})
+					{contextPart}
+					{activityCancellable ? " · esc to cancel" : ""})
 				</Text>
 			</Text>
 		);
 	}
 	const outputPart = outputEstimate && outputEstimate > 0 ? ` · ~${formatTokens(outputEstimate)} out` : "";
+	// A scheduled wait owns the label while it lasts: the attempt number and the
+	// seconds left are the two facts that tell a user whether to wait or reach
+	// for Esc. Once the wait is up the attempt word stays until the stream
+	// actually resumes, because "retrying" is still true then.
+	const retryRemaining = retry === undefined ? 0 : Math.max(0, Math.ceil((retry.untilMs - Date.now()) / 1000));
 	// The thinking label climbs the word ladder; every other phase has one word.
-	const label = activityLabel ?? (phase === "thinking" ? thinkingWord(thinkingMs ?? 0) : PHASE_LABEL[phase]);
+	const label = retry
+		? `retrying attempt ${retry.attempt}${retryRemaining > 0 ? ` · ${retryRemaining}s` : ""}`
+		: (activityLabel ?? (phase === "thinking" ? thinkingWord(thinkingMs ?? 0) : PHASE_LABEL[phase]));
 	return (
 		<Text color={theme.accent}>
 			{FRAMES[frame]} {label}{" "}

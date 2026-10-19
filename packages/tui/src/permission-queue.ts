@@ -1,6 +1,6 @@
 import { inputMatchesSpecifier } from "@labunbun/agent";
 import type { PermissionDiff } from "./permission-diff.ts";
-import { permissionOptions, ruleSpecifierFor } from "./permission-options.ts";
+import { type PermissionReply, permissionOptions, ruleSpecifierFor } from "./permission-options.ts";
 import type { PermissionDialogState } from "./ui-state.ts";
 
 export interface PermissionRequestQueueOptions {
@@ -58,15 +58,19 @@ export interface PermissionRequestQueueOptions {
 
 export interface PermissionRequestQueue {
 	/**
-	 * Ask for permission; resolves true when allowed. Answered in arrival order.
+	 * Ask for permission; resolves with the answer. Answered in arrival order.
 	 *
 	 * `source` names who raised the ask when that is not this session — an ask
 	 * forwarded from a subagent, carried to the dialog so the answer knows which
 	 * worker is waiting. `signal` withdraws the ask: on abort the request leaves
 	 * the queue and resolves false, which is how a stopped subagent's question
 	 * gets off the screen without touching any other ask.
+	 *
+	 * The reply is a `PermissionReply` rather than a boolean because the fourth
+	 * answer carries a sentence; every path that does not collect one resolves
+	 * the boolean it always did, which normalizes to the same decision.
 	 */
-	request: (toolName: string, input: unknown, source?: string, signal?: AbortSignal) => Promise<boolean>;
+	request: (toolName: string, input: unknown, source?: string, signal?: AbortSignal) => Promise<PermissionReply>;
 	/** Deny everything still pending — for a run that is being aborted. */
 	clear: () => void;
 }
@@ -87,7 +91,7 @@ interface PendingRequest {
 	input: unknown;
 	/** Who raised it, when that was not this session (see `request`). */
 	source?: string;
-	resolve: (allow: boolean) => void;
+	resolve: (reply: PermissionReply) => void;
 }
 
 export function createPermissionQueue(options: PermissionRequestQueueOptions): PermissionRequestQueue {
@@ -108,7 +112,7 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			options: permissionOptions(next.toolName, next.input, options.cwd),
 			queueLength: pending.length,
 			source: next.source,
-			resolve: (allow, alwaysAllow, alwaysAsk) => {
+			resolve: (allow, alwaysAllow, alwaysAsk, message) => {
 				pending.shift();
 				if (allow && alwaysAllow) {
 					options.onAlwaysAllow?.(next.toolName, next.input);
@@ -137,14 +141,18 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 					options.onAlwaysAsk?.(next.toolName, next.input);
 				}
 				show();
-				next.resolve(allow);
+				// The object form exists only when there is something to carry: a
+				// denial with no sentence is the boolean it always was, so callers
+				// that only read the decision never meet a shape they do not know.
+				const feedback = message?.trim();
+				next.resolve(feedback ? { allow, alwaysAllow, alwaysAsk: alwaysAsk === true, message: feedback } : allow);
 			},
 		});
 	};
 
 	return {
 		request: (toolName, input, source, signal) =>
-			new Promise<boolean>((resolve) => {
+			new Promise<PermissionReply>((resolve) => {
 				// An ask whose run is already cancelled has no answer coming, and a
 				// dialog for a cancelled call asks about something that no longer has
 				// a subject. Denied here rather than queued, so nothing orphaned ever
@@ -154,11 +162,11 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 					return;
 				}
 				let settled = false;
-				const settle = (allow: boolean): void => {
+				const settle = (reply: PermissionReply): void => {
 					if (settled) return;
 					settled = true;
 					signal?.removeEventListener("abort", onAbort);
-					resolve(allow);
+					resolve(reply);
 				};
 				// The abort withdraws this one request, not the queue: a stopped
 				// subagent's ask must not take the session's own pending question down

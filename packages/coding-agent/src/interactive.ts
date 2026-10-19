@@ -105,8 +105,11 @@ import {
 	liveOutputLines,
 	mountRepl,
 	opposingEditorKey,
+	type PermissionReply,
 	RESULT_TEXT_CAP,
 	type ReplAppHandle,
+	replyAllowed,
+	replyDenyMessage,
 	resolveBuiltInTheme,
 	resolveEditingMode,
 	ruleSpecifierFor,
@@ -1436,8 +1439,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// Advisory: a Notification hook cannot veto the dialog.
 				if (outcome) reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
 			}
-			const allowed = await requestPermissionOrAbort(handle, toolName, input, ctx.signal);
-			if (!allowed) return { behavior: "deny", message: "User denied permission" };
+			const reply = await requestPermissionOrAbort(handle, toolName, input, ctx.signal);
+			// A denial may carry the sentence the user typed into the fourth option;
+			// the model sees it in place of the generic wording, bounded because this
+			// string rides in a tool result every later request pays for.
+			if (!replyAllowed(reply)) return { behavior: "deny", message: replyDenyMessage(reply) };
 			// The answer settles the question that was asked. Whether *this* call may run
 			// is a separate question, and the mode it was asked under can be gone: the
 			// dialog is a blocking wait, and `EnterPlanMode` is concurrency-safe, so a
@@ -2558,7 +2564,7 @@ async function requestPermissionOrAbort(
 	toolName: string,
 	input: unknown,
 	signal?: AbortSignal,
-): Promise<boolean> {
+): Promise<PermissionReply> {
 	const answer = handle.requestPermission(toolName, input);
 	if (!signal) return answer;
 	if (signal.aborted) {
@@ -2567,7 +2573,7 @@ async function requestPermissionOrAbort(
 	}
 
 	let onAbort: (() => void) | undefined;
-	const abort = new Promise<boolean>((resolve) => {
+	const abort = new Promise<PermissionReply>((resolve) => {
 		onAbort = () => resolve(false);
 		signal.addEventListener("abort", onAbort, { once: true });
 	});

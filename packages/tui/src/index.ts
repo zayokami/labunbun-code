@@ -86,7 +86,17 @@ export {
 	usePadStatus,
 } from "./pad.ts";
 export { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "./paste.ts";
-export { alwaysAllowLabel, type PermissionOption, permissionOptions, ruleSpecifierFor } from "./permission-options.ts";
+export {
+	alwaysAllowLabel,
+	MAX_DENIAL_MESSAGE_CHARS,
+	type PermissionOption,
+	type PermissionReply,
+	permissionOptions,
+	replyAllowed,
+	replyDenyMessage,
+	replyMessage,
+	ruleSpecifierFor,
+} from "./permission-options.ts";
 export { applyFileCompletion, currentAtWord, filterFiles } from "./prompt-files.ts";
 export { createStore, type Store, useStore } from "./store.ts";
 export {

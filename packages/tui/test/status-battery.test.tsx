@@ -104,3 +104,64 @@ describe("the status line and the pad", () => {
 		view.unmount();
 	});
 });
+
+describe("the status line and a scheduled retry", () => {
+	function renderLine(props: React.ComponentProps<typeof StatusLine>) {
+		return render(
+			(
+				<ThemeContext.Provider value={DARK_THEME}>{<StatusLine {...props} />}</ThemeContext.Provider>
+			) as React.ReactElement,
+		);
+	}
+	const frameOf = (view: { lastFrame: () => string | undefined }) => (view.lastFrame() ?? "").replace(/\s+/g, " ");
+
+	test("the wait owns the label and counts down", () => {
+		const view = renderLine({
+			phase: "responding",
+			modelName: "test-model",
+			elapsedMs: 2_000,
+			retry: { attempt: 2, untilMs: Date.now() + 5_000, message: "rate limited" },
+		});
+		const frame = frameOf(view);
+		expect(frame).toContain("retrying attempt 2");
+		expect(frame).toMatch(/retrying attempt 2 · [3-6]s/);
+		// The ordinary label must not sit behind the retry line claiming the
+		// response is still streaming.
+		expect(frame).not.toContain("Responding…");
+		view.unmount();
+	});
+
+	test("once the wait is up the attempt stays until the stream actually resumes", () => {
+		const view = renderLine({
+			phase: "responding",
+			modelName: "test-model",
+			elapsedMs: 2_000,
+			retry: { attempt: 3, untilMs: Date.now() - 1_000, message: "rate limited" },
+		});
+		const frame = frameOf(view);
+		expect(frame).toContain("retrying attempt 3");
+		expect(frame).not.toMatch(/retrying attempt 3 · \d+s/);
+		view.unmount();
+	});
+
+	test("Esc is offered for a cancellable activity, and not for a background one", () => {
+		const cancellable = renderLine({
+			phase: "idle",
+			modelName: "test-model",
+			elapsedMs: 0,
+			activity: "Compacting…",
+			activityCancellable: true,
+		});
+		expect(frameOf(cancellable)).toContain("esc to cancel");
+		cancellable.unmount();
+
+		const background = renderLine({
+			phase: "idle",
+			modelName: "test-model",
+			elapsedMs: 0,
+			activity: "Compacting…",
+		});
+		expect(frameOf(background)).not.toContain("esc to cancel");
+		background.unmount();
+	});
+});

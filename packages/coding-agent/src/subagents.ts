@@ -25,6 +25,7 @@ import {
 } from "@labunbun/agent";
 import type { Model, StreamFn, ThinkingLevel, Usage } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
+import { type PermissionReply, replyAllowed, replyDenyMessage } from "@labunbun/tui";
 import { z } from "zod";
 import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
 import type { UsageSeat } from "./cost-tracker.ts";
@@ -271,7 +272,12 @@ export interface TaskToolContext {
 	 * before this funnel existed. `signal` is the subagent run's own: the queue
 	 * may use it to withdraw the ask the moment the run is stopped.
 	 */
-	requestPermission?: (toolName: string, input: unknown, source: string, signal?: AbortSignal) => Promise<boolean>;
+	requestPermission?: (
+		toolName: string,
+		input: unknown,
+		source: string,
+		signal?: AbortSignal,
+	) => Promise<PermissionReply>;
 }
 
 /** What a spawn reads from the call it runs under: where, and the cancel that ends it. */
@@ -618,11 +624,12 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 							// moment the run is stopped, abort included.
 							registry.askStarted(handle);
 							try {
-								const allowed = await ask(toolName, permInput, subagentSourceLabel(handle), permCtx.signal);
-								if (allowed) return { behavior: "allow" };
+								const reply = await ask(toolName, permInput, subagentSourceLabel(handle), permCtx.signal);
+								if (replyAllowed(reply)) return { behavior: "allow" };
 								// The session's own words for this, so a denial reads the
-								// same wherever it was decided.
-								return { behavior: "deny", message: "User denied permission" };
+								// same wherever it was decided — including the sentence the
+								// user typed into the fourth option.
+								return { behavior: "deny", message: replyDenyMessage(reply) };
 							} finally {
 								registry.askEnded(handle);
 							}

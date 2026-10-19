@@ -123,12 +123,16 @@ describe("when the queue empties", () => {
 	test("an interrupt says how many messages it threw away", () => {
 		const two = { ...state(), queued: [queued({ id: "q1" }), queued({ id: "q2", mode: "steer" as const })] };
 		const aborted = reduceEvent(two, { type: "agent_end", reason: "aborted", messages: [] });
-		expect(aborted.entries.map((e) => (e.kind === "info" ? e.text : e.kind))).toContain(
-			"[interrupted · 2 queued messages dropped]",
-		);
+		const texts = aborted.entries.map((e) => (e.kind === "info" ? e.text : e.kind));
+		expect(texts).toContain("[interrupted · 2 queued messages dropped · type a new message to continue]");
+		// Each discarded message is named back, so an interrupt cannot silently
+		// eat something the user took the trouble to type.
+		expect(texts.filter((t) => t === 'Dropped: "and also fix the other test"')).toHaveLength(2);
 		// Nothing was waiting, so there is nothing to report beyond the interrupt.
 		const plain = reduceEvent({ ...state(), queued: [] }, { type: "agent_end", reason: "aborted", messages: [] });
-		expect(plain.entries.map((e) => (e.kind === "info" ? e.text : e.kind))).toContain("[interrupted]");
+		expect(plain.entries.map((e) => (e.kind === "info" ? e.text : e.kind))).toContain(
+			"[interrupted · type a new message to continue]",
+		);
 	});
 
 	test("a clean end keeps the transcript free of queue bookkeeping", () => {

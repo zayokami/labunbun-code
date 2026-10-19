@@ -31,7 +31,13 @@ async function waitFor(done: () => boolean, timeoutMs = 2000): Promise<void> {
 	}
 }
 
-function setup(options: { vim?: boolean; completeFiles?: (query: string) => Promise<string[]> } = {}) {
+function setup(
+	options: {
+		vim?: boolean;
+		completeFiles?: (query: string) => Promise<string[]>;
+		onCancelCommand?: () => boolean;
+	} = {},
+) {
 	const streaming = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	const faux = fauxProvider([{ text: "thinking hard" }, { text: "never reached" }]);
@@ -59,6 +65,7 @@ function setup(options: { vim?: boolean; completeFiles?: (query: string) => Prom
 			modelName="test"
 			onExit={() => {}}
 			completeFiles={options.completeFiles}
+			onCancelCommand={options.onCancelCommand}
 		/>,
 	);
 
@@ -103,7 +110,7 @@ describe("Esc interrupts a run", () => {
 		await delay(150);
 
 		expect(h.session.isRunning).toBe(false);
-		expect(transcript(h.store)).toContain("info:[interrupted]");
+		expect(transcript(h.store)).toContain("info:[interrupted · type a new message to continue]");
 		expect(h.store.get().statusPhase).toBe("idle");
 		const lastAssistant = [...h.session.messages].reverse().find((m) => m.role === "assistant");
 		expect(lastAssistant).toMatchObject({ stopReason: "aborted" });
@@ -121,6 +128,64 @@ describe("Esc interrupts a run", () => {
 		expect(h.session.isRunning).toBe(false);
 		expect(h.session.isInterrupted).toBe(false);
 		expect(transcript(h.store)).not.toContain("info:[interrupted]");
+		h.unmount();
+	}, 20_000);
+});
+
+/**
+ * Esc is also the only key that can stop a local command — a manual `/compact`
+ * owns its own abort signal and is not a session turn. The command is asked
+ * first, and only a command that declines passes the press down to the session;
+ * otherwise a compaction in flight and a turn behind it would both die on one
+ * keypress.
+ */
+describe("Esc and a running local command", () => {
+	test("a command that takes the press leaves the session alone", async () => {
+		let cancelled = 0;
+		const h = setup({
+			onCancelCommand: () => {
+				cancelled++;
+				return true;
+			},
+		});
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+		expect(h.session.isRunning).toBe(true);
+
+		h.stdin.write("\x1b");
+		await delay(60);
+
+		expect(cancelled).toBe(1);
+		// The command owned the key, so the turn it belongs to keeps running.
+		expect(h.session.isInterrupted).toBe(false);
+		expect(h.session.isRunning).toBe(true);
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+
+	test("a command that declines leaves Esc the interrupt it always was", async () => {
+		let cancelled = 0;
+		const h = setup({
+			onCancelCommand: () => {
+				cancelled++;
+				return false;
+			},
+		});
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+
+		h.stdin.write("\x1b");
+		await delay(60);
+
+		expect(cancelled).toBe(1);
+		expect(h.session.isInterrupted).toBe(true);
+
+		h.release.resolve();
+		await delay(150);
 		h.unmount();
 	}, 20_000);
 });
