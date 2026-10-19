@@ -1,4 +1,5 @@
 import { inputMatchesSpecifier } from "@labunbun/agent";
+import type { PermissionDiff } from "./permission-diff.ts";
 import { permissionOptions, ruleSpecifierFor } from "./permission-options.ts";
 import type { PermissionDialogState } from "./ui-state.ts";
 
@@ -9,6 +10,12 @@ export interface PermissionRequestQueueOptions {
 	preview: (toolName: string, input: unknown) => string;
 	/** The same input in full, for the dialog's Ctrl+A view. */
 	fullPreview?: (toolName: string, input: unknown) => string;
+	/**
+	 * A renderable diff of the change this input will make, when the input is a
+	 * change at all (`Edit`, `Write`). The dialog shows it in place of the
+	 * preview; Ctrl+A still reaches the raw input.
+	 */
+	diffPreview?: (toolName: string, input: unknown) => PermissionDiff | undefined;
 	/**
 	 * Workspace root. Specifiers for file tools are relative paths, so without
 	 * this the queue cannot tell what a granted rule does and will not apply it
@@ -97,6 +104,7 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			toolName: next.toolName,
 			inputPreview: options.preview(next.toolName, next.input),
 			inputFull: options.fullPreview?.(next.toolName, next.input),
+			diff: options.diffPreview?.(next.toolName, next.input),
 			options: permissionOptions(next.toolName, next.input, options.cwd),
 			queueLength: pending.length,
 			source: next.source,

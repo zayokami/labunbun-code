@@ -96,4 +96,28 @@ describe("windowTitle", () => {
 	test("an absurd directory name is cut to a readable title", () => {
 		expect(title({ dirName: "x".repeat(500) })).toHaveLength(TITLE_MAX_CHARS);
 	});
+
+	// A renamed session is named by what the user called it; the directory is
+	// only the fallback. Joining the two would make the longest part of the
+	// title the part that does not distinguish this session from any other in
+	// the same directory.
+	test("a session title replaces the directory name", () => {
+		expect(title({ phase: "idle", sessionTitle: "Release notes" })).toBe("labunbun — Release notes");
+		expect(title({ sessionTitle: "Release notes" })).toContain("labunbun — Release notes");
+		expect(title({ sessionTitle: "Release notes" })).not.toContain("proj");
+	});
+
+	test("a title cannot forge a second title either", () => {
+		const forged = title({ phase: "idle", sessionTitle: `x${BEL}${ESC}]0;pwned` });
+		expect(forged).not.toContain(BEL);
+		expect(forged).not.toContain(ESC);
+	});
+
+	test("an absurd title is cut to a readable title", () => {
+		expect(title({ sessionTitle: "x".repeat(500) })).toHaveLength(TITLE_MAX_CHARS);
+	});
+
+	test("clearing the title returns the directory name", () => {
+		expect(title({ phase: "idle", sessionTitle: undefined })).toBe("labunbun — proj");
+	});
 });

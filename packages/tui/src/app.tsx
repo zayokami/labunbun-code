@@ -7,6 +7,7 @@ import type { ActivityRange, AgentSession, ModeChoice, PermissionMode, SandboxMo
 import { describeModeChoice } from "@labunbun/agent";
 import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
+import type { PickerPreview } from "./components/ListPickerDialog.tsx";
 import { sealCount } from "./components/MessageList.tsx";
 import {
 	bindSession,
@@ -16,6 +17,7 @@ import {
 	REPL,
 } from "./components/REPL.tsx";
 import { inputTrace } from "./input-trace.ts";
+import { permissionDiff } from "./permission-diff.ts";
 import { createPermissionQueue } from "./permission-queue.ts";
 import { createPlanReviewSlot } from "./plan-review-slot.ts";
 import { createQuestionSlot } from "./question-slot.ts";
@@ -92,6 +94,8 @@ export interface ReplAppOptions {
 	completeFiles?: (query: string) => Promise<string[]>;
 	/** Basename of the session directory, for the terminal window title. */
 	dirName?: string;
+	/** The session's user-chosen title, when it has one. Outranks `dirName` in the window title. */
+	sessionTitle?: string;
 	/** Prompts from earlier sessions, oldest first, for ↑ recall in the prompt. */
 	history?: string[];
 	/** Workspace root — what a "don't ask again" rule for a file tool is scoped to. */
@@ -156,7 +160,13 @@ export interface ReplAppHandle {
 	pickFromList: (
 		title: string,
 		items: Array<{ label: string; description?: string }>,
-		options?: { initialIndex?: number; onHighlight?: (index: number) => void; onCancel?: () => void },
+		options?: {
+			initialIndex?: number;
+			onHighlight?: (index: number) => void;
+			onCancel?: () => void;
+			/** Loads the Space-opened preview panel for the highlighted row. */
+			preview?: (index: number) => Promise<PickerPreview | null>;
+		},
 	) => Promise<number | null>;
 	/**
 	 * Deny every pending permission request and dismiss the dialog. For a run
@@ -250,6 +260,12 @@ export interface ReplAppHandle {
 	 * dialogs/theme/model name.
 	 */
 	setSession(next: AgentSession): void;
+	/**
+	 * Retitle the session (`/rename`, and every session swap, which reads the
+	 * incoming session's sidecar). Undefined clears it, returning the terminal
+	 * title to the directory name.
+	 */
+	setSessionTitle(title?: string): void;
 	/** Rename the model shown in the status line (/model switch). */
 	setModelName(name: string): void;
 }
@@ -420,6 +436,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		// starts on the same palette — nothing to reprint until a choice moves it.
 		themeCommit: options.theme ?? DEFAULT_THEME,
 		modelName: options.modelName,
+		sessionTitle: options.sessionTitle,
 	});
 
 	/**
@@ -465,6 +482,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		show: (dialog) => store.set((state) => ({ ...state, dialog })),
 		preview: toolPreview,
 		fullPreview: toolFullView,
+		diffPreview: permissionDiff,
 		cwd: options.cwd,
 		onAlwaysAllow: options.onAlwaysAllow,
 		onAlwaysAsk: options.onAlwaysAsk,
@@ -535,6 +553,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 						initialIndex: options?.initialIndex,
 						onHighlight: options?.onHighlight,
 						onCancel: options?.onCancel,
+						preview: options?.preview,
 						resolve: (index) => {
 							store.set((st) => ({ ...st, picker: null }));
 							resolve(index);
@@ -558,6 +577,11 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			unsubscribeSession();
 			unsubscribeFooter();
 			({ unsubscribeSession, unsubscribeFooter } = bindSession(store, next));
+		},
+		setSessionTitle: (title) => {
+			// Identity guard: the app layer reads the sidecar on every session swap,
+			// and a title that did not change must not rerender the tree.
+			store.set((s) => (s.sessionTitle === title ? s : { ...s, sessionTitle: title }));
 		},
 		setModelName: (name) => {
 			store.set((s) => ({ ...s, modelName: name }));

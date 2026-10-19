@@ -2,14 +2,20 @@ import type { PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
 import { isAimedAt, usePadAction } from "../pad.ts";
+import type { DiffLineKind, PermissionDiff } from "../permission-diff.ts";
 import { type PermissionOption, permissionOptions } from "../permission-options.ts";
-import { useTheme } from "../theme.ts";
+import { type Theme, useTheme } from "../theme.ts";
 
 export interface PermissionDialogProps {
 	toolName: string;
 	inputPreview: string;
 	/** The input in full, for Ctrl+A. Absent means there is nothing more to show. */
 	inputFull?: string;
+	/**
+	 * The change this call will make, when the call is a change (`Edit`,
+	 * `Write`). Takes the preview's place; Ctrl+A still swaps in the raw input.
+	 */
+	diff?: PermissionDiff;
 	/**
 	 * The answers to offer. Supplied by the host, which is the only place that
 	 * still holds the raw input the scope of a rule is computed from; without it
@@ -52,6 +58,7 @@ export function PermissionDialog({
 	toolName,
 	inputPreview,
 	inputFull,
+	diff,
 	options,
 	onResolve,
 	queueLength,
@@ -166,7 +173,20 @@ export function PermissionDialog({
 				</Text>{" "}
 				wants to:
 			</Text>
-			<Text color={theme.toolArgs}>{body}</Text>
+			{diff && !expanded ? (
+				<Box flexDirection="column">
+					{diff.lines.map((line, i) => (
+						// biome-ignore lint/suspicious/noArrayIndexKey: diff lines are positional and never reordered
+						<Text key={`diff-${i}`} color={diffColor(line.kind, theme)}>
+							{diffPrefix(line.kind)}
+							{line.text}
+						</Text>
+					))}
+					{diff.notice ? <Text dimColor>{diff.notice}</Text> : null}
+				</Box>
+			) : (
+				<Text color={theme.toolArgs}>{body}</Text>
+			)}
 			<Box flexDirection="column" marginTop={1}>
 				{answers.map((answer, i) => (
 					<Text key={answer.label} color={i === selected ? theme.selection : theme.textMuted}>
@@ -198,4 +218,23 @@ export function PermissionDialog({
 			</Box>
 		</Box>
 	);
+}
+
+/** The marker a unified diff puts in front of the line, and the indent of context. */
+function diffPrefix(kind: DiffLineKind): string {
+	if (kind === "added") return "+";
+	if (kind === "removed") return "-";
+	if (kind === "context") return " ";
+	return "";
+}
+
+/**
+ * The palette a result diff already uses (MessageList): one set of colours for
+ * one idea of a change.
+ */
+function diffColor(kind: DiffLineKind, theme: Theme): string {
+	if (kind === "added") return theme.diffAdded;
+	if (kind === "removed") return theme.diffRemoved;
+	if (kind === "header") return theme.diffHeader;
+	return theme.toolOutput;
 }

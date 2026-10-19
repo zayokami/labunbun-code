@@ -12,6 +12,7 @@ import {
 	toolSummary,
 } from "../src/components/StatusLine.tsx";
 import { RESULT_LEAD, TOOL_DOT } from "../src/figures.ts";
+import { permissionDiff } from "../src/permission-diff.ts";
 import { permissionOptions } from "../src/permission-options.ts";
 import { shortcutGroups } from "../src/shortcuts.ts";
 import { createStore } from "../src/store.ts";
@@ -530,6 +531,36 @@ describe("PermissionDialog", () => {
 		stdin.write("\x1b[B\r"); // down, then Enter, in the same read
 		await delay(30);
 		expect(decisions).toEqual([[true, true]]);
+		unmount();
+	});
+
+	test("an Edit is shown as a diff, and Ctrl+A still reaches the raw input", async () => {
+		const diff = permissionDiff("Edit", {
+			file_path: "src/a.ts",
+			old_string: "const answer = 1;",
+			new_string: "const answer = 42;",
+		});
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Edit"
+					inputPreview="src/a.ts"
+					inputFull="RAW INPUT"
+					diff={diff}
+					onResolve={() => {}}
+				/>,
+			),
+		);
+		await delay(30);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("--- src/a.ts");
+		expect(frame).toContain("-const answer = 1;");
+		expect(frame).toContain("+const answer = 42;");
+		expect(frame).not.toContain("RAW INPUT");
+
+		stdin.write("\x01"); // Ctrl+A
+		await delay(30);
+		expect(flatFrame(lastFrame() ?? "")).toContain("RAW INPUT");
 		unmount();
 	});
 

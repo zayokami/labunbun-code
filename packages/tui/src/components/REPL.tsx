@@ -271,6 +271,7 @@ export function REPL({
 		onModeChange?.(next, previous);
 	}, [getSession, store, onModeChange]);
 	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
+	const sessionTitle = useStore(store, (s) => s.sessionTitle);
 	// Ink's own writer, not `process.stdout`: it knows where the frame it drew is,
 	// so it can take it down and put it back around whatever we write.
 	const { stdout, write: writeStdout } = useStdout();
@@ -875,7 +876,12 @@ export function REPL({
 				</Box>
 			) : (
 				<>
-					<TerminalTitle phase={statusPhase} dirName={dirName} actionRequired={awaitingUser} />
+					<TerminalTitle
+						phase={statusPhase}
+						dirName={dirName}
+						sessionTitle={sessionTitle}
+						actionRequired={awaitingUser}
+					/>
 					<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} paintedTheme={themeCommit} />
 					<StreamingPreview text={streamingText} thinking={thinkingText} />
 					{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
@@ -933,6 +939,7 @@ export function REPL({
 							resolve={picker.resolve}
 							onHighlight={picker.onHighlight}
 							onCancel={picker.onCancel}
+							preview={picker.preview}
 							pad={pad}
 						/>
 					) : null}

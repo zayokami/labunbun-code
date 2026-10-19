@@ -13,6 +13,12 @@ export {
 } from "./app.tsx";
 export { type WheelEntry, wheelEntries, wheelMove, wheelStart } from "./command-wheel.ts";
 export { CommandWheel } from "./components/CommandWheel.tsx";
+export {
+	ListPickerDialog,
+	type ListPickerState,
+	type PickerItem,
+	type PickerPreview,
+} from "./components/ListPickerDialog.tsx";
 export { MessageList, StreamingPreview } from "./components/MessageList.tsx";
 export { OnScreenKeyboard } from "./components/OnScreenKeyboard.tsx";
 export { PermissionDialog } from "./components/PermissionDialog.tsx";

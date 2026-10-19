@@ -11,6 +11,7 @@ import {
 } from "@labunbun/agent";
 import type { AgentMessage, ImageContent, TextContent } from "@labunbun/ai";
 import type { ListPickerState } from "./components/ListPickerDialog.tsx";
+import type { PermissionDiff } from "./permission-diff.ts";
 import type { PermissionOption } from "./permission-options.ts";
 import { DEFAULT_THEME } from "./themes/index.ts";
 import type { Theme } from "./themes/tokens.ts";
@@ -220,6 +221,13 @@ export interface UiState {
 	/** Display name of the active model. In the store so /model switching updates the status line live. */
 	modelName: string;
 	/**
+	 * The user's name for this session, when `/rename` gave it one. In the store
+	 * because the terminal title reads it every frame after the app layer writes
+	 * the sidecar; there is no session event for a rename, so the handle setter is
+	 * the only way the new name can reach the screen.
+	 */
+	sessionTitle?: string;
+	/**
 	 * The permission mode, named by `describeModeChoice` — the label, not the id,
 	 * because the id of the widest row (`agentNoSandbox`) is not a thing to put
 	 * on a prompt.
@@ -265,6 +273,12 @@ export interface PermissionDialogState {
 	 * a command is long enough that its tail is where the danger is.
 	 */
 	inputFull?: string;
+	/**
+	 * The change this input will make, for the tools whose input is a change
+	 * (`Edit`, `Write`). Absent for every other tool and for an input the diff
+	 * builder does not understand, in which case the dialog shows the preview.
+	 */
+	diff?: PermissionDiff;
 	/**
 	 * The answers to offer, named for what each one grants (permission-options).
 	 * Absent when the host had no input to scope a rule to, in which case the

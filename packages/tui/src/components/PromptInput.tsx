@@ -2,6 +2,7 @@ import type { PadAction, PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput, usePaste, useWindowSize } from "ink";
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { resolveEditingMode } from "../editing-mode.ts";
+import { rankItems } from "../filter-rank.ts";
 import { type HistorySearchState, historyMatches, searchSelection, searchSelectionIndex } from "../history-search.ts";
 import { useTextInput } from "../hooks/useTextInput.ts";
 import { type OskCursor, oskKeyAt, oskMove, oskPage, oskTurn, oskType } from "../osk.ts";
@@ -11,6 +12,9 @@ import { applyFileCompletion, currentAtWord, filterFiles } from "../prompt-files
 import { hintLine } from "../shortcuts.ts";
 import { type Theme, useTheme } from "../theme.ts";
 import { OnScreenKeyboard } from "./OnScreenKeyboard.tsx";
+
+/** Rows the slash list shows before it scrolls. */
+const SUGGESTION_ROWS = 8;
 
 export interface PromptInputProps {
 	onSubmit: (text: string) => void;
@@ -422,11 +426,29 @@ export function PromptInput({
 		{ isActive: !disabled && !hidden },
 	);
 
+	const slashActive = state.text.startsWith("/") && !state.text.includes(" ");
 	const query = completionPrefix ?? state.text;
-	const suggestions =
-		state.text.startsWith("/") && !state.text.includes(" ")
-			? commandSuggestions.filter(([name]) => name.startsWith(query.toLowerCase())).slice(0, 5)
-			: [];
+	// Rank by name and description, then keep the caller's pair. The window is
+	// applied at render time rather than here: Tab cycles the whole result, and
+	// truncating before the highlight moves would make the last row unreachable.
+	// The leading `/` is the menu's syntax, not part of the word the user is
+	// searching for. Stripping it on both sides is what lets a description match
+	// ("session" -> "/resume"): against the raw name, no description could ever
+	// contain the slash the buffer opens with.
+	const rankingQuery = query.startsWith("/") ? query.slice(1) : query;
+	const suggestionIndices = slashActive
+		? rankItems(
+				commandSuggestions,
+				rankingQuery,
+				([name, description]) => [name.startsWith("/") ? name.slice(1) : name, description],
+				{ subsequence: false },
+			)
+		: [];
+	const suggestions: Array<[string, string]> = [];
+	for (const index of suggestionIndices) {
+		const suggestion = commandSuggestions[index];
+		if (suggestion) suggestions.push(suggestion);
+	}
 
 	// @-mention suggestions. The slash list and the at-word are exclusive by
 	// construction: slash needs a buffer starting with "/" and no space, an
@@ -758,6 +780,14 @@ export function PromptInput({
 	const lines = state.text.split("\n");
 	const cursorLine = state.text.slice(0, state.cursor).split("\n").length - 1;
 	const selected = suggestions.length > 0 ? suggestions[suggestionIndex % suggestions.length] : null;
+	// The window follows the highlight: a bare `/` lists every command, and the
+	// list used to stop at five rows with no way to see or reach the rest.
+	const suggestionPosition = suggestions.length > 0 ? suggestionIndex % suggestions.length : 0;
+	const suggestionStart = Math.max(
+		0,
+		Math.min(suggestionPosition - (SUGGESTION_ROWS - 1), suggestions.length - SUGGESTION_ROWS),
+	);
+	const visibleSuggestions = suggestions.slice(suggestionStart, suggestionStart + SUGGESTION_ROWS);
 	// Emacs keeps no mode, so `vimMode` reads "insert" and this gate used to hide
 	// every emacs region — the highlight the plan promises, switched off by the one
 	// editor that has no visual mode to be in. Vim's half is unchanged: outside
@@ -814,10 +844,10 @@ export function PromptInput({
 					<Text dimColor>{matches.length === 0 ? "no match" : "↑/↓ or Ctrl+R older · Enter use · Esc cancel"}</Text>
 				</Box>
 			)}
-			{(suggestions.length > 0 || fileSuggestions.length > 0 || fileListingFailed) && (
+			{(slashActive || fileSuggestions.length > 0 || fileListingFailed) && (
 				<Box flexDirection="column" marginBottom={0}>
-					{suggestions.map(([name, description], i) => {
-						const isSelected = suggestionIndex % suggestions.length === i;
+					{visibleSuggestions.map(([name, description], row) => {
+						const isSelected = suggestionPosition === suggestionStart + row;
 						return (
 							<Text key={name} color={isSelected ? theme.selection : theme.textMuted}>
 								{isSelected ? `${theme.marks.selected} ` : "  "}
@@ -826,6 +856,13 @@ export function PromptInput({
 							</Text>
 						);
 					})}
+					{suggestions.length > SUGGESTION_ROWS && (
+						<Text dimColor>
+							{suggestionStart + 1}-{Math.min(suggestionStart + SUGGESTION_ROWS, suggestions.length)} of{" "}
+							{suggestions.length}
+						</Text>
+					)}
+					{slashActive && suggestions.length === 0 && <Text dimColor>No matching commands</Text>}
 					{fileSuggestions.map((path, i) => {
 						const isSelected = fileIndex % fileSuggestions.length === i;
 						return (

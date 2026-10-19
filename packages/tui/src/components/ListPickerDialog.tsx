@@ -1,6 +1,7 @@
 import type { PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
+import { rankItems } from "../filter-rank.ts";
 import { inputTrace } from "../input-trace.ts";
 import { isAimedAt, usePadAction } from "../pad.ts";
 import { useTheme } from "../theme.ts";
@@ -8,6 +9,20 @@ import { useTheme } from "../theme.ts";
 export interface PickerItem {
 	label: string;
 	description?: string;
+}
+
+/**
+ * What a picker can show about the highlighted row when the caller has more to
+ * say than a one-line description. The dialog does not interpret it: a session
+ * preview and any future preview are the same panel, and the loading question
+ * (where the lines come from) stays with the caller.
+ */
+export interface PickerPreview {
+	/** The item's own name, when it has one — a session title, say. */
+	title?: string;
+	lines: string[];
+	/** What the preview left out, or why it is short. */
+	notice?: string;
 }
 
 export interface ListPickerState {
@@ -32,6 +47,12 @@ export interface ListPickerState {
 	onHighlight?: (index: number) => void;
 	/** Called before resolving null, so a preview can be undone. */
 	onCancel?: () => void;
+	/**
+	 * Loads a preview for one of the caller's rows. With it, Space opens a
+	 * preview panel for the highlighted row and arrows reload it; without it,
+	 * Space is an ordinary filter character and the panel never appears.
+	 */
+	preview?: (originalIndex: number) => Promise<PickerPreview | null>;
 	/** Resolves with the chosen index, or null when the user cancelled. */
 	resolve: (index: number | null) => void;
 }
@@ -48,10 +69,13 @@ export interface ListPickerDialogProps extends ListPickerState {
  * A scrollable pick-one dialog (session resume, model switch). Modeled on
  * QuestionDialog but for a single potentially long list: ↑/↓ move with
  * wrapping, the window scrolls to keep the selection visible, Enter resolves,
- * Esc cancels. A pad moves and resolves the same way, through the same two
- * helpers — the highlight a thumb moves and the highlight an arrow key moves are
- * the same highlight, and a caller previewing it (the theme picker) must not be
- * able to tell which one moved it.
+ * Esc cancels. Typing filters the list by label and description; the indices
+ * handed back are the caller's indices, not positions in the filtered view.
+ *
+ * A pad moves and resolves the same way, through the same two helpers — the
+ * highlight a thumb moves and the highlight an arrow key moves are the same
+ * highlight, and a caller previewing it (the theme picker) must not be able to
+ * tell which one moved it.
  */
 export function ListPickerDialog({
 	title,
@@ -60,6 +84,7 @@ export function ListPickerDialog({
 	resolve,
 	onHighlight,
 	onCancel,
+	preview: loadPreview,
 	pad,
 }: ListPickerDialogProps) {
 	const theme = useTheme();
@@ -84,21 +109,112 @@ export function ListPickerDialog({
 	 * whole burst into one move; every action steps from this ref instead.
 	 */
 	const selectedRef = useRef(selected);
+	const [query, setQuery] = useState("");
+	/** The filter the next key must see, not the one the last render painted. */
+	const queryRef = useRef("");
+	/** The original index last reported to `onHighlight`, for de-duplicating. */
+	const highlightedRef = useRef(selected);
+	/** Whether the preview panel is up. A ref for the same reason as the others: a burst of keys must see the state the first key left. */
+	const previewOpenRef = useRef(false);
+	const [previewOpen, setPreviewOpen] = useState(false);
+	/** Undefined while loading, null when the caller has nothing, else the preview. */
+	const [previewContent, setPreviewContent] = useState<PickerPreview | null | undefined>(undefined);
+	/** Which load the panel is showing; a slow answer for an old row must not land. */
+	const previewRequestRef = useRef(0);
+
+	/**
+	 * Matching positions in `items`, in display order. Recomputed per call
+	 * rather than memoized: these lists are short, and the key handler needs the
+	 * result for the query it just accepted, before React has re-rendered.
+	 */
+	const matchesFor = (value: string): number[] =>
+		rankItems(items, value, (item) => [item.label, item.description ?? ""]);
+	const matches = matchesFor(query);
 
 	const cancel = () => {
-		inputTrace("picker.cancel");
+		inputTrace("picker.cancel", { query: queryRef.current });
 		onCancel?.();
 		resolve(null);
 	};
 
+	/** The caller's index for the highlighted row, or undefined when none. */
+	const chosen = (): number | undefined => matchesFor(queryRef.current)[selectedRef.current];
+
+	/** Take the preview panel down, and make any answer still in flight miss. */
+	const closePreview = (): void => {
+		previewOpenRef.current = false;
+		previewRequestRef.current++;
+		setPreviewOpen(false);
+	};
+
+	/** Ask for the highlighted row's preview and keep only the newest answer. */
+	const loadPreviewFor = (originalIndex: number | undefined): void => {
+		const request = ++previewRequestRef.current;
+		if (originalIndex === undefined || !loadPreview) {
+			setPreviewContent(null);
+			return;
+		}
+		setPreviewContent(undefined);
+		void loadPreview(originalIndex).then(
+			(result) => {
+				if (request === previewRequestRef.current) setPreviewContent(result);
+			},
+			() => {
+				if (request === previewRequestRef.current) setPreviewContent(null);
+			},
+		);
+	};
+
+	const togglePreview = (): void => {
+		if (previewOpenRef.current) {
+			closePreview();
+			return;
+		}
+		previewOpenRef.current = true;
+		setPreviewOpen(true);
+		loadPreviewFor(chosen());
+		inputTrace("picker.preview", { index: chosen() });
+	};
+
 	/** Move the highlight, wrapping, and tell whoever is previewing it. */
 	const step = (delta: number): void => {
-		if (items.length === 0) return;
-		const next = (((selectedRef.current + delta) % items.length) + items.length) % items.length;
+		const current = matchesFor(queryRef.current);
+		if (current.length === 0) return;
+		const next = (((selectedRef.current + delta) % current.length) + current.length) % current.length;
 		selectedRef.current = next;
 		setSelected(next);
-		onHighlight?.(next);
-		inputTrace("picker.step", { delta, to: next, items: items.length });
+		const original = current[next];
+		if (original !== undefined) {
+			highlightedRef.current = original;
+			onHighlight?.(original);
+			// The preview follows the highlight, like the theme preview does: the
+			// row being looked at is the row the panel is about.
+			if (previewOpenRef.current) loadPreviewFor(original);
+		}
+		inputTrace("picker.step", { delta, to: next, items: current.length });
+	};
+
+	/**
+	 * Accept a new query and put the highlight back at the top of the result.
+	 * The highlight preview (the theme picker) follows the filtered list, but
+	 * only when the row it points at actually changed — typing a letter that
+	 * keeps the same first match should not re-apply a theme.
+	 */
+	const applyQuery = (next: string): void => {
+		// Typing is a statement about the list, not about the preview: the panel
+		// goes away rather than showing a row that is no longer highlighted.
+		if (previewOpenRef.current) closePreview();
+		queryRef.current = next;
+		setQuery(next);
+		selectedRef.current = 0;
+		setSelected(0);
+		const nextMatches = matchesFor(next);
+		const original = nextMatches[0];
+		if (original !== undefined && original !== highlightedRef.current) {
+			highlightedRef.current = original;
+			onHighlight?.(original);
+		}
+		inputTrace("picker.filter", { chars: next.length, matches: nextMatches.length });
 	};
 
 	const openedAt = useRef(Date.now());
@@ -131,12 +247,18 @@ export function ListPickerDialog({
 			case "page-next":
 				step(VISIBLE_ROWS);
 				return true;
-			case "confirm":
-				inputTrace("picker.resolve", { index: selectedRef.current, via: "pad" });
-				resolve(selectedRef.current);
+			case "confirm": {
+				const index = chosen();
+				if (index === undefined) return true;
+				inputTrace("picker.resolve", { index, via: "pad", query: queryRef.current });
+				resolve(index);
 				return true;
+			}
 			case "cancel":
-				cancel();
+				// Same two-stage Esc: the panel is the thing on top, so it is the
+				// thing the key closes first.
+				if (previewOpenRef.current) closePreview();
+				else cancel();
 				return true;
 			default:
 				return false;
@@ -153,13 +275,18 @@ export function ListPickerDialog({
 			down: key.downArrow,
 			ret: key.return,
 			esc: key.escape,
+			query: queryRef.current,
 		});
 		if (items.length === 0) {
 			if (key.escape || key.return) cancel();
 			return;
 		}
 		if (key.escape) {
-			cancel();
+			// Two stages: Esc closes the preview panel first, and a second press
+			// leaves the list. Cancelling both at once would make the panel a
+			// trap — the one key that got the user in would take the list away.
+			if (previewOpenRef.current) closePreview();
+			else cancel();
 			return;
 		}
 		if (key.upArrow) {
@@ -171,49 +298,112 @@ export function ListPickerDialog({
 			return;
 		}
 		if (key.return) {
-			inputTrace("picker.resolve", { index: selectedRef.current, via: "key" });
-			resolve(selectedRef.current);
+			const index = chosen();
+			if (index === undefined) return;
+			inputTrace("picker.resolve", { index, via: "key", query: queryRef.current });
+			resolve(index);
+			return;
+		}
+		// Space previews only while the query is empty. With a query it is text
+		// like any other character — a search field that eats spaces cannot
+		// search for a phrase.
+		if (input === " " && queryRef.current === "" && loadPreview) {
+			togglePreview();
+			return;
+		}
+		if (key.ctrl && input === "u") {
+			if (queryRef.current) applyQuery("");
+			return;
+		}
+		if (key.backspace || key.delete) {
+			const characters = Array.from(queryRef.current);
+			if (characters.length > 0) applyQuery(characters.slice(0, -1).join(""));
+			return;
+		}
+		// Everything that produces text is a filter character. Ctrl and Meta
+		// combinations are commands; Tab is the prompt's completion key and is
+		// not a character a list should search for.
+		if (!key.ctrl && !key.meta && !key.tab && input.length > 0) {
+			applyQuery(queryRef.current + input);
 		}
 	});
 
 	if (items.length === 0) return null;
 
-	// Scroll window: keep `selected` inside VISIBLE_ROWS rows.
-	const start = Math.max(0, Math.min(selected - (VISIBLE_ROWS - 1), items.length - VISIBLE_ROWS));
-	const visible = items.slice(start, start + VISIBLE_ROWS);
+	// Scroll window: keep `selected` inside VISIBLE_ROWS rows of the matches.
+	const start = Math.max(0, Math.min(selected - (VISIBLE_ROWS - 1), matches.length - VISIBLE_ROWS));
+	const visible = matches.slice(start, start + VISIBLE_ROWS);
 
 	return (
 		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
 				{title}
 			</Text>
+			{query ? (
+				<Text color={theme.textMuted}>
+					Search: {query}
+					{matches.length > 0 ? ` · ${matches.length} match${matches.length === 1 ? "" : "es"}` : ""}
+				</Text>
+			) : null}
 			<Box flexDirection="column" marginTop={1}>
-				{visible.map((item, row) => {
-					const index = start + row;
-					const isSelected = index === selected;
-					return (
-						// Keyed by row, not by label: the labels are theme names, and two of
-						// them can be the same one — two files that call themselves the same
-						// thing, or a file named after a built-in. React on duplicate keys
-						// is not a cosmetic warning; the behavior is unsupported, and the row
-						// that goes missing would be a theme.
-						<Text key={`row-${index}`} color={isSelected ? theme.selection : theme.textMuted}>
-							{isSelected ? `${theme.marks.selected} ` : "  "}
-							{item.label}
-							{item.description ? ` — ${item.description}` : ""}
-						</Text>
-					);
-				})}
-				{items.length > VISIBLE_ROWS && (
+				{matches.length === 0 ? (
+					<Text dimColor>No matches</Text>
+				) : (
+					visible.map((originalIndex, row) => {
+						const item = items[originalIndex];
+						if (!item) return null;
+						const isSelected = start + row === selected;
+						return (
+							// Keyed by the original index, not the row: filtering changes
+							// which item a row shows, and a key that stayed behind would
+							// repaint one item's text with another's state. Labels can also
+							// repeat (two themes with the same name), so the label is not a
+							// key either.
+							<Text key={`row-${originalIndex}`} color={isSelected ? theme.selection : theme.textMuted}>
+								{isSelected ? `${theme.marks.selected} ` : "  "}
+								{item.label}
+								{item.description ? ` — ${item.description}` : ""}
+							</Text>
+						);
+					})
+				)}
+				{matches.length > VISIBLE_ROWS && (
 					<Text dimColor>
-						{start + 1}-{Math.min(start + VISIBLE_ROWS, items.length)} of {items.length}
+						{start + 1}-{Math.min(start + VISIBLE_ROWS, matches.length)} of {matches.length}
 					</Text>
 				)}
 			</Box>
+			{previewOpen ? (
+				<Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={theme.border} paddingX={1}>
+					<Text color={theme.accent} bold>
+						{previewContent?.title ?? "Preview"}
+					</Text>
+					{previewContent === undefined ? (
+						<Text dimColor>Loading preview…</Text>
+					) : previewContent === null ? (
+						<Text dimColor>Preview unavailable.</Text>
+					) : previewContent.lines.length === 0 ? (
+						<Text dimColor>No messages to preview.</Text>
+					) : (
+						previewContent.lines.map((line, index) => (
+							// biome-ignore lint/suspicious/noArrayIndexKey: preview lines are positional and never reordered
+							<Text key={`preview-${index}`} color={theme.textMuted}>
+								{line}
+							</Text>
+						))
+					)}
+					{previewContent?.notice ? <Text dimColor>{previewContent.notice}</Text> : null}
+					<Text dimColor>Esc closes preview</Text>
+				</Box>
+			) : null}
 			<Box marginTop={1}>
 				{/* The pad's two answers, named next to the keyboard's: a picker opened
 				    by a controller is a picker a controller has to be able to leave. */}
-				<Text dimColor>↑/↓ select · Enter choose · Esc cancel{pad ? " · ✕ choose · ○ cancel" : ""}</Text>
+				<Text dimColor>
+					{loadPreview && !query ? (previewOpen ? "space close preview · " : "space preview · ") : ""}
+					type to filter · ↑/↓ select · Enter choose · Esc cancel
+					{pad ? " · ✕ choose · ○ cancel" : ""}
+				</Text>
 			</Box>
 		</Box>
 	);

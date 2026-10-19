@@ -420,6 +420,63 @@ describe("slash command suggestions", () => {
 		expect(flat(lastFrame())).toContain("an old prompt");
 		unmount();
 	});
+
+	test("a description match finds a command whose name does not contain the query", async () => {
+		const DESCRIBED: Array<[string, string]> = [
+			["/theme", "Show or switch theme"],
+			["/resume", "Resume an earlier session"],
+			["/rename", "Title this session"],
+		];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={DESCRIBED} />),
+		);
+		await delay(30);
+		stdin.write("/session");
+		await delay(30);
+		const frame = flat(lastFrame());
+		expect(frame).toContain("/resume");
+		expect(frame).toContain("/rename");
+		expect(frame).not.toContain("/theme");
+		unmount();
+	});
+
+	test("the list shows eight rows and scrolls to the highlighted one", async () => {
+		const MANY: Array<[string, string]> = Array.from({ length: 12 }, (_, i) => [
+			`/cmd${String(i + 1).padStart(2, "0")}`,
+			"a command",
+		]);
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={MANY} />),
+		);
+		await delay(30);
+		stdin.write("/cmd");
+		await delay(30);
+		let frame = flat(lastFrame());
+		expect(frame).toContain("1-8 of 12");
+		expect(frame).toContain("/cmd08");
+		expect(frame).not.toContain("/cmd12");
+
+		for (let i = 0; i < 11; i++) {
+			stdin.write("\x1b[B");
+			await delay(10);
+		}
+		await delay(30);
+		frame = flat(lastFrame());
+		expect(frame).toContain("5-12 of 12");
+		expect(frame).toContain("/cmd12");
+		unmount();
+	});
+
+	test("a query that matches nothing says so", async () => {
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={COMMANDS} />),
+		);
+		await delay(30);
+		stdin.write("/zzz");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("No matching commands");
+		unmount();
+	});
 });
 
 /**

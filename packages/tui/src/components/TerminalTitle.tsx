@@ -48,17 +48,24 @@ const PHASE_TITLE: Record<StatusPhase, string> = {
 export function windowTitle({
 	phase,
 	dirName,
+	sessionTitle,
 	actionRequired,
 	frame,
 	blinkOn,
 }: {
 	phase: StatusPhase;
 	dirName: string;
+	/**
+	 * The name the user gave the session. It replaces the directory name rather
+	 * than joining it: the title's job is to tell two windows apart, and someone
+	 * who renamed a session already said what tells it apart.
+	 */
+	sessionTitle?: string;
 	actionRequired: boolean;
 	frame: number;
 	blinkOn: boolean;
 }): string {
-	const base = `labunbun — ${dirName}`;
+	const base = `labunbun — ${sessionTitle ?? dirName}`;
 	const title = actionRequired
 		? `${base} · ${actionTitle(blinkOn)}`
 		: phase === "idle"
@@ -75,10 +82,13 @@ export function windowTitle({
 export function TerminalTitle({
 	phase,
 	dirName,
+	sessionTitle,
 	actionRequired = false,
 }: {
 	phase: StatusPhase;
 	dirName: string;
+	/** The session's `/rename` title, when it has one. */
+	sessionTitle?: string;
 	/** A dialog is open and the run cannot continue without an answer. */
 	actionRequired?: boolean;
 }) {
@@ -86,8 +96,15 @@ export function TerminalTitle({
 	// shares ink's single timer, so an idle title costs nothing.
 	const { frame } = useAnimation({ interval: SPINNER_INTERVAL_MS, isActive: !actionRequired && phase !== "idle" });
 	const { frame: blinkFrame } = useAnimation({ interval: TITLE_BLINK_MS, isActive: actionRequired });
-	const title = windowTitle({ phase, dirName, actionRequired, frame, blinkOn: blinkFrame % 2 === 0 });
-	const idleTitle = windowTitle({ phase: "idle", dirName, actionRequired: false, frame: 0, blinkOn: true });
+	const title = windowTitle({ phase, dirName, sessionTitle, actionRequired, frame, blinkOn: blinkFrame % 2 === 0 });
+	const idleTitle = windowTitle({
+		phase: "idle",
+		dirName,
+		sessionTitle,
+		actionRequired: false,
+		frame: 0,
+		blinkOn: true,
+	});
 
 	// Latest value in a ref so the unmount cleanup can read it without the effect
 	// re-running: a cleanup keyed on the title would rewrite the idle title
