@@ -7,7 +7,7 @@
  * tests exercise the vocabulary directly and then through LS, Grep and Glob.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolCallContext } from "@labunbun/agent";
@@ -29,7 +29,10 @@ afterEach(() => {
 });
 
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "lbb-path-errors-"));
+	// macOS answers /var/... for tmpdir but the tools resolve it to
+	// /private/var/..., so a comparison against the unsettled spelling would
+	// test the symlink instead of the behavior.
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "lbb-path-errors-")));
 	roots.push(dir);
 	return dir;
 }
