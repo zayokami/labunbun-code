@@ -60,9 +60,9 @@ The boundary is a user message that opens with `COMPACTION_BOUNDARY_LEAD` (`pack
 
 The boundary carries the summary, the retained user requests, the re-injected files, and a pointer to the session file the replaced prefix still lives in (`packages/agent/src/compaction.ts:518-532`). Up to five recently touched files are re-injected, to a 50,000-character budget (`packages/agent/src/compaction.ts:170-171`, `packages/agent/src/compaction.ts:1390-1404`). The transcript pointer is omitted when there is no store to name (`packages/agent/src/compaction.ts:527-529`, `packages/agent/src/compaction.ts:1061-1064`).
 
-The rebuilt transcript is the boundary followed by the retained suffix (`packages/agent/src/compaction.ts:1066`). The record is written through `appendCompaction`, which verifies that the suffix is the session file's own tail (`packages/agent/src/compaction.ts:1113-1144`, `packages/agent/src/session-store.ts:372`). Synthetic tool results from the resume repair are left out of the recorded suffix, because the file never held them (`packages/agent/src/compaction.ts:1121-1128`).
+The rebuilt transcript is the boundary followed by the retained suffix (`packages/agent/src/compaction.ts:1066`). The record is written through `appendCompaction`, which verifies that the suffix is the session file's own tail (`packages/agent/src/compaction.ts:1113-1144`, `packages/agent/src/session-store.ts:363`). Synthetic tool results from the resume repair are left out of the recorded suffix, because the file never held them (`packages/agent/src/compaction.ts:1121-1128`).
 
-A resume reads `contextMessages()`, which is the last boundary followed by everything after it (`packages/agent/src/session-store.ts:349-367`). The transcript the summary replaced stays in the file as an abandoned branch: the boundary hangs off the chain root, and the suffix is appended below it (`packages/agent/src/session-store.ts:386-400`).
+A resume reads `contextMessages()`, which is the last boundary followed by everything after it (`packages/agent/src/session-store.ts:340-358`). The transcript the summary replaced stays in the file as an abandoned branch: the boundary hangs off the chain root, and the suffix is appended below it (`packages/agent/src/session-store.ts:377-391`).
 
 The pass also records what it can verify about itself: the messages summarized and kept, the missing sections, the files fingerprinted, and whether the session file took the record (`packages/agent/src/compaction.ts:1145-1153`, `packages/agent/src/compaction.ts:645-674`).
 
@@ -74,9 +74,9 @@ A successful pass clears the consecutive-failure count, manual or automatic (`pa
 
 The breaker and the setting are different switches with different words. `isTripped` is this session's breaker; `isDisabled` is the user's setting (`packages/agent/src/compaction.ts:795-808`). The breaker trips after three consecutive failures or three compactions that each refilled within three checks (`packages/agent/src/compaction.ts:146-158`, `packages/agent/src/compaction.ts:795-797`). Each gets its own notice (`packages/agent/src/compaction.ts:1513-1528`, `packages/agent/src/compaction.ts:1235-1246`).
 
-At `done`, each host clears its read record and re-saves the state the boundary stranded. The REPL clears at `packages/coding-agent/src/interactive.ts:889`, saves the task board at `:890`, re-anchors the plan at `:898`, saves the policy at `:900`, and puts the file checkpoints back at `:901`. A `-p` run clears and saves in its own `done` handler (`packages/coding-agent/src/headless.ts:731-739`). An ACP session does the same (`packages/coding-agent/src/acp.ts:1159-1167`). `/trim` clears the read record on the same reasoning (`packages/coding-agent/src/commands.ts:271-275`).
+At `done`, each host clears its read record and re-saves the state the boundary stranded. The REPL clears at `packages/coding-agent/src/interactive.ts:891`, saves the task board at `:892`, re-anchors the plan at `:900`, saves the policy at `:902`, and puts the file checkpoints back at `:903`. A `-p` run clears and saves in its own `done` handler (`packages/coding-agent/src/headless.ts:731-739`). An ACP session does the same (`packages/coding-agent/src/acp.ts:1159-1167`). `/trim` clears the read record on the same reasoning (`packages/coding-agent/src/commands.ts:271-275`).
 
-The `/compact` command prints the headline, the receipt, and an over-limit warning (`packages/coding-agent/src/commands.ts:147-180`). The receipt is `compactionReceiptLines`: summarized and kept counts, fingerprint coverage, missing sections, and a refused record (`packages/coding-agent/src/compaction-wiring.ts:82-120`). The automatic path prints the phase line and the receipt in the REPL, and the phase line plus warnings on a `-p` stream and in ACP (`packages/coding-agent/src/interactive.ts:854-863`, `packages/coding-agent/src/compaction-wiring.ts:355-370`).
+The `/compact` command prints the headline, the receipt, and an over-limit warning (`packages/coding-agent/src/commands.ts:147-180`). The receipt is `compactionReceiptLines`: summarized and kept counts, fingerprint coverage, missing sections, and a refused record (`packages/coding-agent/src/compaction-wiring.ts:82-120`). The automatic path prints the phase line and the receipt in the REPL, and the phase line plus warnings on a `-p` stream and in ACP (`packages/coding-agent/src/interactive.ts:856-865`, `packages/coding-agent/src/compaction-wiring.ts:355-370`).
 
 ## Hard-limit rescue
 
@@ -98,17 +98,17 @@ A pass reports exactly one lifecycle: `preparing`, `summarizing`, `validating`, 
 
 `PreCompact` may veto a pass before it starts. The wiring consults it for the automatic passes and for the forced overflow pass (`packages/coding-agent/src/compaction-wiring.ts:425-431`). A veto of an automatic pass defers it; a veto of a forced pass returns `blocked`, and the run ends (`packages/coding-agent/src/compaction-wiring.ts:430`, `packages/agent/src/session.ts:397-409`). A manual `/compact` asks the same hook directly, because it runs its summary through the manager itself (`packages/coding-agent/src/commands.ts:137-143`, `packages/coding-agent/src/compaction-wiring.ts:322-332`).
 
-`PostCompact` is an observer. A failing hook is a line, never a veto (`packages/coding-agent/src/interactive.ts:902-914`, `packages/coding-agent/src/headless.ts:744-755`, `packages/coding-agent/src/acp.ts:1172-1183`). The REPL, a `-p` run, and an ACP session all run it after `done` (`packages/coding-agent/src/interactive.ts:905-913`, `packages/coding-agent/src/headless.ts:744-755`, `packages/coding-agent/src/acp.ts:1172-1183`).
+`PostCompact` is an observer. A failing hook is a line, never a veto (`packages/coding-agent/src/interactive.ts:904-916`, `packages/coding-agent/src/headless.ts:744-755`, `packages/coding-agent/src/acp.ts:1172-1183`). The REPL, a `-p` run, and an ACP session all run it after `done` (`packages/coding-agent/src/interactive.ts:907-915`, `packages/coding-agent/src/headless.ts:744-755`, `packages/coding-agent/src/acp.ts:1172-1183`).
 
-The host hook doors are wired next to the manager. The REPL wires `PreCompact` at `packages/coding-agent/src/interactive.ts:929-944`, a `-p` run at `packages/coding-agent/src/headless.ts:713-723`, and an ACP session at `packages/coding-agent/src/acp.ts:1141-1153`.
+The host hook doors are wired next to the manager. The REPL wires `PreCompact` at `packages/coding-agent/src/interactive.ts:931-946`, a `-p` run at `packages/coding-agent/src/headless.ts:713-723`, and an ACP session at `packages/coding-agent/src/acp.ts:1141-1153`.
 
 ## Visibility
 
-`/context` builds rows from the manager's own limits and state (`packages/coding-agent/src/context-report.ts:122-180`, `packages/coding-agent/src/interactive.ts:4426-4454`). `Auto-compact` says `on`, `off (settings)`, or `paused after repeated failures` (`packages/coding-agent/src/context-report.ts:157-163`). `Hard limit` gives the refusal line (`packages/coding-agent/src/context-report.ts:164`). `Fixed (system + tools)` gives the part no summary can touch, and warns when that part alone is over the hard limit (`packages/coding-agent/src/context-report.ts:165-177`).
+`/context` builds rows from the manager's own limits and state (`packages/coding-agent/src/context-report.ts:122-180`, `packages/coding-agent/src/interactive.ts:4500-4528`). `Auto-compact` says `on`, `off (settings)`, or `paused after repeated failures` (`packages/coding-agent/src/context-report.ts:157-163`). `Hard limit` gives the refusal line (`packages/coding-agent/src/context-report.ts:164`). `Fixed (system + tools)` gives the part no summary can touch, and warns when that part alone is over the hard limit (`packages/coding-agent/src/context-report.ts:165-177`).
 
 With automatic compaction off in settings, the wiring says so once when the estimate crosses the threshold (`packages/coding-agent/src/compaction-wiring.ts:32-46`, `packages/coding-agent/src/compaction-wiring.ts:461-476`). The notice is edge-triggered: one per crossing, not one per turn (`packages/coding-agent/src/compaction-wiring.ts:342-348`).
 
-A tripped breaker is announced once per trip through the same path (`packages/coding-agent/src/compaction-wiring.ts:477-484`). The REPL also paints the pass's state in a status row, using the phase text that has a word for every step (`packages/coding-agent/src/compaction-wiring.ts:163-186`, `packages/coding-agent/src/interactive.ts:831-848`).
+A tripped breaker is announced once per trip through the same path (`packages/coding-agent/src/compaction-wiring.ts:477-484`). The REPL also paints the pass's state in a status row, using the phase text that has a word for every step (`packages/coding-agent/src/compaction-wiring.ts:163-186`, `packages/coding-agent/src/interactive.ts:833-850`).
 
 ## Settings and commands
 
@@ -121,8 +121,8 @@ A tripped breaker is announced once per trip through the same path (`packages/co
 | `trimOldToolResults` | False turns off the cheap rung at the threshold and on idle. | `packages/coding-agent/src/settings.ts:187`, `packages/coding-agent/src/compaction-wiring.ts:261-270` |
 | `/compact [focus]` | Runs a manual summary. The focus text is added to the prompt. Prints the receipt and the over-limit warning. | `packages/coding-agent/src/commands.ts:131-181` |
 | `/trim` | Runs the cheap rung on request. No model call. Clears the read record. | `packages/coding-agent/src/commands.ts:256-284` |
-| `/autocompact [on\|off\|<percent>]` | Reports or changes the automatic passes and the trigger line, in the settings file and in the live manager. | `packages/coding-agent/src/interactive.ts:3697-3720`, `packages/coding-agent/src/autocompact.ts:1-14` |
-| `/context` | Shows the window's parts, the auto-compact and hard limits, the fixed part, and the last compaction. | `packages/coding-agent/src/interactive.ts:4426-4454` |
+| `/autocompact [on\|off\|<percent>]` | Reports or changes the automatic passes and the trigger line, in the settings file and in the live manager. | `packages/coding-agent/src/interactive.ts:3771-3794`, `packages/coding-agent/src/autocompact.ts:1-14` |
+| `/context` | Shows the window's parts, the auto-compact and hard limits, the fixed part, and the last compaction. | `packages/coding-agent/src/interactive.ts:4500-4528` |
 
 ## Why
 

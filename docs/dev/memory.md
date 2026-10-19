@@ -39,39 +39,39 @@ Memory is a prompt section and not a user message for one reason: the model has 
 - `isProjectTierTrusted(cwd, kind, home)` reads that ledger for one kind (`packages/coding-agent/src/project-trust.ts:155-158`). Memory asks for kind `memory` (`packages/coding-agent/src/memory.ts:454`).
 - An approval adds the kinds to the ledger and writes it by replacement (`packages/coding-agent/src/project-trust.ts:189-226`).
 - The ledger is keyed by the working directory, not by the repository root. A session in a subdirectory of a Git project gets a notice that the approval covers that subdirectory only (`packages/coding-agent/src/project-trust.ts:17-24`, `:108-126`).
-- The REPL prints the withheld counts at startup when any exist (`packages/coding-agent/src/interactive.ts:2247-2261`). A `-p` run prints the same notice on stderr (`packages/coding-agent/src/headless.ts:539-552`; the wording is in `packages/coding-agent/src/project-trust.ts:108-126`).
-- `/agents approve` adds the `memory` and `styles` kinds to the ledger when those files are withheld (`packages/coding-agent/src/interactive.ts:3336-3344`). The approval loads agents and skills in place. Memory and output styles are read at startup, so the command tells the user to restart (`packages/coding-agent/src/interactive.ts:3359-3388`).
-- `/memory` repeats the same rule after an edit: memory is read at startup, so a restart applies the edit (`packages/coding-agent/src/interactive.ts:4175-4182`).
-- A project output-style directory uses the same ledger under kind `styles` (`packages/coding-agent/src/output-styles.ts:62-66`, `packages/coding-agent/src/project-trust.ts:42-45`). The withheld files are listed but never read, for the startup notice and the `/agents` listing (`packages/coding-agent/src/output-styles.ts:96-108`, `packages/coding-agent/src/interactive.ts:3417-3426`).
+- The REPL prints the withheld counts at startup when any exist (`packages/coding-agent/src/interactive.ts:2258-2272`). A `-p` run prints the same notice on stderr (`packages/coding-agent/src/headless.ts:539-552`; the wording is in `packages/coding-agent/src/project-trust.ts:108-126`).
+- `/agents approve` adds the `memory` and `styles` kinds to the ledger when those files are withheld (`packages/coding-agent/src/interactive.ts:3348-3356`). The approval loads agents and skills in place. Memory and output styles are read at startup, so the command tells the user to restart (`packages/coding-agent/src/interactive.ts:3371-3400`).
+- `/memory` repeats the same rule after an edit: memory is read at startup, so a restart applies the edit (`packages/coding-agent/src/interactive.ts:4249-4256`).
+- A project output-style directory uses the same ledger under kind `styles` (`packages/coding-agent/src/output-styles.ts:62-66`, `packages/coding-agent/src/project-trust.ts:42-45`). The withheld files are listed but never read, for the startup notice and the `/agents` listing (`packages/coding-agent/src/output-styles.ts:96-108`, `packages/coding-agent/src/interactive.ts:3429-3438`).
 
 ## Quick notes and /memory
 
-- A line typed in the REPL that starts with `#` becomes a memory note. The handler appends it, loads the memory files again, swaps the live system prompt, and reports success (`packages/coding-agent/src/interactive.ts:2113-2131`).
+- A line typed in the REPL that starts with `#` becomes a memory note. The handler appends it, loads the memory files again, swaps the live system prompt, and reports success (`packages/coding-agent/src/interactive.ts:2124-2142`).
 - The append writes one `- note` line to `<home>/.labunbun/MEMORY.md` (`packages/coding-agent/src/memory.ts:129-172`, `:158`).
 - The write refuses a symbolic link or a non-directory at `.labunbun`, and a symbolic link or a non-regular file at `MEMORY.md` (`packages/coding-agent/src/memory.ts:130-156`).
 - On POSIX the append also passes `O_NOFOLLOW` to `open` (`packages/coding-agent/src/memory.ts:112-113`, `:166-171`). Windows defines no such flag and its `open` rejects the numeric flags, so there the `lstat` guard is the defense (`packages/coding-agent/src/memory.ts:159-165`).
-- A refused or failed write throws. The REPL shows the error instead of reporting the note as saved (`packages/coding-agent/src/memory.ts:119-127`, `packages/coding-agent/src/interactive.ts:2128-2130`).
-- The re-read uses the same gated loader as startup, so a note cannot make an untrusted project memory file enter the prompt (`packages/coding-agent/src/interactive.ts:2117-2123`).
-- The live swap is `sessionRef?.setSystemPrompt(buildPrompt(memoryText))`. The note reaches the next request, not the next process, and a subagent spawned after it reads the same value (`packages/coding-agent/src/interactive.ts:2123-2127`, `:755-759`).
+- A refused or failed write throws. The REPL shows the error instead of reporting the note as saved (`packages/coding-agent/src/memory.ts:119-127`, `packages/coding-agent/src/interactive.ts:2139-2141`).
+- The re-read uses the same gated loader as startup, so a note cannot make an untrusted project memory file enter the prompt (`packages/coding-agent/src/interactive.ts:2128-2134`).
+- The live swap is `sessionRef?.setSystemPrompt(buildPrompt(memoryText))`. The note reaches the next request, not the next process, and a subagent spawned after it reads the same value (`packages/coding-agent/src/interactive.ts:2134-2138`, `:757-761`).
 - The shortcut exists in the REPL only. A `-p` run loads memory once (`packages/coding-agent/src/headless.ts:520`). An ACP session loads it once (`packages/coding-agent/src/acp.ts:1101`).
-- `/memory` accepts `rules`, `project`, or no argument. Any other argument prints the usage line (`packages/coding-agent/src/interactive.ts:4131-4136`).
-- With no argument, `/memory` opens `~/.labunbun/MEMORY.md` and creates it with a `# Memory` header when it is missing (`packages/coding-agent/src/interactive.ts:4168-4172`).
-- `/memory rules` opens `~/.labunbun/rules/` and creates the directory when it is missing (`packages/coding-agent/src/interactive.ts:4146-4150`).
-- `/memory project` opens the nearest project file that is in the prompt. `lastProjectMemoryFile` scans the loaded list from the end and skips the user MEMORY.md and the user rules directory (`packages/coding-agent/src/interactive.ts:2756-2774`, `:4151-4152`).
-- When no project file is loaded, `/memory project` gives one of two messages. With withheld files it names the count and says `/agents approve, then restart`. With none it says no file was found and points at `/init` (`packages/coding-agent/src/interactive.ts:4153-4160`).
-- The editor is `$VISUAL` first, then `$EDITOR`. The command string is split on whitespace, so `EDITOR="code -w"` works (`packages/coding-agent/src/interactive.ts:2725-2728`).
-- A missing target is created only after an editor resolves, so a typo in the editor variable cannot leave files behind (`packages/coding-agent/src/interactive.ts:2705-2714`, `:2731-2738`).
-- The editor starts detached with `stdio: "ignore"`, and the parent does not wait for it. That is what lets the REPL continue while the editor is open (`packages/coding-agent/src/interactive.ts:2744-2749`).
-- Without an editor, `/memory` prints the path it would have opened. For the bare and `rules` forms it also prints the loaded memory files (`packages/coding-agent/src/interactive.ts:4183-4192`).
+- `/memory` accepts `rules`, `project`, or no argument. Any other argument prints the usage line (`packages/coding-agent/src/interactive.ts:4205-4210`).
+- With no argument, `/memory` opens `~/.labunbun/MEMORY.md` and creates it with a `# Memory` header when it is missing (`packages/coding-agent/src/interactive.ts:4242-4246`).
+- `/memory rules` opens `~/.labunbun/rules/` and creates the directory when it is missing (`packages/coding-agent/src/interactive.ts:4220-4224`).
+- `/memory project` opens the nearest project file that is in the prompt. `lastProjectMemoryFile` scans the loaded list from the end and skips the user MEMORY.md and the user rules directory (`packages/coding-agent/src/interactive.ts:2777-2785`, `:4225-4226`).
+- When no project file is loaded, `/memory project` gives one of two messages. With withheld files it names the count and says `/agents approve, then restart`. With none it says no file was found and points at `/init` (`packages/coding-agent/src/interactive.ts:4227-4234`).
+- The editor is `$VISUAL` first, then `$EDITOR`. The command string is split on whitespace, so `EDITOR="code -w"` works (`packages/coding-agent/src/interactive.ts:2736-2739`).
+- A missing target is created only after an editor resolves, so a typo in the editor variable cannot leave files behind (`packages/coding-agent/src/interactive.ts:2736-2738`, `:2742-2749`).
+- The editor starts detached with `stdio: "ignore"`, and the parent does not wait for it. That is what lets the REPL continue while the editor is open (`packages/coding-agent/src/interactive.ts:2755-2760`).
+- Without an editor, `/memory` prints the path it would have opened. For the bare and `rules` forms it also prints the loaded memory files (`packages/coding-agent/src/interactive.ts:4257-4266`).
 
 ## Subagent context
 
-- A subagent gets its role definition, then `buildSubagentContext` (`packages/coding-agent/src/interactive.ts:1166-1185`, `packages/coding-agent/src/headless.ts:624-642`).
+- A subagent gets its role definition, then `buildSubagentContext` (`packages/coding-agent/src/interactive.ts:1168-1187`, `packages/coding-agent/src/headless.ts:624-642`).
 - `buildSubagentContext` returns three things in order: the environment section, the memory section, and the skill discovery block. Empty sections are left out (`packages/coding-agent/src/system-prompt.ts:176-193`).
 - The type it reads is a subset of the main prompt context: cwd, platform, terminal flag, clock, memory, and skills (`packages/coding-agent/src/system-prompt.ts:173-174`).
 - It does not include `# Attitude`, `# Context`, `# Doing tasks`, `# Communication`, `# Tool guidance`, the language line, or the output style (`packages/coding-agent/src/system-prompt.ts:183-187`).
 - A subagent's output is a report to the parent. A voice instruction belongs to the parent session, not to every worker it spawns (`packages/coding-agent/src/system-prompt.ts:185-187`).
-- The REPL reads memory through the live value, so a `#` note appended before a spawn reaches that subagent. The style and language are still absent (`packages/coding-agent/src/interactive.ts:1166-1172`).
+- The REPL reads memory through the live value, so a `#` note appended before a spawn reaches that subagent. The style and language are still absent (`packages/coding-agent/src/interactive.ts:1168-1174`).
 
 ## Output styles
 
@@ -94,7 +94,7 @@ Memory is a prompt section and not a user message for one reason: the model has 
 - **Why an unknown style name does not fail.** A typo must not stop a session. The session runs without the section, and `/doctor` is where the typo becomes visible (`packages/coding-agent/src/output-styles.ts:73-79`, `packages/coding-agent/src/doctor.ts:193-196`).
 - **Why the budget is spent in priority order, not render order.** An oversized guide in an ancestor must not evict the guide for the directory the session is working in. The render order still puts the nearest file last, so the model reads it closest to the conversation (`packages/coding-agent/src/memory.ts:12-21`).
 - **Why a project style overrides a user style.** The project is what makes a project style useful: the same name can mean the checkout's own voice. The trust gate is what keeps that override from happening silently (`packages/coding-agent/src/output-styles.ts:7-13`).
-- **Why a note updates the prompt at once.** The REPL tells the user the note was remembered. A prompt that only changed after a restart would make that a claim about the next process, not the next request (`packages/coding-agent/src/interactive.ts:2117-2120`).
+- **Why a note updates the prompt at once.** The REPL tells the user the note was remembered. A prompt that only changed after a restart would make that a claim about the next process, not the next request (`packages/coding-agent/src/interactive.ts:2128-2131`).
 - **Why the append refuses symlinks.** A `MEMORY.md` or `.labunbun` swapped for a link would make the shortcut write wherever the link points, with the content of the user's note. The `lstat` guard and `O_NOFOLLOW` keep the write inside the home directory (`packages/coding-agent/src/memory.ts:119-127`).
 
 ## Source map

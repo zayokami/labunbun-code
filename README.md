@@ -88,6 +88,8 @@ Press Shift+Tab to go to the next mode.
 
 **Permission rules.** A rule has the form `Bash(git *)` or `Edit(src/**)` or `mcp__server__*`. A dangerous-command classifier is above every mode. The tool asks you before it runs a tool that no rule permits. You can tell the tool not to ask again for the rest of the session.
 
+**Approval diff.** When the tool asks about an `Edit` or a `Write`, the dialog shows the change as a diff. A removed line starts with `-`. An added line starts with `+`. The dialog shows at most 40 lines, and each line is cut at 240 characters. Press Ctrl+A to show the full input. Press Ctrl+A again to return to the diff. Every other tool keeps the one-line preview.
+
 **Sandbox.** The OS enforces the sandbox on macOS with `sandbox-exec`. The OS enforces the sandbox on Linux with `bwrap`.
 
 > **WARNING**: A Linux system without `bubblewrap` confines nothing.
@@ -588,6 +590,7 @@ Use these commands in the terminal.
 | `/rewind [number]` | Restore a file from a checkpoint. The tool lists the last 10 checkpoints. |
 | `/fork <id>` | Start a new session from an entry. Use `/tree` to find the id. |
 | `/tree` | Show the branches of the session. |
+| `/rename [<title>\|--clear]` | Give this session a name, or remove the name. The name shows in the terminal title and in `/resume`. |
 | `/resume` | Open an earlier session in this directory. |
 | `/export [path]` | Export the session to a Markdown file. |
 | `/agents [approve]` | List the agent definitions, then load the ones of this project. |
@@ -614,6 +617,12 @@ Use these commands in the terminal.
 | `/exit` | Stop the session. It asks first while a run, subagents, or background shells are still active. |
 
 The command `/migrate` is the previous name of `/yoshi`. The command `/quit` is an alias of `/exit`.
+
+In a picker, type to filter the list. The filter reads the name and the description of each row. Use Backspace or Delete to remove one character. Use Ctrl+U to clear the filter. The list shows eight rows at a time. The slash completion list reads names and descriptions too. For example, type `/title` to find `/rename`.
+
+In `/resume`, press Space to preview the highlighted session. The preview shows the last six messages, up to 12 lines. Use the arrow keys to preview another session. Press Esc to close the preview. Press Esc again to close the list. Space is a filter character after you type in the search field.
+
+Use `/rename <title>` to name the current session. The terminal title shows the name instead of the directory name. The `/resume` row uses the name as its label. Use `/rename` alone to show the current title. Use `/rename --clear` to remove it.
 
 Press Ctrl+T to show the watch panel. The panel shows a background shell's tail, the subagent listing, or the session facts, and it takes no keys of its own. Press Ctrl+V while the panel is open to cycle the source: the shell tails in start order, then the subagent listing, then the session facts, wrapping back to the first shell. Press Alt+1 to Alt+9 while the panel is open to jump to the shell with that number. Each shell header shows its number on the left. The tool shows the last running shell, or the last shell that ended. The panel is a snapshot from the two-second poll, and it says so. Press Ctrl+T or Escape to close it. These keys do nothing while a dialog, a question, the command picker, or the transcript is open. Under the Emacs editor, `Alt+1` to `Alt+9` arms a count in the prompt, so the jump does not occur. A terminal that turns Ctrl+V into paste — Windows Terminal does by default — takes the key before the app sees it.
 
