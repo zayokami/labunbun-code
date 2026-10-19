@@ -109,6 +109,9 @@ export function repairToolPairing(messages: AgentMessage[]): ToolPairingRepair {
 					message.timestamp,
 				),
 				synthetic: true,
+				// The repair and the live loop describe the same event, so the
+				// marker is the same: a cancelled call, not a broken tool.
+				interrupted: true,
 			});
 			synthesized += 1;
 		}

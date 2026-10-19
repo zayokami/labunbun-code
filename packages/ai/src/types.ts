@@ -113,6 +113,16 @@ export interface AssistantMessage {
 	 * wordings that match no rule have always been retried on the next model.
 	 */
 	errorKind?: "context_overflow" | "rate_limit" | "overload" | "auth";
+	// Long-form design notes: docs/dev/error-handling.md
+	/**
+	 * Set when this turn kept partial content through a failure or an abort.
+	 *
+	 * The text is real but the answer is not finished, and without the flag a
+	 * resumed session would show it as a complete response. Provider adapters
+	 * build their payloads field by field, so this marker never reaches the
+	 * wire; it is written to the session file with the rest of the message.
+	 */
+	incomplete?: true;
 	timestamp: number;
 }
 
@@ -133,6 +143,17 @@ export interface ToolResultMessage {
 	 * because the file has no entry behind it to match against.
 	 */
 	synthetic?: true;
+	// Long-form design notes: docs/dev/error-handling.md
+	/**
+	 * Set on the result the loop writes for a call an abort cut short.
+	 *
+	 * `isError` stays true because the wire pairing needs a failed result, but
+	 * the failure is the user's own Esc, not a broken tool: the interface shows
+	 * it as an interruption rather than a red error. Unlike `synthetic`, this
+	 * marker is written to the session file, so a resumed transcript keeps the
+	 * distinction.
+	 */
+	interrupted?: true;
 }
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage;
@@ -294,6 +315,27 @@ export interface StreamOptions {
 	 * the callback rides on the options rather than on the wrapper.
 	 */
 	onRetry?: (retry: RetryNotice) => void;
+	/**
+	 * Called once per descent of the fallback chain, before the next model is
+	 * tried.
+	 *
+	 * A switch is otherwise invisible: the answer arrives from a model the user
+	 * never chose, billed at a price they may not expect. The callback rides on
+	 * the options for the same reason `onRetry` does — the decision is per
+	 * request, and the wrapper sees the options every candidate received.
+	 */
+	onFallback?: (notice: FallbackNotice) => void;
+}
+
+/** One step down a model fallback chain, announced before the next model runs. */
+export interface FallbackNotice {
+	/** The model whose attempt ended the descent. */
+	from: { provider: string; id: string };
+	/** The model about to be tried. */
+	to: { provider: string; id: string };
+	/** The failure that caused the descent, as its own message. */
+	reason: string;
+	errorKind?: AssistantMessage["errorKind"];
 }
 
 /** One step of a retry ladder, before the sleep that follows it. */

@@ -52,6 +52,9 @@ describe("an interrupted tool call", () => {
 			// answer beside its question rather than at the moment of the repair.
 			timestamp: 1000,
 			synthetic: true,
+			// The repair and the live loop agree that this was an interrupt, not a
+			// tool failure; the interface uses the marker to pick its wording.
+			interrupted: true,
 		});
 		expect(repaired.dropped).toBe(0);
 		expect(repaired.synthesized).toBe(1);
@@ -225,9 +228,10 @@ describe("messages the repair does not own", () => {
 		});
 	});
 
-	test("a real result carries no synthetic marker", () => {
+	test("a real result carries neither repair marker", () => {
 		const real = result("t1");
 		expect(repairToolPairing([assistant([call("t1")]), real]).messages[1]).toBe(real);
 		expect("synthetic" in real).toBe(false);
+		expect("interrupted" in real).toBe(false);
 	});
 });

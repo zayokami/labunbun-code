@@ -229,6 +229,7 @@ export type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
+	FallbackNotice,
 	ImageContent,
 	JsonSchemaObject,
 	Model,

@@ -87,10 +87,12 @@ export class MessageBuilder {
 	}
 
 	/**
-	 * Finalize a tool call: parse the buffered JSON exactly once. A malformed
-	 * payload is kept as an empty object with the raw text preserved via a
-	 * synthetic wrapper — the agent layer surfaces it as an invalid-input error
-	 * rather than crashing the stream.
+	 * Finalize a tool call: hand the buffered JSON text to the caller unparsed.
+	 *
+	 * Parsing belongs to the agent layer, which parses exactly once when it
+	 * dispatches the call. An unparseable payload becomes an invalid-input tool
+	 * error there rather than a stream failure, and the raw text stays on the
+	 * returned `toolCall` so that error can name what arrived.
 	 */
 	toolCallEnd(index: number): AssistantMessageEvent {
 		const block = this.#get(index, "toolCall");

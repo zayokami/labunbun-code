@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { withModelFallback } from "../src/fallback.ts";
 import { MessageBuilder } from "../src/message-builder.ts";
 import { FAUX_MODEL } from "../src/providers/faux.ts";
-import type { AssistantMessage, AssistantMessageEvent, Model, StreamFn } from "../src/types.ts";
+import type { AssistantMessage, AssistantMessageEvent, FallbackNotice, Model, StreamFn } from "../src/types.ts";
 import { userMessage } from "../src/types.ts";
 
 const FALLBACK_MODEL: Model = {
@@ -40,7 +40,7 @@ function scriptedStreamFn(
 }
 
 describe("withModelFallback", () => {
-	test("falls back silently when primary errors before content", async () => {
+	test("falls back when primary errors before content", async () => {
 		const base = scriptedStreamFn((model) => (model.id === FAUX_MODEL.id ? "error" : "ok"));
 		const wrapped = withModelFallback(base, () => [FALLBACK_MODEL]);
 
@@ -48,6 +48,147 @@ describe("withModelFallback", () => {
 		expect(events.at(-1)?.type).toBe("done");
 		const done = events.at(-1) as any;
 		expect(done.message.content[0].text).toBe(`answer from ${FALLBACK_MODEL.id}`);
+	});
+
+	test("announces the descent through onFallback before the next model speaks", async () => {
+		const notices: FallbackNotice[] = [];
+		const base = scriptedStreamFn((model) => (model.id === FAUX_MODEL.id ? "error" : "ok"));
+		const wrapped = withModelFallback(base, () => [FALLBACK_MODEL]);
+
+		const events = await collect(
+			wrapped(
+				FAUX_MODEL,
+				{ systemPrompt: "", messages: [userMessage("hi")] },
+				{ onFallback: (notice) => notices.push(notice) },
+			),
+		);
+
+		// One switch, named from the model that failed to the one about to answer.
+		expect(notices).toEqual([
+			{
+				from: { provider: FAUX_MODEL.provider, id: FAUX_MODEL.id },
+				to: { provider: FALLBACK_MODEL.provider, id: FALLBACK_MODEL.id },
+				reason: `${FAUX_MODEL.id} unavailable`,
+			},
+		]);
+		expect(events.at(-1)?.type).toBe("done");
+	});
+
+	test("the notice carries the failure kind", async () => {
+		const notices: FallbackNotice[] = [];
+		const base = scriptedStreamFn((model) => (model.id === FAUX_MODEL.id ? "error" : "ok"), "rate_limit");
+		const wrapped = withModelFallback(base, () => [FALLBACK_MODEL]);
+
+		await collect(
+			wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { onFallback: (notice) => notices.push(notice) }),
+		);
+
+		expect(notices).toHaveLength(1);
+		expect(notices[0]?.errorKind).toBe("rate_limit");
+	});
+
+	test("a pre-content throw is announced too", async () => {
+		const notices: FallbackNotice[] = [];
+		const throwing: StreamFn = async function* (model) {
+			if (model.id === FAUX_MODEL.id) throw new Error("socket closed");
+			const builder = new MessageBuilder(model.provider, model.id);
+			yield builder.start();
+			yield builder.textStart(0);
+			yield builder.textDelta(0, "answer from the next model");
+			yield builder.textEnd(0);
+			yield builder.done("stop");
+		};
+		const wrapped = withModelFallback(throwing, () => [FALLBACK_MODEL]);
+
+		const events = await collect(
+			wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { onFallback: (notice) => notices.push(notice) }),
+		);
+
+		expect(notices).toEqual([
+			{
+				from: { provider: FAUX_MODEL.provider, id: FAUX_MODEL.id },
+				to: { provider: FALLBACK_MODEL.provider, id: FALLBACK_MODEL.id },
+				reason: "socket closed",
+			},
+		]);
+		expect(events.at(-1)?.type).toBe("done");
+	});
+
+	test("a stream that ends without a terminal event is announced", async () => {
+		const notices: FallbackNotice[] = [];
+		const truncated: StreamFn = async function* (model) {
+			const builder = new MessageBuilder(model.provider, model.id);
+			yield builder.start();
+			if (model.id === FAUX_MODEL.id) return;
+			yield builder.textStart(0);
+			yield builder.textDelta(0, "answer from the next model");
+			yield builder.textEnd(0);
+			yield builder.done("stop");
+		};
+		const wrapped = withModelFallback(truncated, () => [FALLBACK_MODEL]);
+
+		await collect(
+			wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { onFallback: (notice) => notices.push(notice) }),
+		);
+
+		expect(notices).toHaveLength(1);
+		expect(notices[0]?.reason).toContain("stream ended without a terminal event");
+	});
+
+	test("no notice when the primary answers", async () => {
+		const notices: FallbackNotice[] = [];
+		const base = scriptedStreamFn(() => "ok");
+		const wrapped = withModelFallback(base, () => [FALLBACK_MODEL]);
+
+		await collect(
+			wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { onFallback: (notice) => notices.push(notice) }),
+		);
+
+		expect(notices).toEqual([]);
+	});
+
+	test("no notice for a context overflow, a mid-stream failure, or an abort", async () => {
+		const notices: FallbackNotice[] = [];
+
+		const overflowing: StreamFn = async function* (model) {
+			const builder = new MessageBuilder(model.provider, model.id);
+			yield builder.start();
+			yield builder.error("too large", { errorKind: "context_overflow" });
+		};
+		await collect(
+			withModelFallback(overflowing, () => [FALLBACK_MODEL])(
+				FAUX_MODEL,
+				{ systemPrompt: "", messages: [] },
+				{ onFallback: (notice) => notices.push(notice) },
+			),
+		);
+
+		const controller = new AbortController();
+		controller.abort();
+		const aborting: StreamFn = async function* (model, _context, options) {
+			options?.signal?.throwIfAborted();
+			yield new MessageBuilder(model.provider, model.id).start();
+		};
+		await expect(
+			collect(
+				withModelFallback(aborting, () => [FALLBACK_MODEL])(
+					FAUX_MODEL,
+					{ systemPrompt: "", messages: [] },
+					{ signal: controller.signal, onFallback: (notice) => notices.push(notice) },
+				),
+			),
+		).rejects.toThrow();
+
+		await expect(
+			collect(
+				withModelFallback(
+					scriptedStreamFn(() => "throw-after-content"),
+					() => [FALLBACK_MODEL],
+				)(FAUX_MODEL, { systemPrompt: "", messages: [] }, { onFallback: (notice) => notices.push(notice) }),
+			),
+		).rejects.toThrow("connection reset");
+
+		expect(notices).toEqual([]);
 	});
 
 	test("no fallback when primary succeeds", async () => {

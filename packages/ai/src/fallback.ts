@@ -42,6 +42,18 @@ export function withModelFallback(base: StreamFn, resolveChain: (model: Model) =
 			const isLast = i === chain.length - 1;
 			let sawContent = false;
 			let terminal: AssistantMessageEvent | null = null;
+			// The descent is invisible otherwise: this is the one moment that
+			// says the answer is about to come from a model nobody picked.
+			const notifyFallback = (reason: string, errorKind?: AssistantMessage["errorKind"]): void => {
+				const next = chain[i + 1];
+				if (!next) return;
+				options?.onFallback?.({
+					from: { provider: candidate.provider, id: candidate.id },
+					to: { provider: next.provider, id: next.id },
+					reason,
+					...(errorKind === undefined ? {} : { errorKind }),
+				});
+			};
 
 			try {
 				for await (const event of base(candidate, context, options)) {
@@ -61,6 +73,7 @@ export function withModelFallback(base: StreamFn, resolveChain: (model: Model) =
 				// but an abort must propagate even then, or Esc would silently walk
 				// the entire fallback chain before taking effect.
 				if (sawContent || isLast || options?.signal?.aborted || isAbortError(error)) throw error;
+				notifyFallback(error instanceof Error ? error.message : String(error));
 				continue;
 			}
 
@@ -72,6 +85,7 @@ export function withModelFallback(base: StreamFn, resolveChain: (model: Model) =
 					yield builder.error(`Model ${candidate.id}: stream ended without a terminal event`);
 					return;
 				}
+				notifyFallback(`Model ${candidate.id}: stream ended without a terminal event`);
 				continue;
 			}
 
@@ -88,8 +102,9 @@ export function withModelFallback(base: StreamFn, resolveChain: (model: Model) =
 				yield terminal;
 				return;
 			}
-			// Error before any content: silently try the next model. Its own
-			// start event re-anchors the consumer's partial state.
+			// Error before any content: try the next model after saying so. Its
+			// own start event re-anchors the consumer's partial state.
+			notifyFallback(terminal.message.errorMessage ?? `Model ${candidate.id} failed`, terminal.message.errorKind);
 		}
 	};
 }
