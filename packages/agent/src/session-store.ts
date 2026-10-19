@@ -118,6 +118,26 @@ export function newEntryId(): string {
 		.slice(2, 6)}`;
 }
 
+/**
+ * A session file exists but the filesystem would not give it to this process.
+ *
+ * A missing file is not this: a resume target that was deleted behaves as an
+ * empty session, as it always has. This error is for the cases where the caller
+ * asked for something the operating system refused — a directory where a file
+ * was expected, a permission the process does not have — and reporting "no such
+ * session" would hide the thing the user can see in the listing.
+ */
+export class SessionReadError extends Error {
+	readonly path: string;
+
+	constructor(path: string, cause: unknown) {
+		const reason = cause instanceof Error ? cause.message : String(cause);
+		super(`Could not read session ${path}: ${reason}`, { cause });
+		this.name = "SessionReadError";
+		this.path = path;
+	}
+}
+
 export class SessionStore {
 	readonly path: string;
 	/**
@@ -173,32 +193,47 @@ export class SessionStore {
 	static load(path: string, options: { maxBytes?: number } = {}): SessionStore {
 		const store = new SessionStore(path);
 		if (!existsSync(path)) return store;
-		let text = options.maxBytes === undefined ? readFileSync(path, "utf8") : readHead(path, options.maxBytes);
-		if (options.maxBytes !== undefined) {
-			// The size, not the read: a file that is exactly the cap was read whole.
-			store.#truncated = statSync(path).size > options.maxBytes;
-			if (store.#truncated) {
-				// A byte prefix ends mid-line, and that fragment is not damage — it is
-				// where the caller's cap fell. Dropping it here keeps `skippedLines`
-				// meaning damage, so a capped read cannot report a loss it did not find.
-				const lastBreak = text.lastIndexOf("\n");
-				text = lastBreak === -1 ? "" : text.slice(0, lastBreak);
+		try {
+			let text = options.maxBytes === undefined ? readFileSync(path, "utf8") : readHead(path, options.maxBytes);
+			if (options.maxBytes !== undefined) {
+				// The size, not the read: a file that is exactly the cap was read whole.
+				store.#truncated = statSync(path).size > options.maxBytes;
+				if (store.#truncated) {
+					// A byte prefix ends mid-line, and that fragment is not damage — it is
+					// where the caller's cap fell. Dropping it here keeps `skippedLines`
+					// meaning damage, so a capped read cannot report a loss it did not find.
+					const lastBreak = text.lastIndexOf("\n");
+					text = lastBreak === -1 ? "" : text.slice(0, lastBreak);
+				}
 			}
-		}
-		for (const line of text.split("\n")) {
-			if (!line.trim()) continue;
-			const entry = parseSessionLine(line);
-			if (!entry) {
-				store.#skippedLines++;
-				continue;
+			for (const line of text.split("\n")) {
+				if (!line.trim()) continue;
+				const entry = parseSessionLine(line);
+				if (!entry) {
+					store.#skippedLines++;
+					continue;
+				}
+				store.entries.push(entry);
 			}
-			store.entries.push(entry);
+		} catch (error) {
+			// A path that disappeared between the existence check and the read is
+			// still a missing session, not a damaged one. Everything else — a
+			// directory, a permission the process does not have — is something the
+			// caller has to hear, because "no such session" would be a lie about a
+			// file the user can see in the listing.
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" || code === "ENOTDIR") return store;
+			throw new SessionReadError(path, error);
 		}
 		store.#recomputeLeaf();
 		return store;
 	}
 
-	static listSessions(cwd?: string, home = homedir()): Array<{ path: string; sessionId: string; mtimeMs: number }> {
+	static listSessions(
+		cwd?: string,
+		home = homedir(),
+		onWarning?: (path: string, error: unknown) => void,
+	): Array<{ path: string; sessionId: string; mtimeMs: number }> {
 		const root = cwd ? join(sessionsRoot(home), sanitizeCwd(cwd)) : sessionsRoot(home);
 		if (!existsSync(root)) return [];
 		const out: Array<{ path: string; sessionId: string; mtimeMs: number }> = [];
@@ -207,8 +242,16 @@ export class SessionStore {
 				for (const name of readdirSync(dir)) {
 					if (!name.endsWith(".jsonl")) continue;
 					const full = join(dir, name);
-					const stat = statSync(full);
-					out.push({ path: full, sessionId: name.replace(/\.jsonl$/, ""), mtimeMs: stat.mtimeMs });
+					// One file the process cannot stat must not erase the listing: it
+					// stays a row with no time, and the caller is told why. The loader
+					// will refuse it individually when it is picked.
+					try {
+						const stat = statSync(full);
+						out.push({ path: full, sessionId: name.replace(/\.jsonl$/, ""), mtimeMs: stat.mtimeMs });
+					} catch (error) {
+						onWarning?.(full, error);
+						out.push({ path: full, sessionId: name.replace(/\.jsonl$/, ""), mtimeMs: 0 });
+					}
 				}
 			} catch (error) {
 				// Swallowed, a failed listing is indistinguishable from an empty one:
@@ -224,15 +267,17 @@ export class SessionStore {
 
 	// Long-form design notes: docs/dev/crash-consistency.md
 	append(entry: SessionEntry): void {
-		this.entries.push(entry);
-		this.#leafId = entry.id;
-		this.#linear = null;
 		const line = `${JSON.stringify(entry)}\n`;
-		// Write first, create the directory only when it is actually missing: a
-		// `mkdirSync` over an existing directory is still a filesystem round trip
-		// (~0.2ms on Windows) and this runs once per message. ENOENT is that case
-		// and nothing else, so the retry lands the line exactly where creating the
-		// directory up front would have — including after something removed it.
+		// Write first, adopt second: a failed write must leave the in-memory tree
+		// exactly where the file is. The old order pushed the entry before the
+		// write, so a full disk left the session holding a message no resume could
+		// ever find and sending it to the provider on the next turn.
+		//
+		// The directory is created only when it is actually missing: a `mkdirSync`
+		// over an existing directory is still a filesystem round trip (~0.2ms on
+		// Windows) and this runs once per message. ENOENT is that case and nothing
+		// else, so the retry lands the line exactly where creating the directory up
+		// front would have — including after something removed it.
 		try {
 			appendFileSync(this.path, line, "utf8");
 		} catch (error) {
@@ -240,6 +285,9 @@ export class SessionStore {
 			mkdirSync(dirname(this.path), { recursive: true });
 			appendFileSync(this.path, line, "utf8");
 		}
+		this.entries.push(entry);
+		this.#leafId = entry.id;
+		this.#linear = null;
 	}
 
 	appendMessage(message: AgentMessage): SessionEntry {

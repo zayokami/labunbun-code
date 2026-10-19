@@ -453,6 +453,16 @@ export interface AgentDeps {
 	 */
 	checkBudget?: (info: { turns: number; model: Model }) => { action: "ok" } | { action: "blocked"; message: string };
 	/**
+	 * What the host suggests doing about a classified provider failure.
+	 *
+	 * The classification is the agent layer's (`errorKind`), but the remedy is
+	 * the host's: `/login`, `/model` and `/compact` are commands of the app, and
+	 * this layer knows none of them. Called once when a run ends on an error,
+	 * with the model that failed. Returning `undefined` means the kind has no
+	 * action worth naming.
+	 */
+	errorRemedy?: (kind: NonNullable<AssistantMessage["errorKind"]>, model: Model) => string | undefined;
+	/**
 	 * How hard the model should think, read per request so a change made
 	 * mid-session lands on the next model call rather than the next session.
 	 *
@@ -514,9 +524,32 @@ export type CompactionCheck =
 
 export type AgentEndReason = "completed" | "aborted" | "error" | "max_turns";
 
+/** Messages an abort discarded before they could be delivered. */
+export interface InterruptedQueue {
+	followUp: string[];
+	steering: string[];
+}
+
+/**
+ * The event stream always pairs `agent_start` with `agent_end`, including when
+ * the run failed before its first turn: admission failures (a hook, a session
+ * file that cannot be written) end the run through the same `finally`, so the
+ * hosts have one place to learn that the session is idle again.
+ */
 export type AgentEvent =
 	| { type: "agent_start" }
-	| { type: "agent_end"; reason: AgentEndReason; messages: AgentMessage[]; errorMessage?: string }
+	| {
+			type: "agent_end";
+			reason: AgentEndReason;
+			messages: AgentMessage[];
+			errorMessage?: string;
+			/** The provider's classification, when the run ended on an error event. */
+			errorKind?: AssistantMessage["errorKind"];
+			/** The host's suggestion for `errorKind`, when the host supplied one. */
+			errorRemedy?: string;
+			/** What an abort dropped, so an interface can name it rather than lose it silently. */
+			interrupted?: InterruptedQueue;
+	  }
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AssistantMessage; toolResults: ToolResultMessage[] }
 	| { type: "message_update"; message: AssistantMessage; assistantMessageEvent: AssistantMessageEvent }
@@ -530,7 +563,21 @@ export type AgentEvent =
 	 * announced rather than merely suffered. Not a turn boundary: the turn that
 	 * raised this is still in flight.
 	 */
-	| { type: "retry"; attempt: number; delayMs: number; message: string };
+	| { type: "retry"; attempt: number; delayMs: number; message: string }
+	/**
+	 * The request is about to be sent to a different model.
+	 *
+	 * A descent is otherwise invisible until the answer arrives from a model the
+	 * user did not pick. Emitted before the next model's first event, so a status
+	 * line can name the switch while it is happening.
+	 */
+	| {
+			type: "fallback";
+			from: { provider: string; id: string };
+			to: { provider: string; id: string };
+			reason: string;
+			errorKind?: AssistantMessage["errorKind"];
+	  };
 
 export type AgentEventHandler = (event: AgentEvent) => void | Promise<void>;
 

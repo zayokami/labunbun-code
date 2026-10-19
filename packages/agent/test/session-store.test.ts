@@ -9,11 +9,11 @@
  * damaged line hiding every message written before it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
-import { newEntryId, SessionStore } from "../src/session-store.ts";
+import { newEntryId, SessionReadError, SessionStore } from "../src/session-store.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -369,5 +369,52 @@ describe("where an append writes", () => {
 		// The file went with the directory, so only the new line is readable —
 		// what matters is that the append did not fail and did not go nowhere.
 		expect(texts(SessionStore.load(store.path).messages())).toEqual(["second"]);
+	});
+});
+
+describe("a session file the filesystem refuses", () => {
+	test("a directory where a session was expected is a read error, not a missing session", () => {
+		const home = tmpDir("lbb-store-home-");
+		const cwd = tmpDir("lbb-store-cwd-");
+		const store = SessionStore.startNew(cwd, home);
+		rmSync(store.path);
+		mkdirSync(store.path);
+
+		expect(() => SessionStore.load(store.path)).toThrow(SessionReadError);
+		// The listing still holds the row — the entry is visibly there — and the
+		// loader is the one that says why it cannot be opened.
+		const rows = SessionStore.listSessions(cwd, home);
+		expect(rows).toHaveLength(1);
+		const first = rows[0];
+		if (!first) throw new Error("expected one listed session");
+		expect(() => SessionStore.load(first.path)).toThrow(SessionReadError);
+	});
+
+	test("a write the filesystem refuses leaves memory exactly where the file is", () => {
+		const blocker = join(tmpDir("lbb-store-blocked-"), "regular-file");
+		writeFileSync(blocker, "not a directory", "utf8");
+		const store = SessionStore.load(join(blocker, "session.jsonl"));
+
+		expect(() => store.appendMessage(user("lost"))).toThrow();
+		// The old order pushed first and wrote second, so a failed write left the
+		// message in memory — sent to the provider on the next turn and absent
+		// from every resume of the same session.
+		expect(store.entries).toEqual([]);
+		expect(store.messages()).toEqual([]);
+		expect(store.sessionId).toBeNull();
+	});
+
+	test("the refusal names the path and keeps the cause", () => {
+		const path = join(tmpDir("lbb-store-cause-"), "locked.jsonl");
+		mkdirSync(path);
+		try {
+			SessionStore.load(path);
+			throw new Error("expected SessionStore.load to throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(SessionReadError);
+			expect((error as SessionReadError).path).toBe(path);
+			expect((error as SessionReadError).message).toContain(path);
+			expect((error as SessionReadError).cause).toBeDefined();
+		}
 	});
 });

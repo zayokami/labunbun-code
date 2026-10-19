@@ -38,6 +38,7 @@ import type {
 	AgentEvent,
 	AgentEventHandler,
 	AnyTool,
+	InterruptedQueue,
 	NetworkAxis,
 	PermissionMode,
 	ResolvedToolCall,
@@ -89,6 +90,8 @@ export class AgentSession {
 	#followUp: string[] = [];
 	#abortController: AbortController | null = null;
 	#interruptRequested = false;
+	/** What the current run's abort discarded, for the `agent_end` that reports it. */
+	#interrupted: InterruptedQueue | undefined;
 	#running = false;
 	#contextOverflowed = false;
 	/**
@@ -240,7 +243,15 @@ export class AgentSession {
 		if (this.#running) {
 			this.#followUp.push(text);
 		} else {
-			void this.prompt(text);
+			void this.prompt(text).catch((error) => {
+				// `#running` won the race between the check above and the call
+				// (another caller started a run in between). There is no run to
+				// report this against, and an unhandled rejection at a
+				// fire-and-forget site would take the process down.
+				console.error(
+					`AgentSession: follow-up prompt was not started: ${error instanceof Error ? error.message : error}`,
+				);
+			});
 		}
 	}
 
@@ -258,7 +269,27 @@ export class AgentSession {
 		return compose ? await compose(text) : text;
 	}
 
+	/**
+	 * Put a message into the transcript and into the session file.
+	 *
+	 * The store goes first. A failed write must leave memory unchanged, or the
+	 * provider would be sent a message that no resume can ever find; queue
+	 * callers remove their entry only after this returns, so a failure keeps the
+	 * text queued for the next run instead of losing it.
+	 */
+	#admitMessage(message: AgentMessage): void {
+		this.#store?.appendMessage(message);
+		this.messages.push(message);
+	}
+
 	abort(): void {
+		// Remember what the abort is about to discard. The interface says which
+		// queued messages were dropped rather than letting them disappear in
+		// silence. A second Esc finds both queues empty and must not overwrite
+		// the first record with one that names nothing.
+		if (this.#followUp.length > 0 || this.#steering.length > 0) {
+			this.#interrupted = { followUp: [...this.#followUp], steering: [...this.#steering] };
+		}
 		// Dropping queued follow-ups on explicit abort is the least surprising
 		// behavior — stale queued prompts should not fire after an interrupt.
 		this.#followUp = [];
@@ -309,30 +340,12 @@ export class AgentSession {
 		this.#running = true;
 		this.#interruptRequested = false;
 		this.#overflowRetried = false;
+		this.#interrupted = undefined;
 		this.#abortController = new AbortController();
-
-		// Deliver anything queued while a previous run was alive, ahead of the
-		// text this call carries. The in-loop drain only fires when a run
-		// terminates naturally, so a follow-up queued during a failed run
-		// (error, refusal, abort, an exhausted length ladder) would otherwise
-		// sit in the queue until the user happens to type something — forever,
-		// in an unattended run. Entry is the one point every ending passes
-		// through; the in-loop drain stays because it is what lets a healthy
-		// run answer a follow-up without waiting for one.
-		while (this.#followUp.length > 0) {
-			const queued = this.#followUp.shift();
-			if (queued === undefined) break;
-			const queuedMsg = userMessage(await this.#userText(queued));
-			this.messages.push(queuedMsg);
-			this.#store?.appendMessage(queuedMsg);
-		}
-
-		const userMsg = userMessage(await this.#userText(text));
-		this.messages.push(userMsg);
-		this.#store?.appendMessage(userMsg);
 
 		let reason: AgentEndReason = "completed";
 		let errorMessage: string | undefined;
+		let errorKind: AssistantMessage["errorKind"] | undefined;
 		let escalatedOnce = false;
 		let continueRetries = 0;
 		let turns = 0;
@@ -345,9 +358,38 @@ export class AgentSession {
 		let earlyPromises = new Map<string, Promise<void>>();
 		let earlySettled = new Set<string>();
 
-		await this.#emit({ type: "agent_start" });
-
+		// Admission is inside the try, with everything else this call does: a
+		// hook, a session file that cannot be written, or a message the store
+		// refuses must still clear `#running` and pair `agent_start` with an
+		// `agent_end`. Left outside, the throw skipped the `finally` and the
+		// session answered "already running" for the rest of its life.
 		try {
+			// Start is emitted before admission so the pair is complete even when the
+			// first admission fails: subscribers see the run open and close, never an
+			// `agent_end` for a run they never saw begin.
+			await this.#emit({ type: "agent_start" });
+
+			// Deliver anything queued while a previous run was alive, ahead of the
+			// text this call carries. The in-loop drain only fires when a run
+			// terminates naturally, so a follow-up queued during a failed run
+			// (error, refusal, abort, an exhausted length ladder) would otherwise
+			// sit in the queue until the user happens to type something — forever,
+			// in an unattended run. Entry is the one point every ending passes
+			// through; the in-loop drain stays because it is what lets a healthy
+			// run answer a follow-up without waiting for one.
+			while (this.#followUp.length > 0) {
+				// Peek, adopt, then shift: a message whose write fails stays queued
+				// for the next run instead of vanishing with the error.
+				const queued = this.#followUp[0];
+				if (queued === undefined) break;
+				const queuedMsg = userMessage(await this.#userText(queued));
+				this.#admitMessage(queuedMsg);
+				this.#followUp.shift();
+			}
+
+			const userMsg = userMessage(await this.#userText(text));
+			this.#admitMessage(userMsg);
+
 			while (true) {
 				// Checked before context preparation and the steering drain, and
 				// `turns` counts only turns that reached a `turn_end`: a check
@@ -414,13 +456,14 @@ export class AgentSession {
 					}
 				}
 
-				// Drain steering queue ahead of the model call.
+				// Drain steering queue ahead of the model call. Peek and shift after
+				// admission, for the same reason the entry drain does.
 				while (this.#steering.length > 0) {
-					const text = this.#steering.shift();
+					const text = this.#steering[0];
 					if (text === undefined) break;
 					const steerMsg = userMessage(await this.#userText(text));
-					this.messages.push(steerMsg);
-					this.#store?.appendMessage(steerMsg);
+					this.#admitMessage(steerMsg);
+					this.#steering.shift();
 				}
 
 				await this.#emit({ type: "turn_start" });
@@ -438,6 +481,10 @@ export class AgentSession {
 					// anything else the loop reports; nothing in the loop reacts to it.
 					onRetry: (retry) =>
 						this.#emit({ type: "retry", attempt: retry.attempt, delayMs: retry.delayMs, message: retry.message }),
+					// Same shape as the retry notice: the wrapper tells the session
+					// before the next model runs, and the session turns that into an
+					// event the hosts already know how to render.
+					onFallback: (notice) => this.#emit({ type: "fallback", ...notice }),
 				};
 
 				let assistant: AssistantMessage | null = null;
@@ -490,8 +537,11 @@ export class AgentSession {
 					// mid-stream throws land here. Keep the last partial so any
 					// already-streamed toolCall blocks still get paired results.
 					if (this.#abortController.signal.aborted) {
+						// Text the user has already read is kept, and marked: the
+						// answer is real but unfinished, which a resumed session
+						// must be able to say.
 						assistant = lastPartial
-							? { ...lastPartial, stopReason: "aborted" }
+							? { ...lastPartial, stopReason: "aborted", incomplete: true }
 							: interruptedAssistant(this.#model, "aborted");
 					} else {
 						// A mid-stream throw is this turn's terminal event, not the
@@ -502,12 +552,15 @@ export class AgentSession {
 						// and the error flows through the same branch that handles a
 						// provider-delivered error, overflow classification included.
 						const message = streamError instanceof Error ? streamError.message : String(streamError);
+						const overflow = isContextOverflowError(streamError);
+						if (overflow) errorKind = "context_overflow";
 						assistant = lastPartial
 							? {
 									...lastPartial,
 									stopReason: "error",
 									errorMessage: message,
-									...(isContextOverflowError(streamError) ? { errorKind: "context_overflow" as const } : {}),
+									incomplete: true,
+									...(overflow ? { errorKind: "context_overflow" as const } : {}),
 								}
 							: interruptedAssistant(this.#model, "error", message);
 					}
@@ -540,15 +593,15 @@ export class AgentSession {
 					if (continueRetries < LENGTH_CONTINUE_RETRIES) {
 						continueRetries++;
 						const resume = userMessage(LENGTH_RECOVERY_MESSAGE);
-						this.messages.push(resume);
-						this.#store?.appendMessage(resume);
+						this.#admitMessage(resume);
 						continue;
 					}
 					// Ladder exhausted: the partial is kept, so it takes its tools —
 					// real results that finished mid-stream, interrupted settlements
-					// for the rest.
-					this.messages.push(assistant);
-					this.#store?.appendMessage(assistant);
+					// for the rest. A turn cut off at the output limit is truncated
+					// by definition, and says so after a resume.
+					assistant = { ...assistant, incomplete: true };
+					this.#admitMessage(assistant);
 					await this.#settleToolCalls(assistant, earlyPromises, earlyResults, earlySettled);
 					errorMessage = "Response repeatedly exceeded the output token limit";
 					reason = "error";
@@ -564,9 +617,15 @@ export class AgentSession {
 					assistant = { ...assistant, stopReason: "error", errorMessage: "The model returned an empty response" };
 				}
 
+				// A turn that ends in failure or abort with words already streamed
+				// is a partial answer. The marker travels with the message, so a
+				// resumed session can say so long after this run.
+				if ((assistant.stopReason === "error" || assistant.stopReason === "aborted") && assistant.content.length > 0) {
+					assistant = { ...assistant, incomplete: true };
+				}
+
 				// ---- persist the finalized assistant message ----
-				this.messages.push(assistant);
-				this.#store?.appendMessage(assistant);
+				this.#admitMessage(assistant);
 
 				// ---- abnormal termination ----
 				if (assistant.stopReason === "aborted") {
@@ -588,6 +647,7 @@ export class AgentSession {
 					break;
 				}
 				if (assistant.stopReason === "error") {
+					if (assistant.errorKind) errorKind = assistant.errorKind;
 					await this.#settleToolCalls(assistant, earlyPromises, earlyResults, earlySettled);
 					// The provider is the ground truth on what fits. When it refuses for
 					// size, the estimate was wrong — so the next turn compacts without
@@ -624,11 +684,11 @@ export class AgentSession {
 				if (toolCalls.length === 0) {
 					await this.#emit({ type: "turn_end", message: assistant, toolResults: [] });
 					turns++;
-					const followUpText = this.#followUp.shift();
+					const followUpText = this.#followUp[0];
 					if (followUpText !== undefined) {
 						const followUpMsg = userMessage(await this.#userText(followUpText));
-						this.messages.push(followUpMsg);
-						this.#store?.appendMessage(followUpMsg);
+						this.#admitMessage(followUpMsg);
+						this.#followUp.shift();
 						continue;
 					}
 					break;
@@ -638,10 +698,7 @@ export class AgentSession {
 					await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults, earlySettled, toolSemaphore),
 					this.#deps.spillOutput,
 				);
-				for (const result of results) {
-					this.messages.push(result);
-					this.#store?.appendMessage(result);
-				}
+				for (const result of results) this.#admitMessage(result);
 				await this.#emit({ type: "turn_end", message: assistant, toolResults: results });
 				turns++;
 
@@ -664,7 +721,17 @@ export class AgentSession {
 		} finally {
 			this.#running = false;
 			this.#abortController = null;
-			await this.#emit({ type: "agent_end", reason, messages: this.messages, errorMessage });
+			const remedy =
+				reason === "error" && errorKind !== undefined ? this.#deps.errorRemedy?.(errorKind, this.#model) : undefined;
+			await this.#emit({
+				type: "agent_end",
+				reason,
+				messages: this.messages,
+				errorMessage,
+				...(errorKind === undefined ? {} : { errorKind }),
+				...(remedy === undefined ? {} : { errorRemedy: remedy }),
+				...(this.#interrupted === undefined ? {} : { interrupted: this.#interrupted }),
+			});
 		}
 
 		return reason;
@@ -949,10 +1016,7 @@ export class AgentSession {
 				earlySettled.add(block.id);
 			}
 		}
-		for (const result of capRoundResults(real, this.#deps.spillOutput)) {
-			this.messages.push(result);
-			this.#store?.appendMessage(result);
-		}
+		for (const result of capRoundResults(real, this.#deps.spillOutput)) this.#admitMessage(result);
 		this.#synthesizeOrphanResults(assistant);
 	}
 
@@ -967,9 +1031,13 @@ export class AgentSession {
 		);
 		for (const block of assistant.content) {
 			if (block.type !== "toolCall" || existing.has(block.id)) continue;
-			const orphan = toolResultMessage(block.id, block.name, [textContent(INTERRUPTED_TOOL_RESULT_TEXT)], true);
-			this.messages.push(orphan);
-			this.#store?.appendMessage(orphan);
+			const orphan: ToolResultMessage = {
+				...toolResultMessage(block.id, block.name, [textContent(INTERRUPTED_TOOL_RESULT_TEXT)], true),
+				// The loop interrupted this call, the tool did not fail. The marker
+				// keeps the interface from painting it as a red error.
+				interrupted: true,
+			};
+			this.#admitMessage(orphan);
 			// Recorded as it is written, so a second block carrying the same id —
 			// one call, repeated — is not answered with a second orphan.
 			existing.add(block.id);
@@ -998,7 +1066,10 @@ function hasVisibleContent(message: AssistantMessage): boolean {
  * abandoned calls may only have a wire ToolCall block to hand.
  */
 function interruptedToolResult(callId: string, toolName: string): ToolResultMessage {
-	return toolResultMessage(callId, toolName, [textContent(INTERRUPTED_TOOL_RESULT_TEXT)], true);
+	return {
+		...toolResultMessage(callId, toolName, [textContent(INTERRUPTED_TOOL_RESULT_TEXT)], true),
+		interrupted: true,
+	};
 }
 
 function interruptedAssistant(model: Model, stopReason: "error" | "aborted", message?: string): AssistantMessage {

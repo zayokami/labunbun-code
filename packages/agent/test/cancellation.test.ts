@@ -6,6 +6,7 @@ import { type AgentMessage, FAUX_MODEL, fauxProvider, type StreamFn } from "@lab
 import { z } from "zod";
 import { DEFAULT_MAX_CONCURRENCY } from "../src/concurrency.ts";
 import {
+	type AgentEvent,
 	AgentSession,
 	type AnyTool,
 	buildTool,
@@ -254,6 +255,11 @@ describe("session cancellation integration", () => {
 		const results = paired(session.messages);
 		expect(results).toHaveLength(4);
 		expect(results.every((r) => r.isError)).toBe(true);
+		// The first tool threw on its own while it was running, so its error is a
+		// real result. The three the abort kept from starting are settlements the
+		// session wrote, not failures the tools reported — the marker lets the
+		// interface say "interrupted" instead of painting them as red errors.
+		expect(results.map((r) => r.interrupted === true)).toEqual([false, true, true, true]);
 		expect(SessionStore.load(store.path).messages()).toEqual(session.messages);
 		expect(session.isInterrupted).toBe(true);
 		expect(await session.prompt("fresh question")).toBe("completed");
@@ -266,6 +272,37 @@ describe("session cancellation integration", () => {
 			"fresh question",
 		]);
 		expect(SessionStore.load(store.path).messages()).toEqual(session.messages);
+	});
+
+	test("agent_end names the queued messages an abort dropped", async () => {
+		const faux = fauxProvider([
+			{ toolCalls: [{ id: "call-1", name: "probe", arguments: {} }] },
+			{ text: "fresh answer" },
+		]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [
+				probe(async () => {
+					session.followUp("queued follow-up");
+					session.steer("queued steering");
+					session.abort();
+					throw new Error("interrupted");
+				}),
+			],
+			deps: { streamFn: faux.streamFn },
+		});
+		const endings: Array<Extract<AgentEvent, { type: "agent_end" }>> = [];
+		session.on((event) => {
+			if (event.type === "agent_end") endings.push(event);
+		});
+
+		expect(await session.prompt("first")).toBe("aborted");
+		// The event carries the text the queues held, so a host can show what the
+		// interrupt discarded instead of losing it in silence.
+		expect(endings[0]?.interrupted).toEqual({
+			followUp: ["queued follow-up"],
+			steering: ["queued steering"],
+		});
 	});
 
 	test.each([false, true])(
@@ -370,10 +407,13 @@ describe("session cancellation integration", () => {
 		expect(executions).toBe(0);
 		expect(faux.receivedContexts).toHaveLength(1);
 		const assistant = session.messages.find((m) => m.role === "assistant");
-		expect(assistant).toMatchObject({ stopReason: "aborted" });
+		// Text that streamed before the cancel is kept, and marked as partial:
+		// a resumed session must not show it as a finished answer.
+		expect(assistant).toMatchObject({ stopReason: "aborted", incomplete: true });
 		const results = paired(session.messages);
 		expect(results).toHaveLength(1);
 		expect(results[0].isError).toBe(true);
+		expect(results[0].interrupted).toBe(true);
 		expect(session.isRunning).toBe(false);
 		expect(session.isInterrupted).toBe(true);
 		// The session stays usable — the cancelled turn must not wedge it.
@@ -417,10 +457,11 @@ describe("session cancellation integration", () => {
 		expect(executions).toBe(0);
 		expect(seen?.aborted).toBe(true);
 		const assistant = session.messages.find((m) => m.role === "assistant");
-		expect(assistant).toMatchObject({ stopReason: "aborted" });
+		expect(assistant).toMatchObject({ stopReason: "aborted", incomplete: true });
 		const results = paired(session.messages);
 		expect(results).toHaveLength(1);
 		expect(results[0].isError).toBe(true);
+		expect(results[0].interrupted).toBe(true);
 		expect(session.isRunning).toBe(false);
 		expect(session.isInterrupted).toBe(true);
 	});

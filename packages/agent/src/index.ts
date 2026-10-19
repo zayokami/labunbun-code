@@ -128,6 +128,7 @@ export {
 	type PreservedFile,
 	parseSessionLine,
 	type SessionEntry,
+	SessionReadError,
 	SessionStore,
 	sanitizeCwd,
 	sessionFilePath,
