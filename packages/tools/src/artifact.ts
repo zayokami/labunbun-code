@@ -33,6 +33,7 @@ import { stat } from "node:fs/promises";
 import { type AnyTool, buildTool, formatCutMarker } from "@labunbun/agent";
 import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
+import { describeFsFailure } from "./path-errors.ts";
 
 /** Entries a report lists before it counts the rest. */
 const MAX_LISTED_ENTRIES = 200;
@@ -121,8 +122,9 @@ export function createInspectArtifactTool(cwd: string): AnyTool {
 			let info: Awaited<ReturnType<typeof stat>>;
 			try {
 				info = await stat(source);
-			} catch {
-				return failure(`Path not found: ${input.path}`);
+			} catch (error) {
+				// A refusal is not a missing file: the caller's next move differs.
+				return failure(describeFsFailure(error, input.path, "inspect"));
 			}
 			if (info.isDirectory()) {
 				return failure(`${input.path} is a directory, not an archive file.`);

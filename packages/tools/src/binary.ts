@@ -52,6 +52,7 @@ import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
 import { dotnetManagedLines } from "./dotnet.ts";
 import { electronFuseLines } from "./electron-fuses.ts";
+import { describeFsFailure } from "./path-errors.ts";
 
 /** Whole-report cap; past it the tail is cut with an explicit marker. */
 const MAX_REPORT_CHARS = 20_000;
@@ -145,8 +146,11 @@ export function createInspectBinaryTool(cwd: string): AnyTool {
 			let info: Awaited<ReturnType<typeof stat>>;
 			try {
 				info = await stat(source);
-			} catch {
-				return { content: [{ type: "text", text: `Path not found: ${input.path}` }], isError: true };
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: describeFsFailure(error, input.path, "inspect") }],
+					isError: true,
+				};
 			}
 			if (info.isDirectory()) {
 				return {

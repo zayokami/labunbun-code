@@ -2,6 +2,7 @@ import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
+import { errorCode, isMissingPathError, isPermissionError } from "./path-errors.ts";
 import { ReadFileState } from "./read-file-state.ts";
 import { decideRead } from "./sandbox/simulated.ts";
 import { readableRootsPolicy } from "./sandbox/workspace-policy.ts";
@@ -139,20 +140,16 @@ export function createReadTool(
 // Long-form design notes: docs/dev/tools.md
 /** Which failure a Read hit, said in the terms the model can act on. */
 function describeReadFailure(path: string, error: unknown): string {
-	const raw = (error as { code?: unknown } | null | undefined)?.code;
-	const code = typeof raw === "string" ? raw : undefined;
-	switch (code) {
-		case "ENOENT":
-		case "ENOTDIR":
-			return `File does not exist: ${path}`;
-		case "EISDIR":
-			return `Path is a directory, not a file: ${path}. Use LS to list its contents.`;
-		case "EACCES":
-		case "EPERM":
-			return `File exists but cannot be read (permission denied): ${path}`;
-		default:
-			// EMFILE, EBUSY and the like say nothing about whether the file exists
-			// — so this branch claims nothing beyond not being readable right now.
-			return `Could not read ${path}${code ? ` (${code})` : ""}`;
+	// Read keeps its own wording: "File does not exist" and "Use LS" are the
+	// sentences its callers' tests pin, and a path passed to Read is a statement
+	// that a file was expected. The classification itself is shared.
+	if (isMissingPathError(error)) return `File does not exist: ${path}`;
+	if (errorCode(error) === "EISDIR") {
+		return `Path is a directory, not a file: ${path}. Use LS to list its contents.`;
 	}
+	if (isPermissionError(error)) return `File exists but cannot be read (permission denied): ${path}`;
+	const code = errorCode(error);
+	// EMFILE, EBUSY and the like say nothing about whether the file exists — so
+	// this branch claims nothing beyond not being readable right now.
+	return `Could not read ${path}${code ? ` (${code})` : ""}`;
 }

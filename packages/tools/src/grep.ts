@@ -4,6 +4,7 @@ import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
 import { walkProjectFiles } from "./glob.ts";
 import type { Operations } from "./operations.ts";
+import { probePath } from "./path-errors.ts";
 
 const DEFAULT_HEAD_LIMIT = 250;
 /**
@@ -30,6 +31,10 @@ export interface GrepDisplay {
 	maxColumns: number;
 	/** The search stopped at {@link SAFETY_MATCH_CAP} with matches still unseen. */
 	safetyCapped: boolean;
+	/** Files the walk listed but this search could not open; they were not searched. */
+	skippedFiles?: number;
+	/** Directories the walk could not list; everything below them was not searched. */
+	skippedDirectories?: number;
 }
 
 // Long-form design notes: docs/dev/tools.md
@@ -101,8 +106,9 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 			} catch (error) {
 				return { content: [{ type: "text", text: String(error) }], isError: true };
 			}
-			if (!(await ops.exists(root))) {
-				return { content: [{ type: "text", text: `Path not found: ${root}` }], isError: true };
+			const probe = await probePath(ops, root, "search");
+			if (!probe.ok) {
+				return { content: [{ type: "text", text: probe.message }], isError: true };
 			}
 
 			const flags = input.case_insensitive ? "i" : "";
@@ -120,16 +126,21 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 			// `.gitignore` — are statements about trees, and pointing Grep at one
 			// file is a statement about that file.
 			let files: string[];
-			if ((await ops.stat(root)).isFile) {
+			let skippedDirectories = 0;
+			if (probe.stat.isFile) {
 				files = [root];
 			} else {
 				files = await walkProjectFiles(root, ops, {
 					pattern: input.include ? new Bun.Glob(input.include) : undefined,
 					respectGitignore: true,
+					onUnreadableDirectory: () => {
+						skippedDirectories++;
+					},
 				});
 			}
 
 			const matches: GrepMatch[] = [];
+			let skippedFiles = 0;
 			let safetyCapped = false;
 			const deadline = Date.now() + REGEX_TIMEOUT_MS;
 			outer: for (const file of files) {
@@ -137,13 +148,17 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 					const stat = await ops.stat(file);
 					if (stat.size > 1_000_000) continue; // skip huge files
 				} catch {
+					// Listed by the walk, gone or unreadable by the time it was opened.
+					// The result cannot claim the tree was searched; the count says so.
+					skippedFiles++;
 					continue;
 				}
 				let text: string;
 				try {
 					text = await ops.readTextFile(file);
 				} catch {
-					continue; // binary or unreadable
+					skippedFiles++;
+					continue; // unreadable
 				}
 				if (text.includes("\0")) continue; // skip binary
 				const shownPath = displayPath(root, file);
@@ -184,6 +199,8 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 				headLimit: input.head_limit ?? DEFAULT_HEAD_LIMIT,
 				maxColumns: input.max_columns ?? DEFAULT_MAX_COLUMNS,
 				safetyCapped,
+				skippedFiles,
+				skippedDirectories,
 			});
 			return { content: [{ type: "text", text }] };
 		},
@@ -198,8 +215,20 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
  * reasonable fixture — it takes 10000 matches — and a branch that only exists
  * in production is a branch no test ever reads.
  */
+/** What the search could not read, so "no matches" is not mistaken for "nothing there". */
+function skippedClause(display: GrepDisplay): string {
+	const parts: string[] = [];
+	if (display.skippedFiles) parts.push(`${display.skippedFiles} unreadable file(s) skipped`);
+	if (display.skippedDirectories) {
+		const count = display.skippedDirectories;
+		parts.push(`${count} unreadable director${count === 1 ? "y" : "ies"} skipped`);
+	}
+	return parts.length > 0 ? `; ${parts.join("; ")}` : "";
+}
+
 export function renderGrepResult(matches: readonly GrepMatch[], display: GrepDisplay): string {
-	if (matches.length === 0) return "No matches found.";
+	const skipped = skippedClause(display);
+	if (matches.length === 0) return `No matches found${skipped}.`;
 	const start = Math.min(display.offset, matches.length);
 	const available = matches.length - start;
 	const shownCount = display.headLimit === 0 ? available : Math.min(display.headLimit, available);
@@ -215,6 +244,7 @@ export function renderGrepResult(matches: readonly GrepMatch[], display: GrepDis
 		header += `; search stopped at the ${SAFETY_MATCH_CAP}-match safety cap, so the total is not exact`;
 	}
 	if (hasMore) header += `; next offset ${end}`;
+	header += skipped;
 	header += ":";
 
 	if (shown.length === 0) return header;

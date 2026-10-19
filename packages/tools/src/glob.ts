@@ -5,6 +5,7 @@ import { guardPathContainment } from "./containment.ts";
 import { type IgnoreSet, isIgnored, parseGitignore } from "./ignore.ts";
 import type { Operations } from "./operations.ts";
 import { nextSpillPath } from "./output-capture.ts";
+import { isMissingPathError, probePath } from "./path-errors.ts";
 
 const MAX_RESULTS = 200;
 
@@ -46,7 +47,19 @@ export interface FileWalkerOps {
 export async function walkProjectFiles(
 	root: string,
 	ops: FileWalkerOps,
-	opts: { pattern?: Bun.Glob; skipDirs?: ReadonlySet<string>; respectGitignore?: boolean } = {},
+	opts: {
+		pattern?: Bun.Glob;
+		skipDirs?: ReadonlySet<string>;
+		respectGitignore?: boolean;
+		/**
+		 * Called once for a directory the walk could not list. The walk goes on,
+		 * but everything below that directory is absent from the result — the
+		 * caller is the one that can say so. A directory that vanished mid-walk
+		 * is not reported: it is gone, which is the same fact as never having
+		 * been there, not a failure to look.
+		 */
+		onUnreadableDirectory?: (path: string) => void;
+	} = {},
 ): Promise<string[]> {
 	const glob = opts.pattern ?? null;
 	const SKIP_DIRS = opts.skipDirs ?? new Set<string>(GLOB_SKIP_DIRS);
@@ -65,7 +78,10 @@ export async function walkProjectFiles(
 
 	async function walk(dir: string, depth: number, chain: readonly IgnoreSet[]): Promise<void> {
 		if (depth > MAX_DEPTH || matches.length > 5_000) return;
-		const entries = await ops.readdir(dir).catch(() => null);
+		const entries = await ops.readdir(dir).catch((error: unknown) => {
+			if (!isMissingPathError(error)) opts.onUnreadableDirectory?.(dir);
+			return null;
+		});
 		if (!entries) return;
 		// This directory's own `.gitignore` joins the chain before any entry is
 		// judged: its rules apply at and below it and are evaluated after the
@@ -147,17 +163,26 @@ export function createGlobTool(
 			} catch (error) {
 				return { content: [{ type: "text", text: String(error) }], isError: true };
 			}
-			if (!(await ops.exists(root))) {
-				return { content: [{ type: "text", text: `Path not found: ${root}` }], isError: true };
+			const probe = await probePath(ops, root, "search");
+			if (!probe.ok) {
+				return { content: [{ type: "text", text: probe.message }], isError: true };
 			}
 
+			let unreadableDirectories = 0;
 			const matches = await walkProjectFiles(root, ops, {
 				pattern: new Bun.Glob(input.pattern),
 				respectGitignore: true,
+				onUnreadableDirectory: () => {
+					unreadableDirectories++;
+				},
 			});
+			const skipped =
+				unreadableDirectories > 0
+					? `\n[skipped ${unreadableDirectories} unreadable director${unreadableDirectories === 1 ? "y" : "ies"}]`
+					: "";
 
 			if (matches.length === 0) {
-				return { content: [{ type: "text", text: "No files matched." }] };
+				return { content: [{ type: "text", text: `No files matched.${skipped}` }] };
 			}
 			const shown = matches.slice(0, MAX_RESULTS);
 			let suffix = "";
@@ -181,7 +206,7 @@ export function createGlobTool(
 				suffix = path ? `\n[+${more} more → ${path}]` : `\n[+${more} more]`;
 			}
 			return {
-				content: [{ type: "text", text: `${shown.join("\n")}${suffix}` }],
+				content: [{ type: "text", text: `${shown.join("\n")}${suffix}${skipped}` }],
 			};
 		},
 	});

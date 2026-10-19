@@ -2,7 +2,8 @@ import { join } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
-import type { Operations } from "./operations.ts";
+import type { DirentInfo, Operations } from "./operations.ts";
+import { describeFsFailure, probePath } from "./path-errors.ts";
 
 // Long-form design notes: docs/dev/tools.md
 /** How many entries a listing shows before it says the rest were cut. */
@@ -28,15 +29,22 @@ export function createLsTool(cwd: string, ops: Operations): AnyTool {
 			} catch (error) {
 				return { content: [{ type: "text", text: String(error) }], isError: true };
 			}
-			if (!(await ops.exists(dir))) {
-				return { content: [{ type: "text", text: `Path not found: ${dir}` }], isError: true };
+			const probe = await probePath(ops, dir, "list");
+			if (!probe.ok) {
+				return { content: [{ type: "text", text: probe.message }], isError: true };
 			}
-			const stat = await ops.stat(dir);
-			if (!stat.isDirectory) {
+			if (!probe.stat.isDirectory) {
 				return { content: [{ type: "text", text: `${dir} is a file, not a directory.` }], isError: true };
 			}
 
-			const entries = await ops.readdir(dir);
+			let entries: DirentInfo[];
+			try {
+				entries = await ops.readdir(dir);
+			} catch (error) {
+				// The directory may be stat-able and still refuse a listing (execute
+				// without read on POSIX). The refusal says which operation failed.
+				return { content: [{ type: "text", text: describeFsFailure(error, dir, "list") }], isError: true };
+			}
 			if (entries.length === 0) {
 				return { content: [{ type: "text", text: "(empty directory)" }] };
 			}

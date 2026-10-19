@@ -42,6 +42,14 @@ export {
 	type OverflowSink,
 	type StreamCapture,
 } from "./output-capture.ts";
+export {
+	describeFsFailure,
+	errorCode,
+	isMissingPathError,
+	isPermissionError,
+	type PathProbe,
+	probePath,
+} from "./path-errors.ts";
 export { createReadTool } from "./read.ts";
 export {
 	ReadFileState,
