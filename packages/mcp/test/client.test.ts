@@ -13,6 +13,7 @@ import {
 	listPrompts,
 	listResources,
 	loadApprovedMcpServers,
+	loadApprovedMcpServersWithStatus,
 	loadMcpConfig,
 	loadProjectMcpServerNames,
 	type McpConnection,
@@ -805,6 +806,31 @@ describe("loadApprovedMcpServers / approveMcpServer", () => {
 		mkdirSync(dirname(storePath), { recursive: true });
 		writeFileSync(storePath, "{ not json");
 		expect(loadApprovedMcpServers(cwd, home).size).toBe(0);
+	});
+
+	test("a damaged store says why the set is empty, and leaves the file where it is", () => {
+		// "No servers approved" and "the approvals could not be read" are the same
+		// set and different situations: the first is a fresh project, the second
+		// is a project whose servers are about to be re-asked for. The status
+		// variant carries the difference. Reading must not move the file — every
+		// startup reads, and a transient failure would become permanent damage.
+		const { cwd, home } = dirs("lbb-mcp-approve-status-");
+		const storePath = join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
+		mkdirSync(dirname(storePath), { recursive: true });
+		writeFileSync(storePath, "{ not json");
+
+		const status = loadApprovedMcpServersWithStatus(cwd, home);
+
+		expect(status.approved.size).toBe(0);
+		expect(status.warning).toContain(storePath);
+		expect(status.warning).toContain("damaged");
+		expect(status.warning).toContain("earlier approvals are not in effect");
+		expect(readFileSync(storePath, "utf8")).toBe("{ not json");
+	});
+
+	test("an absent store is the ordinary empty answer, not a warning", () => {
+		const { cwd, home } = dirs("lbb-mcp-approve-absent-");
+		expect(loadApprovedMcpServersWithStatus(cwd, home)).toEqual({ approved: new Set() });
 	});
 
 	// Approval is a read-modify-write over the whole store, so a corrupt store

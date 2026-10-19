@@ -152,6 +152,44 @@ describe("/compact", () => {
 		expect(h.session.messages).toHaveLength(3);
 	});
 
+	test("Esc during the summary cancels the pass and commits nothing", async () => {
+		// The summary is a full-prefix request that can take half a minute, and
+		// the host hands the command its own abort signal. A cancel has to end
+		// the pass with a report of the cancel — not an error line — and leave
+		// both the live transcript and the session file exactly as they were.
+		const dir = mkdtempSync(join(tmpdir(), "lbb-compact-cmd-"));
+		const store = SessionStore.startNew(dir, mkdtempSync(join(tmpdir(), "lbb-compact-home-")));
+		const session = bigSession();
+		for (const message of session.messages) store.appendMessage(message);
+		const controller = new AbortController();
+		let requested = false;
+		const streamFn: StreamFn = async function* (_model, _context, options) {
+			const signal = options?.signal;
+			// Without the signal there is nothing for Esc to fire on, and the pass
+			// would run to completion behind it. Fail here rather than hang.
+			if (!signal) throw new Error("the summary request carried no signal");
+			requested = true;
+			await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+			const stopped = new Error("request aborted");
+			stopped.name = "AbortError";
+			throw stopped;
+		};
+		const compaction = new CompactionManager(CONFIG, { streamFn, summarizerModel: FAUX_MODEL, store });
+		const pending = compactCommand().call(
+			{ session, compaction, cwd: dir, pushInfo: () => {}, signal: controller.signal } as LocalCommandContext,
+			"",
+		);
+		// The request is out — the moment Esc has something to stop.
+		while (!requested) await new Promise((resolve) => setTimeout(resolve, 5));
+		controller.abort();
+
+		expect(await pending).toBe("Compaction cancelled.");
+		expect(session.messages).toHaveLength(3);
+		expect(store.compactions()).toHaveLength(0);
+		// A cancel is the user's own key, not a summarizer failure.
+		expect(compaction.isTripped).toBe(false);
+	});
+
 	test("a hook that lets the pass through changes nothing about it", async () => {
 		const seen: string[] = [];
 		const h = makeHarness("<summary>\n1. Primary Request: x\n</summary>", {

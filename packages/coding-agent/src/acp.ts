@@ -56,6 +56,7 @@ import {
 	type PermissionResult,
 	type PermissionRule,
 	type SandboxMode,
+	SessionReadError,
 	SessionStore,
 } from "@labunbun/agent";
 import {
@@ -92,6 +93,7 @@ import {
 	resolveCompactionSummarizer,
 } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
+import { errorRemedy } from "./error-remedy.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
@@ -105,13 +107,14 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
-import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
+import { loadOutputStylesWithNotes, resolveOutputStyle } from "./output-styles.ts";
 import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
+	formatSettingsDiagnostics,
 	loadSettings,
 	networkAxisFrom,
 	type RawSettingsInput,
@@ -651,7 +654,17 @@ class AcpAgent implements acp.Agent {
 		// session they meant.
 		const match = findSession(listSessions(cwd, home), params.sessionId);
 		if (!match) throw acp.RequestError.invalidParams({ message: `unknown session ${params.sessionId}` });
-		const loaded = loadSessionForResume(match.path);
+		let loaded: ReturnType<typeof loadSessionForResume> = null;
+		try {
+			loaded = loadSessionForResume(match.path);
+		} catch (error) {
+			// A row the list could name but not read is a server-side failure, not a
+			// bad request: the client asked for a session the server says exists, and
+			// only the environment made it unreadable. `invalidParams` would tell the
+			// client to stop asking; `internalError` tells the truth.
+			if (!(error instanceof SessionReadError)) throw error;
+			throw acp.RequestError.internalError({ message: error.message });
+		}
 		if (!loaded) throw acp.RequestError.invalidParams({ message: `unknown session ${params.sessionId}` });
 		// The same disclosure the terminal resume prints, on stderr because stdout
 		// is frames only: a resumed conversation that is shorter than it was must
@@ -753,6 +766,15 @@ class AcpAgent implements acp.Agent {
 	}
 
 	#onEvent(live: LiveSession, event: AgentEvent): void {
+		// A model descent has no frame in the protocol, and inventing one would
+		// change the wire. stderr keeps it visible to whoever runs the agent —
+		// this file writes every notice there for exactly this reason — while the
+		// client keeps seeing the stream it already knows.
+		if (event.type === "fallback") {
+			process.stderr.write(
+				`[model fallback] ${event.from.provider}/${event.from.id} → ${event.to.provider}/${event.to.id}: ${event.reason}\n`,
+			);
+		}
 		if (event.type === "tool_execution_start") {
 			live.permissions.announced.push({ callId: event.callId, toolName: event.toolName, asked: false });
 		}
@@ -899,6 +921,7 @@ class AcpAgent implements acp.Agent {
 		const { settings } = loadedSettings;
 		const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
 		if (ignoredNotice) process.stderr.write(`Warning: ${ignoredNotice}\n`);
+		for (const line of formatSettingsDiagnostics(loadedSettings)) process.stderr.write(`Warning: ${line}\n`);
 		applySettingsEnv(settings);
 		applyCatalogSettings(settings);
 
@@ -1099,6 +1122,7 @@ class AcpAgent implements acp.Agent {
 		const streamFn = withModelFallback(transport.streamFn, createModelChainResolver(roleOrders, globalFallbacks));
 
 		const memory = loadMemoryFiles(cwd, home);
+		for (const warning of memory.warnings) process.stderr.write(`Memory: ${warning}\n`);
 		const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
 		// The model's door to the same skills the discovery block lists, merged
 		// beside the sandbox tools because the skill directory is this package's
@@ -1192,6 +1216,8 @@ class AcpAgent implements acp.Agent {
 		};
 		// Annotated because `checkBudget` below reads this very session's
 		// messages: without it the type would be inferred from its own initializer.
+		const outputStyles = loadOutputStylesWithNotes(cwd, home);
+		for (const note of outputStyles.notes) process.stderr.write(`Output style: ${note}\n`);
 		const session: AgentSession = new AgentSession({
 			model,
 			systemPrompt: buildSystemPrompt(allTools, {
@@ -1200,7 +1226,7 @@ class AcpAgent implements acp.Agent {
 				isTTY: process.stdout.isTTY ?? false,
 				memory: memory.content,
 				language: settings.language,
-				outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
+				outputStyle: resolveOutputStyle(settings.outputStyle, outputStyles.styles)?.content,
 				skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 			}),
 			tools: allTools,
@@ -1227,6 +1253,7 @@ class AcpAgent implements acp.Agent {
 					if (!seat) return { action: "ok" };
 					return budgetVerdict(costStateFromMessages(session.messages).totalCostUSD, seat);
 				},
+				errorRemedy,
 				spillOutput: (request) => writeToolOutput(request, { cwd, sessionId, home }),
 				// The difference from headless, and the point of this batch: an
 				// unresolved "ask" becomes a question with four answers instead of a
@@ -1298,11 +1325,21 @@ async function raceWithAbort(
 	}
 }
 
-/** The loop's own last word on why a run ended, for the error response. */
+/**
+ * The loop's own last word on why a run ended, for the error response.
+ *
+ * The remedy rides in the message rather than in a frame of its own: the
+ * protocol has no event for advice, and a client that shows the message verbatim
+ * still gets the next step. A classified failure without one keeps the provider's
+ * words alone.
+ */
 function lastErrorMessage(session: AgentSession): string {
 	for (let i = session.messages.length - 1; i >= 0; i--) {
 		const message = session.messages[i];
-		if (message?.role === "assistant" && message.errorMessage) return message.errorMessage;
+		if (message?.role === "assistant" && message.errorMessage) {
+			const remedy = message.errorKind ? errorRemedy(message.errorKind, session.model) : undefined;
+			return remedy ? `${message.errorMessage} — ${remedy}` : message.errorMessage;
+		}
 	}
 	return "the run ended with an error";
 }

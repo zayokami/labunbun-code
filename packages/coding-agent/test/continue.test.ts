@@ -603,6 +603,10 @@ describe("a session file that lost a line", () => {
 				toolCallId: "t1",
 				toolName: "Read",
 				isError: true,
+				// Marked as an interrupt, not a failure the tool reported: the
+				// translation to the wire needs isError, and every display reads
+				// this flag to avoid painting the user's own damage red.
+				interrupted: true,
 				content: [{ type: "text", text: "Tool execution was interrupted before completion." }],
 				timestamp: turn.timestamp,
 				synthetic: true,
@@ -696,6 +700,7 @@ describe("a session file that lost a line", () => {
 				toolCallId: "t1",
 				toolName: "Read",
 				isError: true,
+				interrupted: true,
 				content: [{ type: "text", text: "Tool execution was interrupted before completion." }],
 				timestamp: turn.timestamp,
 				synthetic: true,

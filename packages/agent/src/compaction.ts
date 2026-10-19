@@ -1126,6 +1126,17 @@ export class CompactionManager {
 			// the real tail; the in-memory transcript keeps the synthetic result,
 			// which is where the model needs it.
 			const recordedSuffix = suffix.filter((message) => !(message.role === "toolResult" && message.synthetic === true));
+			// The last gate, and the one that makes a cancel mean something: a pass
+			// cancelled while its summary was still being written must not reach
+			// the file. Everything above this line may suspend; nothing below it
+			// does — `appendCompaction` and the context swap that follows run in
+			// straight line — so a signal raised after this check cannot be acted
+			// on, and the command reports the success it already committed.
+			if (options.signal?.aborted) {
+				const cancelled = new Error("Compaction interrupted");
+				cancelled.name = "AbortError";
+				throw cancelled;
+			}
 			const recorded =
 				this.#deps.store === undefined
 					? undefined

@@ -42,7 +42,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { caseInsensitivePaths } from "@labunbun/tools";
+import { caseInsensitivePaths, isMissingPathError } from "@labunbun/tools";
 import { isProjectTierTrusted } from "./project-trust.ts";
 
 /** The user's own memory file, `<home>/.labunbun/MEMORY.md`. */
@@ -72,6 +72,15 @@ export interface MemoryLoadResult {
 	partialFiles?: string[];
 	/** Files left out entirely, in render order. */
 	omittedFiles?: string[];
+	/**
+	 * Memory or rules files that are present but could not be read.
+	 *
+	 * They contribute nothing to `content`, exactly as if they were absent — the
+	 * prompt can only carry what was read. The difference is that the user can
+	 * be told which file is missing from it, instead of a permission error
+	 * silently meaning "you never wrote those instructions".
+	 */
+	warnings: string[];
 }
 
 /** One memory file with its `@include`s already expanded. */
@@ -94,7 +103,7 @@ export interface MemorySelection {
 	length: number;
 }
 
-function readIfExists(path: string): string | null {
+function readIfExists(path: string, onFailure?: (message: string) => void): string | null {
 	try {
 		// `lstat` describes the name, not what it points at: a memory file
 		// swapped for a symlink would otherwise turn `@include`, a rules file or
@@ -104,7 +113,13 @@ function readIfExists(path: string): string | null {
 		const stats = lstatSync(path);
 		if (stats.isSymbolicLink() || !stats.isFile()) return null;
 		return readFileSync(path, "utf8");
-	} catch {
+	} catch (error) {
+		// A file that is not there is the ordinary case for every optional
+		// document here. One that is there and could not be read is a file the
+		// user believes is in the prompt and is not.
+		if (!isMissingPathError(error)) {
+			onFailure?.(`${path} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+		}
 		return null;
 	}
 }
@@ -248,8 +263,11 @@ export function expandIncludes(
 }
 
 /** Read every `*.md` in a rules directory, sorted, skipping an unreadable dir. */
-function collectRules(rulesDir: string): Array<{ path: string; content: string }> {
+function collectRules(rulesDir: string, warnings?: string[]): Array<{ path: string; content: string }> {
 	const out: Array<{ path: string; content: string }> = [];
+	const note = (message: string): void => {
+		warnings?.push(message);
+	};
 	try {
 		// `lstat` describes the directory name itself. A rules directory swapped
 		// for a symlink or a junction would otherwise be followed and every `*.md`
@@ -259,11 +277,17 @@ function collectRules(rulesDir: string): Array<{ path: string; content: string }
 		if (stats.isSymbolicLink() || !stats.isDirectory()) return out;
 		for (const name of readdirSync(rulesDir).sort()) {
 			if (!name.endsWith(".md")) continue;
-			const content = readIfExists(join(rulesDir, name));
-			if (content !== null) out.push({ path: join(rulesDir, name), content });
+			const path = join(rulesDir, name);
+			const content = readIfExists(path, note);
+			if (content !== null) out.push({ path, content });
 		}
-	} catch {
-		// missing or unreadable rules dir — skip
+	} catch (error) {
+		// An absent directory is ordinary. One that exists and cannot be listed
+		// is not: every rule in it is missing from the prompt, and silence would
+		// look like the user never wrote them.
+		if (!isMissingPathError(error)) {
+			note(`Rules directory ${rulesDir} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 	return out;
 }
@@ -279,17 +303,17 @@ function collectRules(rulesDir: string): Array<{ path: string; content: string }
  * inherits them by construction in both `loadMemoryFiles` and
  * `withheldProjectMemoryFiles`.
  */
-function collectLevel(dir: string): Array<{ path: string; content: string }> {
+function collectLevel(dir: string, warnings?: string[]): Array<{ path: string; content: string }> {
 	const out: Array<{ path: string; content: string }> = [];
 	const candidates = [join(dir, "LABUNBUN.md"), join(dir, "AGENTS.md"), join(dir, "CLAUDE.md")];
 	for (const path of candidates) {
-		const content = readIfExists(path);
+		const content = readIfExists(path, (message) => warnings?.push(message));
 		if (content === null) continue;
 		out.push({ path, content });
 		break;
 	}
 
-	out.push(...collectRules(join(dir, ".labunbun", "rules")));
+	out.push(...collectRules(join(dir, ".labunbun", "rules"), warnings));
 	return out;
 }
 
@@ -441,10 +465,11 @@ export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult
 	// 1. User-global memory, plus user-global rules. The cwd→root walk below
 	// only reaches `~/.labunbun/rules` when cwd happens to sit under the home
 	// directory, so user-scope rules need their own read to apply everywhere.
+	const warnings: string[] = [];
 	const userFiles: MemoryFileCandidate[] = [];
-	const userMemory = readIfExists(userMemoryPath(home));
+	const userMemory = readIfExists(userMemoryPath(home), (message) => warnings.push(message));
 	if (userMemory !== null) userFiles.push({ path: userMemoryPath(home), content: userMemory });
-	userFiles.push(...collectRules(userRulesDir(home)));
+	userFiles.push(...collectRules(userRulesDir(home), warnings));
 
 	// 2. Walk cwd → root; root-level files first so the render keeps the nearest
 	// last. The walk is behind the trust gate as a whole (see the header): an
@@ -452,7 +477,7 @@ export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult
 	// above stays.
 	const projectLevels: MemoryFileCandidate[][] = [];
 	if (isProjectTierTrusted(cwd, "memory", home)) {
-		for (const dir of levelsFromCwd(cwd)) projectLevels.push(collectLevel(dir));
+		for (const dir of levelsFromCwd(cwd)) projectLevels.push(collectLevel(dir, warnings));
 	}
 
 	// Deduped by path with the user tier first: when cwd sits under the home
@@ -513,6 +538,7 @@ export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult
 		truncated,
 		partialFiles: partialRender,
 		omittedFiles: omittedRender,
+		warnings,
 	};
 }
 

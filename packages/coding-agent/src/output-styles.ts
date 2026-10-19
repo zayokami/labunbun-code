@@ -20,6 +20,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isMissingPathError } from "@labunbun/tools";
 import { isProjectTierTrusted } from "./project-trust.ts";
 
 export interface OutputStyle {
@@ -29,10 +30,21 @@ export interface OutputStyle {
 	source: "user" | "project";
 }
 
-function loadStylesFromDir(dir: string, source: "user" | "project"): OutputStyle[] {
+export interface OutputStyleLoadResult {
+	styles: OutputStyle[];
+	/**
+	 * Directories and files that are there but could not be read.
+	 *
+	 * An unreadable style directory used to be indistinguishable from one that
+	 * holds nothing: the selected style simply did not reach the prompt, and no
+	 * one was told.
+	 */
+	notes: string[];
+}
+
+function loadStylesFromDir(dir: string, source: "user" | "project", notes: string[]): OutputStyle[] {
 	const out: OutputStyle[] = [];
 	try {
-		if (!existsSync(dir)) return out;
 		const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
@@ -44,13 +56,25 @@ function loadStylesFromDir(dir: string, source: "user" | "project"): OutputStyle
 					sourcePath: path,
 					source,
 				});
-			} catch {
+			} catch (error) {
 				// A file that vanished between the listing and the read is skipped;
-				// it must not fail the styles that did load.
+				// it must not fail the styles that did load. One that is still there
+				// and cannot be read is a style the user selected and will not get.
+				if (!isMissingPathError(error)) {
+					notes.push(
+						`output style ${path} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
 			}
 		}
-	} catch {
-		// unreadable directory — treated as holding no styles
+	} catch (error) {
+		// An absent directory is the ordinary answer. An unreadable one is not:
+		// every style under it is missing from the prompt.
+		if (!isMissingPathError(error)) {
+			notes.push(
+				`output styles directory ${dir} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 	return out;
 }
@@ -58,16 +82,25 @@ function loadStylesFromDir(dir: string, source: "user" | "project"): OutputStyle
 /**
  * The user tier always, the project tier only once this directory is trusted —
  * the same gate, read the same way, as skills and agent definitions.
+ *
+ * The notes are for the host's startup surface; call sites that have nowhere to
+ * put them keep using {@link loadOutputStyles}.
  */
-export function loadOutputStyles(cwd: string, home: string = homedir()): OutputStyle[] {
-	const user = loadStylesFromDir(join(home, ".labunbun", "output-styles"), "user");
+export function loadOutputStylesWithNotes(cwd: string, home: string = homedir()): OutputStyleLoadResult {
+	const notes: string[] = [];
+	const user = loadStylesFromDir(join(home, ".labunbun", "output-styles"), "user", notes);
 	const project = isProjectTierTrusted(cwd, "styles", home)
-		? loadStylesFromDir(join(cwd, ".labunbun", "output-styles"), "project")
+		? loadStylesFromDir(join(cwd, ".labunbun", "output-styles"), "project", notes)
 		: [];
 	// Project styles override user styles with the same name.
 	const byName = new Map<string, OutputStyle>();
 	for (const style of [...user, ...project]) byName.set(style.name, style);
-	return [...byName.values()];
+	return { styles: [...byName.values()], notes };
+}
+
+/** The styles alone — the reader for call sites with no notice surface. */
+export function loadOutputStyles(cwd: string, home: string = homedir()): OutputStyle[] {
+	return loadOutputStylesWithNotes(cwd, home).styles;
 }
 
 /**

@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, lstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import type { SessionEntry, SessionStore } from "@labunbun/agent";
 import type { ToolResultMessage } from "@labunbun/ai";
-import type { AgentTask } from "@labunbun/tools";
+import { type AgentTask, isMissingPathError } from "@labunbun/tools";
 import { SHELL_END_KIND, SHELL_START_KIND } from "./shell-ledger.ts";
 import { readTaskSnapshot } from "./task-snapshot.ts";
 
@@ -282,6 +282,25 @@ export interface ToolEndEvent {
 	result: ToolResultMessage;
 }
 
+/**
+ * One ledger write that did not land.
+ *
+ * The ledger stays best-effort — a checkpoint is not worth failing a turn over —
+ * but "best effort" and "silent" are different promises. A snapshot the disk
+ * refused is a file `/rewind` will not be able to restore, and the person who
+ * later asks for it deserves to have been told when it happened.
+ */
+export interface LedgerFailure {
+	/**
+	 * Which half of the ledger failed: the pre-Edit/Write file snapshot that
+	 * `/rewind` restores from, or the per-call checkpoint entry.
+	 */
+	operation: "checkpoint" | "entry";
+	/** The file the failed write named, when it named one. */
+	path?: string;
+	message: string;
+}
+
 /** The writer of the tool ledger — see {@link createToolLedger}. */
 export interface ToolLedger {
 	/** The input each running call was announced with; the end event carries none. */
@@ -292,6 +311,11 @@ export interface ToolLedger {
 	noteBeforeMutation(toolName: string, input: unknown): void;
 	/** The after side: the post-call fingerprint, or null when the call failed. */
 	noteAfterMutation(toolName: string, input: unknown, isError: boolean): void;
+	/**
+	 * The writes that failed so far, in the order they first failed and
+	 * deduplicated by what failed. Empty is the ordinary answer.
+	 */
+	failures(): readonly LedgerFailure[];
 }
 
 /**
@@ -315,9 +339,27 @@ export function createToolLedger(options: {
 	store(): SessionStore | undefined;
 	/** Read a file, or null when it is absent or unreadable. */
 	readFile(path: string): string | null;
+	/** Called once per distinct failure, in addition to {@link ToolLedger.failures}. */
+	onWarning?(failure: LedgerFailure): void;
 }): ToolLedger {
 	const startedInputs = new Map<string, unknown>();
 	const pendingFiles = new Map<string, { path: string; beforeHash: string | null; afterHash: string | null }>();
+	const failureList: LedgerFailure[] = [];
+	const reportedFailures = new Set<string>();
+
+	/**
+	 * Remember a failed write and say it once.
+	 *
+	 * The dedupe key is what failed, not when: a full disk refuses every append
+	 * with the same words, and a warning per tool call would bury the first one.
+	 */
+	function reportFailure(failure: LedgerFailure): void {
+		const key = `${failure.operation}\u0000${failure.path ?? ""}\u0000${failure.message}`;
+		if (reportedFailures.has(key)) return;
+		reportedFailures.add(key);
+		failureList.push(failure);
+		options.onWarning?.(failure);
+	}
 
 	function snapshotBeforeMutation(store: SessionStore, input: unknown): void {
 		const filePath = filePathFromInput(input);
@@ -339,11 +381,24 @@ export function createToolLedger(options: {
 				// entry can say the file changed on this call even when /rewind
 				// cannot restore it.
 				if (content.length <= CHECKPOINT_MAX_CHARS) {
-					store.appendCustom(FILE_CHECKPOINT_KIND, { path: filePath, content, at: Date.now() });
+					try {
+						store.appendCustom(FILE_CHECKPOINT_KIND, { path: filePath, content, at: Date.now() });
+					} catch (error) {
+						// The snapshot is the rewind's payload. The call still goes
+						// ahead; the entry that survives will carry the hash only,
+						// which is enough to report a change and not to undo it.
+						reportFailure({ operation: "checkpoint", path: filePath, message: failureMessage(error) });
+					}
 				}
 			}
-		} catch {
-			// best-effort — never block the tool call on checkpoint failure
+		} catch (error) {
+			// A path that is not there is the ordinary Write-creates-it case:
+			// there was nothing to snapshot and nothing went wrong. Everything
+			// else — a refusal, an I/O fault, a directory read as a file — is a
+			// snapshot that should have happened and did not.
+			if (!isMissingPathError(error)) {
+				reportFailure({ operation: "checkpoint", path: filePath, message: failureMessage(error) });
+			}
 		}
 		pendingFiles.set(filePath, { path: filePath, beforeHash, afterHash: null });
 	}
@@ -416,9 +471,30 @@ export function createToolLedger(options: {
 			}
 			const nextStep = nextStepFromTasks(readTaskSnapshot(store) ?? []);
 			if (nextStep) record.nextStep = nextStep;
-			writeToolCheckpoint(store, record);
+			writeToolCheckpoint(store, record, reportFailure);
+		},
+
+		failures() {
+			return failureList;
 		},
 	};
+}
+
+/** The message a caught write failure is reported with. */
+function failureMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The one line a host prints when a ledger write failed.
+ *
+ * Shared so the interactive and scripted runs describe the same missing thing
+ * the same way: the operation says what `/rewind` will not have, and the path —
+ * when there is one — says which file it is about.
+ */
+export function formatLedgerFailureNotice(failure: LedgerFailure): string {
+	const subject = failure.operation === "checkpoint" ? `checkpoint for ${failure.path ?? "a file"}` : "tool checkpoint";
+	return `Warning: could not save the ${subject}: ${failure.message}`;
 }
 
 /** The shell command a tool input names, when it carries one as a string. */
@@ -487,8 +563,12 @@ export function formatResumeSummary(checkpoints: readonly ToolCheckpoint[]): str
 }
 
 /** Record one finished tool call. Best effort — see {@link appendEntry}. */
-export function writeToolCheckpoint(store: SessionStore, record: ToolCheckpoint): void {
-	appendEntry(store, TOOL_CHECKPOINT_KIND, record);
+export function writeToolCheckpoint(
+	store: SessionStore,
+	record: ToolCheckpoint,
+	onFailure?: (failure: LedgerFailure) => void,
+): void {
+	appendEntry(store, TOOL_CHECKPOINT_KIND, record, onFailure);
 }
 
 /** Record a restore, so a reader can tell a workspace that was rolled back from one that was merely edited. */
@@ -733,10 +813,18 @@ function checkpointFile(data: unknown): CheckpointFile | null {
  * lost checkpoint is a line a later reader will not have, which is the one cost
  * this module accepts. The same swallow as every other `custom` writer here.
  */
-function appendEntry(store: SessionStore, kind: string, data: unknown): void {
+function appendEntry(
+	store: SessionStore,
+	kind: string,
+	data: unknown,
+	onFailure?: (failure: LedgerFailure) => void,
+): void {
 	try {
 		store.appendCustom(kind, data);
-	} catch {
-		// Best effort — see the doc above.
+	} catch (error) {
+		// Best effort — the turn is not failed. The failure is still reported to
+		// callers that asked, because a ledger with a hole in it should not read
+		// as a ledger with nothing missing.
+		onFailure?.({ operation: "entry", message: failureMessage(error) });
 	}
 }

@@ -7,7 +7,9 @@ import {
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
+	formatSettingsDiagnostics,
 	loadSettings,
+	type RawSettingsInput,
 	resolveMode,
 	SettingsSchema,
 	shadowedChoiceNotice,
@@ -661,6 +663,114 @@ describe("choices a higher tier would override", () => {
 			const loaded = loadSettings(cwd, undefined, home);
 			expect(loaded.perSource.project?.model).toBeUndefined();
 			expect(shadowingTier(loaded, "model")).toBeUndefined();
+		});
+	});
+});
+
+/**
+ * The loader used to report a broken tier by `console.error`, which no TUI shows
+ * and any script can scroll past. The finding travels with the load now; these
+ * tests hold the loader to saying what happened rather than to saying nothing.
+ */
+describe("settings diagnostics", () => {
+	test("a healthy load has nothing to report", () => {
+		withSettingsTiers({ user: { theme: "light" }, project: { vimMode: true } }, (cwd, home) => {
+			expect(loadSettings(cwd, undefined, home).diagnostics).toEqual([]);
+		});
+	});
+
+	test("a file that is not JSON is named, and its tier is skipped", () => {
+		const home = mkdtempSync(join(tmpRoot(), "lbb-diag-home-"));
+		const cwd = mkdtempSync(join(tmpRoot(), "lbb-diag-"));
+		try {
+			mkdirSync(join(cwd, ".labunbun"), { recursive: true });
+			const path = join(cwd, ".labunbun", "settings.json");
+			writeFileSync(path, "{not json");
+			const loaded = loadSettings(cwd, undefined, home);
+			// The skip itself is unchanged — what is new is that it is legible.
+			expect(loaded.settings.permissions.allow).toEqual([]);
+			const [reading] = loaded.diagnostics;
+			expect(reading?.source).toBe("project");
+			expect(reading?.path).toBe(path);
+			expect(reading?.kind).toBe("invalid-json");
+			expect(reading?.message).toContain("is not valid JSON");
+			expect(formatSettingsDiagnostics(loaded)).toEqual([`Settings ${path} ${reading?.message}`]);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("a path that exists but cannot be read is not mistaken for an absent tier", () => {
+		// A directory where the file belongs stands in for any read refusal: the
+		// point is that only ENOENT/ENOTDIR read as "nothing here", so this must
+		// surface instead of quietly shrinking the tier.
+		const home = mkdtempSync(join(tmpRoot(), "lbb-diag-dir-home-"));
+		const cwd = mkdtempSync(join(tmpRoot(), "lbb-diag-dir-"));
+		try {
+			mkdirSync(join(cwd, ".labunbun", "settings.json"), { recursive: true });
+			const path = join(cwd, ".labunbun", "settings.json");
+			const [reading] = loadSettings(cwd, undefined, home).diagnostics;
+			expect(reading?.source).toBe("project");
+			expect(reading?.path).toBe(path);
+			expect(reading?.kind).toBe("unreadable");
+			expect(reading?.message).toContain("could not be read");
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("an unknown key is reported by name, and the rest of the file still applies", () => {
+		withSettingsTiers({ user: { theme: "light", themee: "dark" } }, (cwd, home) => {
+			const loaded = loadSettings(cwd, undefined, home);
+			expect(loaded.settings.theme).toBe("light");
+			expect(loaded.diagnostics).toEqual([
+				{
+					source: "user",
+					path: join(home, ".labunbun", "settings.json"),
+					kind: "unknown-key",
+					message: 'sets an unknown key "themee"; it was ignored',
+				},
+			]);
+		});
+	});
+
+	test("a tier that does not match the schema is named, and the load fails closed to the defaults", () => {
+		withSettingsTiers({ user: { theme: 42 }, project: { vimMode: true } }, (cwd, home) => {
+			const loaded = loadSettings(cwd, undefined, home);
+			// The broken tier contributes no view of its own. Its value was still
+			// merged, so the whole-file parse fails and the defaults are what the
+			// session runs — the existing fail-closed rule, now with the reason
+			// attached instead of a stderr line nobody reads.
+			expect(loaded.perSource.user).toBeUndefined();
+			expect(loaded.settings.vimMode).toBeUndefined();
+			expect(loaded.diagnostics[0]).toMatchObject({ source: "user", kind: "invalid-shape" });
+			expect(loaded.diagnostics[0]?.message).toMatch(/^has invalid settings: theme: /);
+			expect(loaded.diagnostics[1]).toMatchObject({
+				source: "user",
+				path: join(home, ".labunbun", "settings.json"),
+				kind: "invalid-shape",
+			});
+			expect(loaded.diagnostics[1]?.message).toContain("defaults are in effect");
+		});
+	});
+
+	test("an invalid --settings falls back to whole-file defaults, and says so instead of silently ignoring the files", () => {
+		// Fail closed is the existing rule: a partially applied merge is a session
+		// running settings nobody wrote. What is new is that the user is told the
+		// defaults are what they are getting.
+		withSettingsTiers({ user: { theme: "light" } }, (cwd, home) => {
+			const loaded = loadSettings(cwd, { theme: 42 } as unknown as RawSettingsInput, home);
+			expect(loaded.settings.theme).toBeUndefined();
+			const rollback = loaded.diagnostics.filter((diagnostic) => diagnostic.message.includes("defaults are in effect"));
+			expect(rollback).toHaveLength(1);
+			expect(rollback[0]?.kind).toBe("invalid-shape");
+			expect(rollback[0]?.source).toBe("flag");
+			expect(rollback[0]?.path).toBe("--settings");
+			const lines = formatSettingsDiagnostics(loaded);
+			expect(lines).toContain(`Settings --settings ${rollback[0]?.message}`);
+			expect(lines.filter((line) => line.includes("defaults are in effect"))).toHaveLength(1);
 		});
 	});
 });

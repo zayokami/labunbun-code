@@ -2,7 +2,7 @@
  * Session resume: list saved sessions for a project and rebuild an
  * AgentSession's message history from the JSONL tree.
  */
-import { SessionStore } from "@labunbun/agent";
+import { SessionReadError, SessionStore } from "@labunbun/agent";
 import { type AgentMessage, repairToolPairing } from "@labunbun/ai";
 import { readSessionTitle } from "./session-title.ts";
 
@@ -23,6 +23,14 @@ export interface SessionSummary {
 	 * lower bound: it counts the messages in the part that was read.
 	 */
 	truncated: boolean;
+	/**
+	 * The file exists and lists, but could not be read: a permission error, a
+	 * directory where a file was expected, a disk that answered with an I/O
+	 * error. The row still appears — hiding it would make a broken session look
+	 * like one that never existed — with the count and label unknown. Resuming
+	 * it stays possible to attempt, and fails out loud.
+	 */
+	unreadable?: { message: string };
 }
 
 /**
@@ -38,18 +46,34 @@ const LABEL_READ_LIMIT_BYTES = 256 * 1024;
 
 export function listSessions(cwd?: string, home?: string): SessionSummary[] {
 	return SessionStore.listSessions(cwd, home).map((entry) => {
-		const store = SessionStore.load(entry.path, { maxBytes: LABEL_READ_LIMIT_BYTES });
-		// Read once. Both the label and the count come from the same array, which
-		// is the only way they can be about the same conversation.
-		const messages = store.messages();
-		const firstUser = messages.find((m) => m.role === "user");
-		return {
-			...entry,
-			title: readSessionTitle(entry.path),
-			firstUserText: firstUser ? textOf(firstUser).slice(0, 80) : "(empty session)",
-			messageCount: messages.length,
-			truncated: store.truncated,
-		};
+		try {
+			const store = SessionStore.load(entry.path, { maxBytes: LABEL_READ_LIMIT_BYTES });
+			// Read once. Both the label and the count come from the same array, which
+			// is the only way they can be about the same conversation.
+			const messages = store.messages();
+			const firstUser = messages.find((m) => m.role === "user");
+			return {
+				...entry,
+				title: readSessionTitle(entry.path),
+				firstUserText: firstUser ? textOf(firstUser).slice(0, 80) : "(empty session)",
+				messageCount: messages.length,
+				truncated: store.truncated,
+			};
+		} catch (error) {
+			// One unreadable file must not take the picker down with it: the other
+			// sessions are still resumable, and the row for this one is the only
+			// place the failure can be seen. Anything that is not a classified read
+			// failure is a bug in the reader, and it keeps travelling.
+			if (!(error instanceof SessionReadError)) throw error;
+			return {
+				...entry,
+				title: readSessionTitle(entry.path),
+				firstUserText: "(unreadable session)",
+				messageCount: 0,
+				truncated: false,
+				unreadable: { message: error.message },
+			};
+		}
 	});
 }
 
@@ -92,7 +116,13 @@ export function findSession<T extends { sessionId: string }>(sessions: T[], id: 
  */
 export function resolveContinueTarget(cwd?: string, home?: string): SessionSummary | null {
 	const sessions = listSessions(cwd, home);
-	return sessions.find((s) => s.messageCount > 0) ?? sessions[0] ?? null;
+	const readable = sessions.filter((s) => s.unreadable === undefined);
+	// Unreadable rows are skipped while a readable candidate exists — continuing
+	// into a file whose contents are unknown would fail the load that this
+	// function exists to set up. When every file is unreadable the newest one
+	// still answers, so the load fails visibly instead of a fresh session
+	// appearing with no explanation of where the old one went.
+	return readable.find((s) => s.messageCount > 0) ?? readable[0] ?? sessions[0] ?? null;
 }
 
 function textOf(message: AgentMessage): string {

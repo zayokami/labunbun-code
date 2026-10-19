@@ -30,6 +30,7 @@ import {
 	type PermissionMode,
 	type PermissionRule,
 	type SandboxMode,
+	SessionReadError,
 	SessionStore,
 	windowStartFor,
 } from "@labunbun/agent";
@@ -64,7 +65,7 @@ import {
 	getPrompt,
 	listPrompts,
 	listResources,
-	loadApprovedMcpServers,
+	loadApprovedMcpServersWithStatus,
 	loadMcpConfig,
 	loadProjectMcpServerNames,
 	type McpConfigError,
@@ -148,7 +149,9 @@ import {
 } from "./chatgpt-login.ts";
 import {
 	createToolLedger,
+	formatLedgerFailureNotice,
 	formatResumeSummary,
+	type LedgerFailure,
 	latestTestFailures,
 	readToolCheckpoints,
 	recordRewind,
@@ -203,6 +206,7 @@ import {
 	type SubscriptionSignIns,
 	unrunnableSuffix,
 } from "./credential-presence.ts";
+import { errorRemedy } from "./error-remedy.ts";
 import { createExitGuard } from "./exit-guard.ts";
 import { sessionToMarkdown } from "./export-session.ts";
 import { createFileCompleter } from "./file-completions.ts";
@@ -246,7 +250,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
-import { loadOutputStyles, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
+import { loadOutputStylesWithNotes, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
 import { createPlanModeCallbacks, createPlanModeTools, createPlanTasks, type PlanModeCallbacks } from "./plan-mode.ts";
 import { type PlanSnapshot, readPlanSnapshot, reanchorPlanSnapshot, writePlanSnapshot } from "./plan-snapshot.ts";
 import {
@@ -281,6 +285,7 @@ import {
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
+	formatSettingsDiagnostics,
 	type LoadedSettings,
 	loadSettings,
 	networkAxisFrom,
@@ -428,6 +433,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	installStdinTrace(process.stdin);
 	const cwd = options.cwd ?? process.cwd();
 	const home = options.home ?? homedir();
+	/**
+	 * Lines found before the REPL exists, held until there is a transcript to put
+	 * them in. Settings load first, and a settings file with a typo is exactly
+	 * the kind of thing that used to be said to a stderr nobody reads in a TUI.
+	 * Deduplicated when flushed: two readers naming the same broken file is one
+	 * fact, and the same line twice would read as two.
+	 */
+	const startupNotices: string[] = [];
 
 	// ---- first-run setup (before settings load, so it can create them) ----
 	// `home` is threaded through both halves: the wizard reads and writes the
@@ -438,6 +451,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- settings & providers ----
 	const loadedSettings = loadSettings(cwd, options.flagSettings, home);
 	const { settings } = loadedSettings;
+	// Held for the transcript rather than printed: in a TUI, stderr is the screen
+	// the REPL is about to draw over.
+	startupNotices.push(...formatSettingsDiagnostics(loadedSettings));
 	markStartup("settings loaded");
 	// Say out loud what a file inside this project asked for and did not get —
 	// silence here would look like the setting simply didn't work.
@@ -550,11 +566,24 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			console.error(`Session not found: ${options.resumeSessionId}`);
 			return 1;
 		}
-		const loaded = loadSessionForResume(match.path);
+		let loaded: ReturnType<typeof loadSessionForResume> = null;
+		let readFailure: SessionReadError | undefined;
+		try {
+			loaded = loadSessionForResume(match.path);
+		} catch (error) {
+			// The file is there and the picker can name it, but it cannot be read.
+			// Exiting would strand the user in front of a session they can see and
+			// cannot open; a fresh session plus the reason is the recoverable answer.
+			if (!(error instanceof SessionReadError)) throw error;
+			readFailure = error;
+		}
 		if (loaded) {
 			store = loaded.store;
 			damageNotice = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
 			resumedMessages = loaded.messages;
+		} else if (readFailure) {
+			console.error(`${readFailure.message} — starting a new one.`);
+			store = SessionStore.startNew(cwd, home);
 		} else {
 			// The file lists — its name is the id — and matches, but nothing can be
 			// rebuilt from it: its header is gone. This used to leave the run with
@@ -567,16 +596,26 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	} else if (options.continueLast) {
 		// --resume wins when both are given; this is the shorthand.
 		const target = resolveContinueTarget(cwd, home);
+		let readFailure: SessionReadError | undefined;
 		if (target) {
-			const loaded = loadSessionForResume(target.path);
-			store = loaded?.store;
-			if (loaded) {
-				damageNotice = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
-				resumedMessages = loaded.messages;
+			try {
+				const loaded = loadSessionForResume(target.path);
+				store = loaded?.store;
+				if (loaded) {
+					damageNotice = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
+					resumedMessages = loaded.messages;
+				}
+			} catch (error) {
+				if (!(error instanceof SessionReadError)) throw error;
+				readFailure = error;
 			}
 		}
 		if (!store) {
-			console.error("No previous session to continue — starting a new one.");
+			console.error(
+				readFailure
+					? `${readFailure.message} — starting a new one.`
+					: "No previous session to continue — starting a new one.",
+			);
 			store = SessionStore.startNew(cwd, home);
 		}
 	} else {
@@ -751,12 +790,73 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	}
 
 	let handle: ReplAppHandle | null = null;
+	/**
+	 * The registry command running right now, and whether it watches its signal.
+	 *
+	 * One slot: the REPL dispatches commands from the same input path, so two
+	 * runs cannot overlap. `cancellable` gates Esc — a command that never reads
+	 * the signal must not swallow the press meant for the session behind it.
+	 */
+	let commandAbort: { controller: AbortController; cancellable: boolean } | null = null;
+	/** Startup lines already on screen, so a later repeat of the same fact is silent. */
+	const printedNotices = new Set<string>();
+	/**
+	 * Say one startup line where the user is looking: in the transcript once it
+	 * exists, in the buffer before that. Content, not origin, is the key — the
+	 * same missing setting reported by two readers is still one missing setting.
+	 */
+	function sayNotice(line: string): void {
+		if (!handle) {
+			startupNotices.push(line);
+			return;
+		}
+		if (printedNotices.has(line)) return;
+		printedNotices.add(line);
+		pushInfo(handle, line);
+	}
+
+	/** Open a registry command's run; the REPL routes Esc here while it lasts. */
+	function beginCommand(cancellable: boolean): { signal: AbortSignal; done(): void } {
+		const controller = new AbortController();
+		commandAbort = { controller, cancellable };
+		// The row's "esc to cancel" is a promise, and the flag is what lets the
+		// status line make it: only a command that declared itself cancellable
+		// raises it, and only while that command is the one in flight.
+		if (cancellable) handle?.store.set((s) => ({ ...s, contextActivityCancellable: true }));
+		return {
+			signal: controller.signal,
+			done: () => {
+				// Guarded by identity: a stale completion must not clear the slot of
+				// the command that replaced it.
+				if (commandAbort?.controller !== controller) return;
+				commandAbort = null;
+				// The compaction that owned this flag clears its activity row on its
+				// own failed phase; this is the belt for every other exit — a vetoed
+				// hook, a throw — that never reaches a phase at all.
+				handle?.store.set((s) => (s.contextActivityCancellable ? { ...s, contextActivityCancellable: undefined } : s));
+			},
+		};
+	}
+
+	/**
+	 * Esc while a cancellable command runs. False leaves the press to the
+	 * session, which is the behaviour every non-cancellable command keeps.
+	 */
+	function cancelCommand(): boolean {
+		if (!commandAbort?.cancellable) return false;
+		commandAbort.controller.abort();
+		return true;
+	}
 
 	// Memory files (LABUNBUN.md / AGENTS.md / CLAUDE.md), part of the system
 	// prompt. `home` is passed rather than left to `homedir()`: the caller may
 	// have named one, and a home the code reads but does not honour is how a test
 	// run ends up reading the operator's own memory files.
 	const memory = loadMemoryFiles(cwd, home);
+	// A memory or rules file that exists and could not be read leaves the prompt
+	// with instructions the user wrote and cannot see are missing. Said once, at
+	// startup, beside the other notices about what did not load.
+	for (const warning of memory.warnings) sayNotice(`Memory: ${warning}`);
 	// The memory text the live session and its subagents see. The `#` shortcut
 	// replaces this after a successful append, so a note reaches the next request
 	// (and any subagent spawned afterwards) without a restart; a subagent's
@@ -1038,7 +1138,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const mcpLoadErrors: McpConfigError[] = [...mcpLoad.errors, ...settingsMcp.errors];
 	const mcpConfig: Record<string, McpServerConfig> = { ...mcpLoad.servers, ...settingsMcp.servers };
 	const projectMcpServerNames = loadProjectMcpServerNames(cwd);
-	const approvedProjectMcpServers = loadApprovedMcpServers(cwd, home);
+	const approvalStatus = loadApprovedMcpServersWithStatus(cwd, home);
+	const approvedProjectMcpServers = approvalStatus.approved;
+	// A damaged store reads as "nothing was ever approved", which holds every
+	// project server back. Said at startup and repeated by /mcp, because the
+	// pending list alone would look like the approvals were simply never given.
+	if (approvalStatus.warning) sayNotice(`Warning: ${approvalStatus.warning}`);
 	const approvedMcpServers = new Set(
 		Object.keys(mcpConfig).filter(
 			(name) =>
@@ -1345,19 +1450,24 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * already tells the user it was remembered. The options are otherwise the
 	 * same as the startup build, so only the memory section differs.
 	 */
-	const buildPrompt = (currentMemory: string) =>
-		buildSystemPrompt(allTools, {
+	const buildPrompt = (currentMemory: string) => {
+		// The style files are loaded through the same trust gate as the rest of
+		// the project tier; `settings.outputStyle` is what selects one, and an
+		// unset or unknown name contributes nothing (`output-styles.ts`). The
+		// notes ride through `sayNotice`: a style that exists and cannot be read
+		// is why the selected name produced no section.
+		const styles = loadOutputStylesWithNotes(cwd, home);
+		for (const note of styles.notes) sayNotice(`Output style: ${note}`);
+		return buildSystemPrompt(allTools, {
 			cwd,
 			platform: process.platform,
 			isTTY: true,
 			memory: currentMemory,
 			language: settings.language,
-			// The style files are loaded through the same trust gate as the rest of
-			// the project tier; `settings.outputStyle` is what selects one, and an
-			// unset or unknown name contributes nothing (`output-styles.ts`).
-			outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
+			outputStyle: resolveOutputStyle(settings.outputStyle, styles.styles)?.content,
 			skills: skillsBlock,
 		});
+	};
 	const systemPrompt = buildPrompt(memoryText);
 
 	/**
@@ -1368,7 +1478,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * recorded none of this until the seam existed. Its two mutation notes run
 	 * before the user's own hooks below, for the reason stated at each note.
 	 */
-	const ledger = createToolLedger({ store: () => store, readFile: readFileOrNull });
+	const ledger = createToolLedger({
+		store: () => store,
+		readFile: readFileOrNull,
+		// One line the first time each distinct write fails: the snapshot is what
+		// /rewind restores from, and a hole in the ledger should not have to wait
+		// for a failed restore to be noticed. Repeats are deduplicated inside the
+		// ledger, so a full disk is one warning rather than one per tool call.
+		onWarning: (failure) => sayNotice(formatLedgerFailureNotice(failure)),
+	});
 
 	/**
 	 * Named so a hot-swap can hand the SAME deps object to the next session.
@@ -1495,6 +1613,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if (!seat) return { action: "ok" };
 			return budgetVerdict(costTracker.sessionState.totalCostUSD, seat);
 		},
+		// The line under `Error:` when a run ends on a classified provider
+		// failure. Named here rather than in the agent because every sentence it
+		// returns ends in a command this app dispatches.
+		errorRemedy,
 		hooks: {
 			composeUserMessage: (text) => {
 				// Hook-contributed context drains on the message it belongs to, at the
@@ -1722,7 +1844,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * rules, which is the safe direction.
 	 */
 	async function hotSwapSession(summary: SessionSummary): Promise<void> {
-		const loaded = loadSessionForResume(summary.path);
+		let loaded: ReturnType<typeof loadSessionForResume> = null;
+		try {
+			loaded = loadSessionForResume(summary.path);
+		} catch (error) {
+			// A row the picker listed can still fail to open. The swap is the
+			// moment that matters, and staying in the current conversation with
+			// the reason on screen is the recoverable answer — the alternative is
+			// a rejected command handler and a screen that says nothing.
+			if (!(error instanceof SessionReadError)) throw error;
+			pushInfo(handle, error.message);
+			return;
+		}
 		if (!loaded || !handle) {
 			pushInfo(handle, `Could not load session ${summary.sessionId}`);
 			return;
@@ -2147,10 +2280,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				pushInfo(handle, `Could not remember: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		},
+		// Esc while a command owns the work — a manual `/compact` is a full-prefix
+		// request and the only registry command that answers the key. Asked before
+		// the session by the REPL, so the press stops what is actually in flight.
+		onCancelCommand: cancelCommand,
 		onCommand: (text) =>
 			handleCommandDispatch(text, {
 				getSession: () => sessionRef,
 				handle,
+				beginCommand,
 				backgroundShells,
 				// The shells the ledger recovered: `/ps` lists them beside this run's,
 				// and `/stop` ends one by pid. Re-observed per command — a shell seen
@@ -2216,9 +2354,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				onMcpToolsChanged,
 				mcpConfig,
 				mcpLoadErrors,
+				mcpApprovalWarning: approvalStatus.warning,
 				pendingMcpApprovals,
 				sessionStore: () => store,
 				taskSnapshot: () => taskStore.snapshot(),
+				// `/rewind`'s empty state reads these: "No checkpoints yet" is a
+				// true answer only when no write failed. A failed one turns the
+				// same screen into the reason there is nothing to restore.
+				checkpointFailures: () => ledger.failures(),
 				loadedSettings,
 				theme: resolvedTheme,
 				refreshContextInfo,
@@ -2278,12 +2421,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	}
 	// Held-back skill folders, one line each: the same "a definition that was not
 	// loaded looks identical from the prompt" reason as the withheld tier above.
-	for (const note of skillNotes) pushInfo(handle, `Skill not loaded: ${note}`);
+	for (const note of skillNotes) sayNotice(`Skill not loaded: ${note}`);
 
 	// MCP config that could not be read, said at startup for the same reason: a
 	// `.mcp.json` with a typo used to read as "no servers configured", and the
 	// server it defined simply never arrived with nothing on screen to say why.
 	for (const error of mcpLoadErrors) pushInfo(handle, `MCP config: ${error.path} — ${error.message}`);
+
+	// Everything found before the screen existed: settings diagnostics, memory
+	// and style files that could not be read, the approval store, and any ledger
+	// warning from a session restored into. Flushed through `sayNotice`, so a
+	// line that survived two readers is shown once.
+	for (const line of startupNotices.splice(0)) sayNotice(line);
 
 	// A model the machine cannot run fails its first prompt — and that failure
 	// is where the story ends unless someone says so first. One line, before
@@ -2904,6 +3053,22 @@ interface AppCommandContext {
 	home?: string;
 	costTracker: CostTracker;
 	/**
+	 * The ledger writes that failed this session, if any.
+	 *
+	 * Optional because a context assembled by hand has no ledger behind it, and
+	 * `/rewind` must answer there as it always did. Supplied by `runInteractive`
+	 * from the live tool ledger.
+	 */
+	checkpointFailures?(): readonly LedgerFailure[];
+	/**
+	 * Opens a command's own run, when the host keeps an abort controller for it.
+	 *
+	 * The returned signal reaches `LocalCommandContext.signal`; `done` is called
+	 * once the command settles, however it does. Optional because a hand-built
+	 * context has no one to press Esc and nothing to cancel.
+	 */
+	beginCommand?(cancellable: boolean): { signal: AbortSignal; done(): void };
+	/**
 	 * Cache diagnostics, when this session tracks them.
 	 *
 	 * Optional because a context assembled by hand — a test, an embedder that
@@ -3050,6 +3215,12 @@ interface AppCommandContext {
 	mcpConfig: Record<string, McpServerConfig>;
 	/** Config files (and `settings.json` entries) that could not be read, for /mcp to name. */
 	mcpLoadErrors: McpConfigError[];
+	/**
+	 * Why the approval store answered nothing, when it did. `/mcp` repeats it
+	 * beside the pending list: a damaged store holds every project server back,
+	 * and without the line the list would read as approvals nobody ever gave.
+	 */
+	mcpApprovalWarning?: string;
 	pendingMcpApprovals: string[];
 	sessionStore(): SessionStore | undefined;
 	/**
@@ -3121,8 +3292,15 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			void session.prompt(expandPromptCommand(ctx.commands, text) ?? text);
 			return true;
 		}
+		// The command's own run, around the call and nothing else: what Esc
+		// cancels is the work, not the dispatch. A command that declares itself
+		// cancellable is the only one the REPL routes Esc to (see `cancellable`
+		// on `LocalCommand`), so a press never vanishes into a command that does
+		// not read its signal.
+		const run = ctx.beginCommand?.(command.type === "local" && command.cancellable === true);
 		const localCtx: LocalCommandContext = {
 			session,
+			signal: run?.signal,
 			compaction: ctx.compaction(),
 			preCompact: async (trigger, customInstructions) =>
 				(await ctx.preCompact?.(trigger, customInstructions)) ?? { blocked: false },
@@ -3146,7 +3324,8 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 				// Fire-and-forget, but not silent: a command that throws is the user's
 				// only signal that what they asked for did not happen.
 				pushInfo(ctx.handle, `/${command.name} failed: ${error instanceof Error ? error.message : error}`);
-			});
+			})
+			.finally(() => run?.done());
 		return true;
 	}
 
@@ -4183,7 +4362,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				return true;
 			}
 
-			if (ctx.mcpConnections.length === 0 && ctx.pendingMcpApprovals.length === 0 && ctx.mcpLoadErrors.length === 0) {
+			if (
+				ctx.mcpConnections.length === 0 &&
+				ctx.pendingMcpApprovals.length === 0 &&
+				ctx.mcpLoadErrors.length === 0 &&
+				!ctx.mcpApprovalWarning
+			) {
 				pushInfo(ctx.handle, "No MCP servers configured (.mcp.json, settings.json, or ~/.labunbun/.mcp.json).");
 				return true;
 			}
@@ -4202,6 +4386,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			for (const error of ctx.mcpLoadErrors) {
 				lines.push(`  ! ${error.path}: ${error.message}`);
 			}
+			// Same reasoning for a damaged approval store: every project server
+			// then waits in the pending list, which looks like approvals the user
+			// never gave unless the store's failure is named next to them.
+			if (ctx.mcpApprovalWarning) lines.push(`  ! ${ctx.mcpApprovalWarning}`);
 			if (ctx.mcpConnections.length > 0) {
 				lines.push("Read one's prompts or resources: /mcp prompts <server>, /mcp resources <server>");
 			}
@@ -4456,11 +4644,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			}
 			const { checkpoints, unreadable } = listCheckpoints(rewindStore);
 			if (checkpoints.length === 0) {
+				// "No checkpoints yet" and "the checkpoint could not be written" are
+				// different screens. The second one has a next move — free the disk,
+				// fix the permission — and the failure line is where it is named.
+				const failures = ctx.checkpointFailures?.() ?? [];
+				const lastFailure = failures[failures.length - 1];
 				pushInfo(
 					ctx.handle,
-					unreadable > 0
+					(unreadable > 0
 						? `${unreadable} checkpoint ${unreadable === 1 ? "entry" : "entries"} in this session cannot be read — nothing to restore.`
-						: "No checkpoints yet — one is captured before every Edit/Write. A file that cannot be read, or is over 200k characters, is not captured.",
+						: "No checkpoints yet — one is captured before every Edit/Write. A file that cannot be read, or is over 200k characters, is not captured.") +
+						(lastFailure ? ` The last checkpoint write failed: ${lastFailure.message}.` : ""),
 				);
 				return true;
 			}

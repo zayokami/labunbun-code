@@ -2047,4 +2047,40 @@ describe("an interrupted compaction", () => {
 		expect(store.compactions()).toHaveLength(0);
 		expect(manager.lastVerification()).toBeUndefined();
 	});
+
+	test("a cancel after the summary is in hand is not committed", async () => {
+		// The summary arrived whole; the cancel landed while the pass was rebuilding
+		// the transcript it replaces. The commit is the point of no return, so the
+		// check sits immediately before it: a boundary the user stopped must not
+		// reach the file, and nothing after that check may suspend.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-compact-")),
+			mkdtempSync(join(tmpdir(), "lbb-compact-home-")),
+		);
+		const controller = new AbortController();
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Primary Request: x</summary>", usage: { input: 10, output: 10 } }])
+				.streamFn,
+			summarizerModel: SUMMARIZER,
+			store,
+			// `resuming` is the last phase before the record is appended, and the
+			// abort fires here rather than mid-stream so the summary itself is whole.
+			onPhase: async (phase) => {
+				if (phase.kind === "resuming") controller.abort();
+			},
+		});
+		const messages: AgentMessage[] = [
+			userMessage("do the thing"),
+			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+		];
+		for (const message of messages) store.appendMessage(message);
+
+		await expect(
+			manager.compact({ systemPrompt: "sys", messages }, { signal: controller.signal, trigger: "manual" }),
+		).rejects.toThrow("interrupted");
+		expect(store.compactions()).toHaveLength(0);
+		expect(manager.lastVerification()).toBeUndefined();
+		// And it is still a cancel, not a failure: the breaker keeps its count.
+		expect(manager.isTripped).toBe(false);
+	});
 });

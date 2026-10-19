@@ -985,20 +985,62 @@ function approvalStorePath(cwd: string, home: string): string {
 	return join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
 }
 
+/** What reading the approval store produced, and why an empty answer is empty. */
+export interface McpApprovalStatus {
+	approved: Set<string>;
+	/**
+	 * Set when the store exists but could not be read or parsed. `approved` is
+	 * empty because the file's contents are unknown; the warning is the only
+	 * place the user can learn their earlier approvals are not in effect.
+	 */
+	warning?: string;
+}
+
+/**
+ * The approval store with the reason an empty answer is empty.
+ *
+ * The read path deliberately does not move a damaged file aside: reading is
+ * what every startup does, and a startup that renames the user's file would
+ * turn a transient read failure into permanent loss. The move belongs to the
+ * write path ({@link approveMcpServer}), where a fresh record is about to
+ * replace the old one anyway.
+ */
+export function loadApprovedMcpServersWithStatus(cwd: string, home: string = homedir()): McpApprovalStatus {
+	const path = approvalStorePath(cwd, home);
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		// No store is the ordinary state of a project nobody approved anything in.
+		if (code === "ENOENT" || code === "ENOTDIR") return { approved: new Set() };
+		return {
+			approved: new Set(),
+			warning: `MCP approval store ${path} could not be read (${error instanceof Error ? error.message : String(error)}); earlier approvals are not in effect until re-approved.`,
+		};
+	}
+	try {
+		const parsed = JSON.parse(text) as { approvedMcpServers?: string[] };
+		return { approved: new Set(parsed.approvedMcpServers ?? []) };
+	} catch (error) {
+		return {
+			approved: new Set(),
+			warning: `MCP approval store ${path} is damaged (${error instanceof Error ? error.message : String(error)}); earlier approvals are not in effect until re-approved.`,
+		};
+	}
+}
+
 /**
  * Project-scoped MCP servers explicitly approved by the user. Stored outside
  * the working tree (see {@link approvalStorePath}) so a cloned repo can't
  * pre-approve its own servers. `home` is injectable for tests.
+ *
+ * Callers with a place to say a damaged store exists use
+ * {@link loadApprovedMcpServersWithStatus}; this wrapper answers the set alone
+ * for the call sites that just need it.
  */
 export function loadApprovedMcpServers(cwd: string, home: string = homedir()): Set<string> {
-	const path = approvalStorePath(cwd, home);
-	try {
-		if (!existsSync(path)) return new Set();
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as { approvedMcpServers?: string[] };
-		return new Set(parsed.approvedMcpServers ?? []);
-	} catch {
-		return new Set();
-	}
+	return loadApprovedMcpServersWithStatus(cwd, home).approved;
 }
 
 /**

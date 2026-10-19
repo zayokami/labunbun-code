@@ -1,7 +1,7 @@
 // Settings hierarchy (later overrides earlier): user, project, local, policy and flag.
 // Long-form design notes: docs/dev/migration-framework.md
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -19,6 +19,7 @@ import {
 	type SandboxMode,
 } from "@labunbun/agent";
 import { registerOpenAICompatibleProvider, setPricingOverride, THINKING_LEVELS } from "@labunbun/ai";
+import { isMissingPathError } from "@labunbun/tools";
 import { z } from "zod";
 import { stripBom } from "./json-text.ts";
 
@@ -404,6 +405,21 @@ export interface IgnoredSettingsKey {
 	key: string;
 }
 
+/**
+ * One thing a settings file did wrong.
+ *
+ * The loader used to report a broken file by `console.error`, which is invisible
+ * in a TUI and easy to miss in a script. The finding travels with the load now,
+ * and each host decides where its user will read it.
+ */
+export interface SettingsDiagnostic {
+	source: SettingsSourceName;
+	/** The file the finding is about; `--settings` for the flag tier. */
+	path: string;
+	kind: "unreadable" | "invalid-json" | "invalid-shape" | "unknown-key";
+	message: string;
+}
+
 export interface LoadedSettings {
 	settings: Settings;
 	/** Which sources contributed (for /permissions display). */
@@ -416,6 +432,8 @@ export interface LoadedSettings {
 	perSource: Partial<Record<SettingsSourceName, Settings>>;
 	/** Keys dropped from project/local files by {@link stripUntrustedKeys}. */
 	ignoredKeys: IgnoredSettingsKey[];
+	/** Files that could not be read, parsed, or validated — see {@link SettingsDiagnostic}. */
+	diagnostics: SettingsDiagnostic[];
 }
 
 // Long-form design notes: docs/dev/migration-framework.md
@@ -606,17 +624,80 @@ function settingsPath(source: SettingsSourceName, cwd: string, home: string): st
 	}
 }
 
-function readJsonFile(path: string): unknown {
-	if (!existsSync(path)) return undefined;
+/** What reading one tier's file produced. */
+type JsonFileRead =
+	| { kind: "missing" }
+	| { kind: "ok"; value: unknown }
+	| { kind: "failed"; diagnostic: Pick<SettingsDiagnostic, "kind" | "message"> };
+
+function readJsonFile(path: string): JsonFileRead {
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (error) {
+		// Most tiers are absent on most machines, and absent is not a finding. A
+		// file that is there and could not be read is one the user should hear
+		// about: otherwise a permission error reads as "this tier was empty".
+		if (isMissingPathError(error)) return { kind: "missing" };
+		return {
+			kind: "failed",
+			diagnostic: { kind: "unreadable", message: `could not be read: ${messageOf(error)}` },
+		};
+	}
 	try {
 		// Read the same way everywhere settings are read: a byte-order mark from a
 		// Windows editor is not a parse error, and treating it as one drops a
 		// whole tier of settings without the user ever learning why.
-		return JSON.parse(stripBom(readFileSync(path, "utf8")));
+		return { kind: "ok", value: JSON.parse(stripBom(text)) };
 	} catch (error) {
-		console.error(`Warning: failed to parse ${path}: ${error instanceof Error ? error.message : error}`);
-		return undefined;
+		return {
+			kind: "failed",
+			diagnostic: { kind: "invalid-json", message: `is not valid JSON: ${messageOf(error)}` },
+		};
 	}
+}
+
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** The first problem zod found, and the count of the ones behind it. */
+function issueSummary(error: z.ZodError): string {
+	const [first, ...rest] = error.issues;
+	const where = first && first.path.length > 0 ? `${first.path.join(".")}: ` : "";
+	const more = rest.length > 0 ? ` (and ${rest.length} more issue${rest.length === 1 ? "" : "s"})` : "";
+	return `${where}${first?.message ?? "no detail"}${more}`;
+}
+
+/** Top-level keys this release knows; a key outside the set is reported, not silently dropped by zod. */
+const KNOWN_SETTINGS_KEYS: ReadonlySet<string> = new Set(Object.keys(SettingsSchema.shape));
+
+function collectUnknownSettingsKeys(
+	out: SettingsDiagnostic[],
+	source: SettingsSourceName,
+	path: string,
+	data: unknown,
+): void {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) return;
+	for (const key of Object.keys(data)) {
+		if (KNOWN_SETTINGS_KEYS.has(key)) continue;
+		out.push({
+			source,
+			path,
+			kind: "unknown-key",
+			message: `sets an unknown key "${key}"; it was ignored`,
+		});
+	}
+}
+
+/**
+ * The startup lines a host prints for {@link LoadedSettings.diagnostics}.
+ *
+ * Deduplicated by content: the same file can produce the same sentence through
+ * two readers, and saying it twice would read as two broken files.
+ */
+export function formatSettingsDiagnostics(loaded: Pick<LoadedSettings, "diagnostics">): string[] {
+	return [...new Set(loaded.diagnostics.map((diagnostic) => `Settings ${diagnostic.path} ${diagnostic.message}`))];
 }
 
 /** Recursive merge: objects merge, arrays/scalars replace. Later wins. */
@@ -644,11 +725,18 @@ export function loadSettings(cwd: string, flagSettings?: RawSettingsInput, home:
 	const sources: Partial<Record<SettingsSourceName, string>> = {};
 	const perSource: Partial<Record<SettingsSourceName, Settings>> = {};
 	const ignoredKeys: IgnoredSettingsKey[] = [];
+	const diagnostics: SettingsDiagnostic[] = [];
 
 	for (const source of order) {
 		const path = settingsPath(source, cwd, home);
-		let data = readJsonFile(path);
-		if (data === undefined) continue;
+		const read = readJsonFile(path);
+		if (read.kind === "missing") continue;
+		if (read.kind === "failed") {
+			diagnostics.push({ source, path, ...read.diagnostic });
+			continue;
+		}
+		let data = read.value;
+		collectUnknownSettingsKeys(diagnostics, source, path, data);
 		// Project and local files travel with the repo; the other tiers are the
 		// user's own or managed by their org. Strip before merging so a dropped
 		// key can't win by tier order.
@@ -663,20 +751,45 @@ export function loadSettings(cwd: string, flagSettings?: RawSettingsInput, home:
 		// not take down rule attribution for the tiers that are well-formed.
 		const tierParsed = SettingsSchema.safeParse(data);
 		if (tierParsed.success) perSource[source] = tierParsed.data;
+		else
+			diagnostics.push({
+				source,
+				path,
+				kind: "invalid-shape",
+				message: `has invalid settings: ${issueSummary(tierParsed.error)}`,
+			});
 	}
 	if (flagSettings !== undefined) {
 		merged = mergeSettings(merged, flagSettings);
 		sources.flag = "--settings";
+		collectUnknownSettingsKeys(diagnostics, "flag", "--settings", flagSettings);
 		const flagParsed = SettingsSchema.safeParse(flagSettings);
 		if (flagParsed.success) perSource.flag = flagParsed.data;
+		else
+			diagnostics.push({
+				source: "flag",
+				path: "--settings",
+				kind: "invalid-shape",
+				message: `has invalid settings: ${issueSummary(flagParsed.error)}`,
+			});
 	}
 
 	const parsed = SettingsSchema.safeParse(merged);
 	if (!parsed.success) {
-		console.error(`Warning: invalid settings ignored: ${parsed.error.message}`);
-		return { settings: SettingsSchema.parse({}), sources, perSource, ignoredKeys };
+		// Fail closed, as before: a partially applied file is a session running
+		// settings nobody wrote. The difference is that the reason now survives
+		// the load; a broken file used to be a `console.error` in a TUI that
+		// never shows stderr, which is the same as saying nothing.
+		const culprit = diagnostics.find((diagnostic) => diagnostic.kind === "invalid-shape");
+		diagnostics.push({
+			source: culprit?.source ?? "user",
+			path: culprit?.path ?? "(merged settings)",
+			kind: "invalid-shape",
+			message: `has invalid settings, so the defaults are in effect: ${issueSummary(parsed.error)}`,
+		});
+		return { settings: SettingsSchema.parse({}), sources, perSource, ignoredKeys, diagnostics };
 	}
-	return { settings: parsed.data, sources, perSource, ignoredKeys };
+	return { settings: parsed.data, sources, perSource, ignoredKeys, diagnostics };
 }
 
 /** Rule tier each settings file maps to, for precedence and attribution. */

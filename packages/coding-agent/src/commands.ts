@@ -72,10 +72,27 @@ export interface LocalCommandContext {
 	 * hand — a test, an embedder — may have no tool set behind it.
 	 */
 	clearReads?(): void;
+	/**
+	 * The abort signal of the command's own run, when the host keeps one.
+	 *
+	 * `/compact` is a full-prefix model call and may take half a minute; a host
+	 * that lets Esc cancel it passes the signal here, and the command reports a
+	 * cancel instead of a failure. Absent for a hand-built context (a test, an
+	 * embedder), where there is no one to press anything.
+	 */
+	signal?: AbortSignal;
 }
 
 export interface LocalCommand extends CommandBase {
 	type: "local";
+	/**
+	 * Whether the command watches `ctx.signal` and can be stopped with Esc.
+	 *
+	 * Declared rather than guessed: a host that routes Esc to running commands
+	 * has to know which ones actually observe the abort, or a press would be
+	 * swallowed by a command that never looks at its signal.
+	 */
+	cancellable?: true;
 	call(ctx: LocalCommandContext, args: string): Promise<string | undefined> | string | undefined;
 }
 
@@ -132,6 +149,8 @@ export function builtInCommands(): Command[] {
 			name: "compact",
 			description: "Summarize the conversation to free context; optional focus instructions",
 			type: "local",
+			// The summary is a full-prefix model call; Esc must be able to stop it.
+			cancellable: true,
 			call: async (ctx, args) => {
 				if (!ctx.compaction) return "Compaction is not available in this session.";
 				// The same veto the automatic pass honors, asked here because this
@@ -144,7 +163,18 @@ export function builtInCommands(): Command[] {
 				ctx.pushInfo("Compacting conversation…");
 				const context = ctx.session.currentContext();
 				const before = estimateContextUsage(context);
-				const compacted = await ctx.compaction.compact(context, { trigger: "manual", focus: args });
+				let compacted: Awaited<ReturnType<CompactionManager["compact"]>>;
+				try {
+					compacted = await ctx.compaction.compact(context, { trigger: "manual", focus: args, signal: ctx.signal });
+				} catch (error) {
+					// A cancel is the user's own Esc, not a failed summary: the manager
+					// already skipped its failure counter for it, and the command owes
+					// the user the outcome rather than an error line.
+					if (ctx.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+						return "Compaction cancelled.";
+					}
+					throw error;
+				}
 				// The summary replaces everything above the boundary, so the next
 				// request is a miss from there down. Declared, because the user asked.
 				ctx.noteCacheRewrite?.("compaction");

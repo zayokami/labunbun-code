@@ -26,8 +26,10 @@ import {
 	createToolLedger,
 	FAILED_TESTS_MAX,
 	failedTestsFromTestOutput,
+	formatLedgerFailureNotice,
 	formatResumeSummary,
 	INPUT_SUMMARY_MAX_CHARS,
+	type LedgerFailure,
 	latestTestFailures,
 	looksLikeTestRun,
 	nextStepFromTasks,
@@ -687,6 +689,67 @@ describe("the ledger writer", () => {
 			ledger.noteBeforeMutation("Write", { file_path: "/tmp/never" });
 			ledger.noteAfterMutation("Write", { file_path: "/tmp/never" }, false);
 		}).not.toThrow();
+	});
+
+	test("two failed writes are reported apart, and a repeating one is said once", () => {
+		// A refusing disk refuses every append with the same words. What the user
+		// needs is the fact of the failure and which of the two halves of the
+		// ledger is missing — the /rewind snapshot or the call's entry — not one
+		// line per call. Both halves fail here, on two calls, into one report each.
+		const announced: LedgerFailure[] = [];
+		const store = {
+			appendCustom: () => {
+				throw new Error("ENOSPC: no space left on device");
+			},
+			linearEntries: () => [] as SessionEntry[],
+		} as unknown as SessionStore;
+		const ledger = createToolLedger({
+			store: () => store,
+			readFile: () => null,
+			onWarning: (failure) => announced.push(failure),
+		});
+		const target = join(scratch("lbb-cplog-fail-"), "notes.txt");
+		writeFileSync(target, "before", "utf8");
+
+		ledger.noteBeforeMutation("Edit", { file_path: target });
+		ledger.noteToolStart("c1", { file_path: target, old_string: "before", new_string: "after" });
+		ledger.noteToolEnd(endedCall("c1", "Edit", "edited", false));
+		ledger.noteBeforeMutation("Write", { file_path: target });
+		ledger.noteToolStart("c2", { file_path: target, content: "x" });
+		ledger.noteToolEnd(endedCall("c2", "Write", "written", false));
+
+		const expected: LedgerFailure[] = [
+			{ operation: "checkpoint", path: target, message: "ENOSPC: no space left on device" },
+			{ operation: "entry", message: "ENOSPC: no space left on device" },
+		];
+		expect(ledger.failures()).toEqual(expected);
+		expect(announced).toEqual(expected);
+		// The turn ran: a refused snapshot costs the rewind, not the Edit.
+		expect(() => ledger.noteAfterMutation("Edit", { file_path: target }, false)).not.toThrow();
+	});
+
+	test("a path that is not there yet is not a failed snapshot", () => {
+		// Every Write creates its file, so the before side of one is missing on
+		// every first write. Only a refusal, an I/O fault, or a file read as a
+		// non-file is a snapshot that should have happened and did not.
+		const store = {
+			appendCustom: () => {
+				throw new Error("ENOSPC: no space left on device");
+			},
+			linearEntries: () => [] as SessionEntry[],
+		} as unknown as SessionStore;
+		const ledger = createToolLedger({ store: () => store, readFile: () => null });
+		ledger.noteBeforeMutation("Write", { file_path: join(scratch("lbb-cplog-missing-"), "never-created.txt") });
+		expect(ledger.failures()).toEqual([]);
+	});
+
+	test("the notice says which half of the ledger is gone, and where", () => {
+		expect(formatLedgerFailureNotice({ operation: "checkpoint", path: "/w/notes.txt", message: "disk full" })).toBe(
+			"Warning: could not save the checkpoint for /w/notes.txt: disk full",
+		);
+		expect(formatLedgerFailureNotice({ operation: "entry", message: "disk full" })).toBe(
+			"Warning: could not save the tool checkpoint: disk full",
+		);
 	});
 
 	test("an Edit leaves the fingerprints, the rewind payload, and the entry", () => {

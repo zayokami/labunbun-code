@@ -18,6 +18,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isMissingPathError } from "@labunbun/tools";
 import type { Command, PromptCommand } from "./commands.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
 
@@ -61,7 +62,6 @@ function skillNameProblem(dir: string, data: Record<string, string>): string | n
 
 function loadSkillsFromDir(skillsRoot: string, notes: string[]): Skill[] {
 	const out: Skill[] = [];
-	if (!existsSync(skillsRoot)) return out;
 	try {
 		for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
 			if (!entry.isDirectory()) continue;
@@ -93,8 +93,15 @@ function loadSkillsFromDir(skillsRoot: string, notes: string[]): Skill[] {
 				notes.push(`skill "${entry.name}" not loaded: SKILL.md could not be read`);
 			}
 		}
-	} catch {
-		return out;
+	} catch (error) {
+		// A root that is not there is every machine that has not written skills.
+		// One that exists and cannot be listed means every skill under it is
+		// missing from the prompt, which used to look exactly like none existing.
+		if (!isMissingPathError(error)) {
+			notes.push(
+				`skills directory ${skillsRoot} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 	return out;
 }

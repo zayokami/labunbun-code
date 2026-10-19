@@ -14,10 +14,12 @@ import {
 	collectReadOnlyToolNames,
 	evaluatePermissions,
 	formatRetryNotice,
+	SessionReadError,
 	SessionStore,
 } from "@labunbun/agent";
 import {
 	type AgentMessage,
+	type AssistantMessage,
 	type CacheTracker,
 	cacheTotals,
 	createTrackedStreamFn,
@@ -31,7 +33,7 @@ import {
 import {
 	connectAllMcpServers,
 	disconnectAllMcpServers,
-	loadApprovedMcpServers,
+	loadApprovedMcpServersWithStatus,
 	loadMcpConfig,
 	loadProjectMcpServerNames,
 	type McpServerConfig,
@@ -49,7 +51,12 @@ import {
 	TaskStore,
 } from "@labunbun/tools";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
-import { createToolLedger, formatResumeSummary, readToolCheckpoints } from "./checkpoint-log.ts";
+import {
+	createToolLedger,
+	formatLedgerFailureNotice,
+	formatResumeSummary,
+	readToolCheckpoints,
+} from "./checkpoint-log.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import {
@@ -60,6 +67,7 @@ import {
 	resolveCompactionSummarizer,
 } from "./compaction-wiring.ts";
 import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
+import { errorRemedy } from "./error-remedy.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles, withheldProjectMemoryFiles } from "./memory.ts";
@@ -73,7 +81,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
-import { loadOutputStyles, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
+import { loadOutputStylesWithNotes, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
 import { enclosingRepositoryRoot, withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	damagedSessionNotice,
@@ -87,6 +95,7 @@ import {
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
+	formatSettingsDiagnostics,
 	loadSettings,
 	networkAxisFrom,
 	type RawSettingsInput,
@@ -166,6 +175,12 @@ export interface HeadlessOptions {
 interface JsonResult {
 	type: "result";
 	subtype: "success" | "error_max_turns" | "error_during_execution" | "error_aborted";
+	/** The provider classification, when the run ended on a classified failure. */
+	error_kind?: AssistantMessage["errorKind"];
+	/** What to do about {@link error_kind}, in the app's own commands. */
+	error_remedy?: string;
+	/** Whether the reported `result` is the partial text of an interrupted turn. */
+	incomplete: boolean;
 	cost_usd: number;
 	/** The part of `cost_usd` subagent runs spent, so a script can attribute it. */
 	subagent_cost_usd: number;
@@ -219,6 +234,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const { settings } = loadedSettings;
 	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
 	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
+	// stderr, like every other startup notice here: stdout is the answer, and a
+	// settings file that did not apply must not change what the answer is.
+	for (const line of formatSettingsDiagnostics(loadedSettings)) console.error(`Warning: ${line}`);
 	// Before the model is resolved, unlike in the REPL: a provider, or a price,
 	// that lives in settings has to be registered for the reference below to
 	// resolve at all — and the price is what the reported cost is computed from.
@@ -352,29 +370,51 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			console.error(`Session not found: ${resumeId}`);
 			return 1;
 		}
-		const loaded = loadSessionForResume(match.path);
+		let loaded: ReturnType<typeof loadSessionForResume> = null;
+		let readFailure: SessionReadError | undefined;
+		try {
+			loaded = loadSessionForResume(match.path);
+		} catch (error) {
+			// One line on stderr, then a new session: a scripted run has nobody to
+			// prompt, and exiting would turn a damaged file into a failed batch job.
+			if (!(error instanceof SessionReadError)) throw error;
+			readFailure = error;
+		}
 		if (loaded) {
 			store = loaded.store;
 			const damage = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
 			if (damage) console.error(`Warning: ${damage}`);
 			resumedMessages = loaded.messages;
+		} else if (readFailure) {
+			console.error(`${readFailure.message} — starting a new one.`);
+			store = SessionStore.startNew(cwd, home);
 		} else {
 			console.error(`Could not read session ${resumeId} — starting a new one.`);
 			store = SessionStore.startNew(cwd, home);
 		}
 	} else if (options.continueLast) {
 		const target = resolveContinueTarget(cwd, home);
+		let readFailure: SessionReadError | undefined;
 		if (target) {
-			const loaded = loadSessionForResume(target.path);
-			store = loaded?.store;
-			if (loaded) {
-				const damage = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
-				if (damage) console.error(`Warning: ${damage}`);
-				resumedMessages = loaded.messages;
+			try {
+				const loaded = loadSessionForResume(target.path);
+				store = loaded?.store;
+				if (loaded) {
+					const damage = damagedSessionNotice(loaded.store, loaded.removed, loaded.synthesized);
+					if (damage) console.error(`Warning: ${damage}`);
+					resumedMessages = loaded.messages;
+				}
+			} catch (error) {
+				if (!(error instanceof SessionReadError)) throw error;
+				readFailure = error;
 			}
 		}
 		if (!store) {
-			console.error("No previous session to continue — starting a new one.");
+			console.error(
+				readFailure
+					? `${readFailure.message} — starting a new one.`
+					: "No previous session to continue — starting a new one.",
+			);
 			store = SessionStore.startNew(cwd, home);
 		}
 	} else {
@@ -518,6 +558,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// two modes — which is the kind of difference nobody notices until they trust
 	// a nightly job to do what they just did by hand.
 	const memory = loadMemoryFiles(cwd, home);
+	// Files that are present and unreadable contribute nothing to the prompt;
+	// the line is the only way a scripted run can learn its instructions are
+	// missing rather than absent.
+	for (const warning of memory.warnings) console.error(`Memory: ${warning}`);
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
 	// Built once and shared by the session prompt and every subagent's context
 	// block, so both are matching the same discovery snapshot.
@@ -569,7 +613,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		console.error(`Warning: MCP config: ${error.path} — ${error.message}`);
 	}
 	const projectMcpServerNames = loadProjectMcpServerNames(cwd);
-	const approvedProjectMcpServers = loadApprovedMcpServers(cwd, home);
+	const approvalStatus = loadApprovedMcpServersWithStatus(cwd, home);
+	const approvedProjectMcpServers = approvalStatus.approved;
+	if (approvalStatus.warning) console.error(`Warning: ${approvalStatus.warning}`);
 	const runnableMcpServers: Record<string, McpServerConfig> = {};
 	const withheldMcpServers: string[] = [];
 	for (const [name, config] of Object.entries(mcpConfig)) {
@@ -761,9 +807,18 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// tests a failed test run reported, and the next step the board states.
 	// Before this, a `-p` run left none of it — the events below existed and
 	// nothing at this end read them.
-	const ledger = createToolLedger({ store: () => store, readFile: readFileOrNull });
+	const ledger = createToolLedger({
+		store: () => store,
+		readFile: readFileOrNull,
+		// A scripted run has no transcript to put a warning in, and a checkpoint
+		// that did not land should not be inferred from a later failed /rewind:
+		// the line goes out when the write fails.
+		onWarning: (failure) => console.error(formatLedgerFailureNotice(failure)),
+	});
 	const hookDeps = sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd });
 
+	const outputStyles = loadOutputStylesWithNotes(cwd, home);
+	for (const note of outputStyles.notes) console.error(`Output style: ${note}`);
 	// Annotated because `checkBudget` below reads this very session's messages:
 	// without the annotation the type would be inferred from its own initializer.
 	const session: AgentSession = new AgentSession({
@@ -774,7 +829,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			isTTY: process.stdout.isTTY ?? false,
 			memory: memory.content,
 			language: settings.language,
-			outputStyle: resolveOutputStyle(settings.outputStyle, loadOutputStyles(cwd, home))?.content,
+			outputStyle: resolveOutputStyle(settings.outputStyle, outputStyles.styles)?.content,
 			skills: skillsBlock,
 		}),
 		tools: allTools,
@@ -804,6 +859,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 				const spent = costStateFromMessages(session.messages).totalCostUSD + subagentUsage.state.totalCostUSD;
 				return budgetVerdict(spent, seat);
 			},
+			// The line printed under the error when a run ends on a classified
+			// provider failure — the same sentence the REPL shows. A scripted run
+			// has no one to ask, so the advice is the whole recovery.
+			errorRemedy,
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 			// Headless has no interactive dialog, so an unresolved "ask" fails
 			// closed rather than hanging: there is nobody to ask, and waiting
@@ -863,6 +922,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	 * provider said when it refused — which is the symptom, not the explanation.
 	 */
 	let endErrorMessage: string | undefined;
+	// The classification and the host's suggestion, carried on the same event.
+	// Reported in the machine-readable formats so a script can branch on the
+	// kind instead of matching provider prose.
+	let endErrorKind: AssistantMessage["errorKind"];
+	let endErrorRemedy: string | undefined;
 
 	const emitStreamJson = (payload: Record<string, unknown>): void => {
 		process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -870,7 +934,22 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 
 	session.on((event: AgentEvent) => {
 		if (event.type === "turn_start") turns++;
-		if (event.type === "agent_end") endErrorMessage = event.errorMessage;
+		if (event.type === "agent_end") {
+			endErrorMessage = event.errorMessage;
+			endErrorKind = event.errorKind;
+			endErrorRemedy = event.errorRemedy;
+			// The dropped queue is counted, never quoted: this stream may be piped
+			// to a log, and the queued text is the user's, not the run's. The
+			// count is enough for a caller to know a message it sent was dropped.
+			const dropped = event.interrupted;
+			if (dropped) {
+				const parts = [
+					dropped.followUp.length > 0 ? `${dropped.followUp.length} queued message(s)` : "",
+					dropped.steering.length > 0 ? `${dropped.steering.length} steering message(s)` : "",
+				].filter(Boolean);
+				if (parts.length > 0) console.error(`[interrupted: dropped ${parts.join(" and ")}]`);
+			}
+		}
 
 		// The tool ledger, from the same two events the REPL's subscription
 		// feeds it. Nothing here touches stdout: the formats below own that.
@@ -883,6 +962,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// hang rather than a mistake.
 		if (event.type === "retry") {
 			process.stderr.write(`${formatRetryNotice(event)}\n`);
+		}
+		// A descent to another model is the answer changing author; a run that
+		// never said so was a run whose output could not be attributed. stderr,
+		// for the reason the retry line above is: it is not the answer.
+		if (event.type === "fallback") {
+			process.stderr.write(
+				`[model fallback] ${event.from.provider}/${event.from.id} → ${event.to.provider}/${event.to.id}: ${event.reason}\n`,
+			);
 		}
 
 		if (event.type === "message_update") {
@@ -981,7 +1068,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// happens to start with a slash) is sent as typed; the hook above saw the
 	// typed text either way.
 	const reason = await session.prompt(expandPromptCommand(commands, options.prompt) ?? options.prompt);
-	const finalText = finalAssistantText(session.messages);
+	const finalMessage = finalAssistant(session.messages);
+	const finalText = finalMessage ? assistantText(finalMessage) : "";
+	const finalIncomplete = finalMessage?.incomplete === true;
 	const usage = totalUsage(session.messages);
 
 	if (format === "json") {
@@ -995,6 +1084,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 						: reason === "aborted"
 							? "error_aborted"
 							: "error_during_execution",
+			// Absent rather than null when there is no classification: the two
+			// are the same fact, and a null would claim the provider said
+			// something the run did not record.
+			...(endErrorKind === undefined ? {} : { error_kind: endErrorKind }),
+			...(endErrorRemedy === undefined ? {} : { error_remedy: endErrorRemedy }),
+			// Whether `result` is the partial text a failure or an abort left
+			// behind. A caller writing this to a file needs to know before it is
+			// mistaken for a finished answer.
+			incomplete: finalIncomplete,
 			// Costed from the transcript's own usage records, against the prices the
 			// model resolves to — the same arithmetic `/cost` does, so a scripted run
 			// and an interactive one disagree about the bill only if the prices differ.
@@ -1019,6 +1117,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			cache: cacheResult(session.messages, transport.tracker),
 			duration_ms: Date.now() - startedAt,
 			session_id: store?.sessionId ?? null,
+			error_kind: endErrorKind,
+			error_remedy: endErrorRemedy,
+			incomplete: finalIncomplete,
 		});
 	} else {
 		// text mode already streamed; close cleanly
@@ -1028,8 +1129,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// first one can say what to do about a request that was never sent.
 			const errorMessage = endErrorMessage ?? findLastError(session.messages);
 			console.error(`[session ended: ${reason}${errorMessage ? ` — ${errorMessage}` : ""}]`);
+			// The next step, under the reason it addresses. Only for endings that
+			// carried one: a completed run has nothing to remedy.
+			if (endErrorRemedy) console.error(endErrorRemedy);
 		}
 	}
+	// A cancel is not a failure of the run's own making. Said once, in every
+	// format, beside the shared exit code: a caller reading 130 off a scripted
+	// run should not have to parse prose to learn a human stopped it.
+	if (reason === "aborted") console.error("Interrupted.");
 
 	if (store && format !== "text") {
 		console.error(`[session saved: ${store.path}]`);
@@ -1054,17 +1162,26 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	return reason === "completed" ? 0 : reason === "aborted" ? 130 : 1;
 }
 
-function finalAssistantText(messages: AgentMessage[]): string {
+/**
+ * The message whose text the result reports: the newest assistant turn that
+ * said anything. Returned rather than its text so the result can also carry
+ * whether that answer was cut short — the flag and the text must describe the
+ * same message, or a reader would mark the wrong one partial.
+ */
+function finalAssistant(messages: AgentMessage[]): AssistantMessage | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
 		if (m.role !== "assistant") continue;
-		const text = m.content
-			.filter((b) => b.type === "text")
-			.map((b) => b.text)
-			.join("");
-		if (text.trim()) return text;
+		if (assistantText(m).trim()) return m;
 	}
-	return "";
+	return undefined;
+}
+
+function assistantText(message: AssistantMessage): string {
+	return message.content
+		.filter((b) => b.type === "text")
+		.map((b) => b.text)
+		.join("");
 }
 
 function totalUsage(messages: AgentMessage[]): Record<string, number> {
@@ -1087,7 +1204,10 @@ function findLastError(messages: AgentMessage[]): string | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
 		if (m.role === "assistant" && m.errorMessage) return m.errorMessage;
-		if (m.role === "toolResult" && m.isError) {
+		// An interrupted result is an error on the wire — the pairing needs the
+		// flag — but it is the user's own Esc, not a failure worth reporting as
+		// the run's last error.
+		if (m.role === "toolResult" && m.isError && !m.interrupted) {
 			const text = m.content.find((b) => b.type === "text")?.text;
 			if (text) return text.slice(0, 200);
 		}
