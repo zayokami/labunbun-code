@@ -246,6 +246,9 @@ describe("/fork", () => {
 				role: "toolResult",
 				toolCallId: "t9",
 				toolName: "Read",
+				// A call with no recorded result was interrupted, not failed; the
+				// repair says so the same way the live loop does.
+				interrupted: true,
 				isError: true,
 				content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
 				timestamp: orphaned.timestamp,
