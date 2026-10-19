@@ -1,14 +1,14 @@
 # UX parity with Claude Code 2.1.289
 
-This note compares the interaction surface of LaBunbun Code with Claude Code 2.1.289. It records the four gaps that the 2026-10-19 wave closed, the parts that were already there, and the parts that this app will not build. Claude Code is proprietary. Every behavior here is a clean-room implementation from observed behavior. No source code and no prompt text moved between the two trees.
+This note compares the interaction surface of LaBunbun Code with Claude Code 2.1.289. It records the four gaps that the 2026-10-19 wave closed, the feedback the 2026-10-20 wave added, the parts that were already there, and the parts that this app will not build. Claude Code is proprietary. Every behavior here is a clean-room implementation from observed behavior. No source code and no prompt text moved between the two trees.
 
 ## What this wave added
 
 | Area | Claude Code 2.1.289 | LaBunbun Code now | Code |
 | --- | --- | --- | --- |
-| Approval diff | The permission question shows a unified diff. Word-level highlight is available. `Ctrl+O` expands the tool card, not the question. | `Edit` and `Write` questions show a unified diff. `Ctrl+A` swaps in the raw input and swaps back. Every other tool keeps its one-line preview. | `packages/tui/src/permission-diff.ts:63`, `packages/tui/src/components/PermissionDialog.tsx:176` |
+| Approval diff | The permission question shows a unified diff. Word-level highlight is available. `Ctrl+O` expands the tool card, not the question. | `Edit` and `Write` questions show a unified diff. `Ctrl+A` swaps in the raw input and swaps back. Every other tool keeps its one-line preview. | `packages/tui/src/permission-diff.ts:63`, `packages/tui/src/components/PermissionDialog.tsx:246` |
 | Picker search | The `Select` base has a search mode. `/model` opens in it. `/resume` filters as you type. | Every `ListPickerDialog` filters on label and description. `/resume` and the other lists share the same four match tiers. | `packages/tui/src/filter-rank.ts:34`, `packages/tui/src/components/ListPickerDialog.tsx:131` |
-| Session title | `/resume` offers `ctrl+r` rename. The name persists with the session. | `/rename <title>` writes a sidecar. The name replaces the directory name in the terminal title and becomes the `/resume` row label. | `packages/coding-agent/src/session-title.ts:19`, `packages/coding-agent/src/interactive.ts:3617` |
+| Session title | `/resume` offers `ctrl+r` rename. The name persists with the session. | `/rename <title>` writes a sidecar. The name replaces the directory name in the terminal title and becomes the `/resume` row label. | `packages/coding-agent/src/session-title.ts:19`, `packages/coding-agent/src/interactive.ts:3802` |
 | Session preview | `/resume` offers `space` preview for the highlighted session. | `Space` opens a preview of the highlighted session in `/resume`. `Esc` closes the panel first, then the list. | `packages/coding-agent/src/session-preview.ts:133`, `packages/tui/src/components/ListPickerDialog.tsx:310` |
 
 ### Approval diff
@@ -67,9 +67,27 @@ The question is whether a change is acceptable. A JSON input asks the reader to 
 | Permissions | Three modes, rule syntax, queue of pending questions, `Ctrl+A` raw input, subagent attribution |
 | Lists | Theme picker with live preview, model picker, mode picker, shell and subagent pickers |
 | Editing | Vim and Emacs engines, completion windows, prompt history |
+| Queued messages | `Tab` queues a message; `Enter` steers at the next tool when the turn can take mid-turn text and queues otherwise. Previews above the prompt name the mode, and Esc reports what it dropped (`packages/tui/src/components/QueuedMessages.tsx:34-61`). |
 | Terminal | Watch panel, `Ctrl+T`/`Ctrl+V`/`Alt+1..9`, DualShock 4 input |
 | Agent surface | Subagents, skills, MCP prompts and resources, output styles, memory tiers, hooks |
 | Other front ends | Headless text, JSON, and stream-JSON output; ACP editor sessions |
+
+## The feedback wave (2026-10-20)
+
+The failures this section covers are the ones the user could not see: a retry that looked like a hang, a fallback that changed the model silently, a partial answer that read as finished, a truncated result whose cut was invisible, and two dialogs that promised input they could not collect. The contracts behind the messages are in `error-handling.md`.
+
+| Area | What the user sees | Code |
+| --- | --- | --- |
+| Retry | The status row reads `retrying attempt N · Xs` while the ladder waits, and keeps the attempt word after the countdown reaches zero until the stream resumes. The durable `retrying…` notice stays in the transcript. | `packages/tui/src/components/StatusLine.tsx:232-240`, `packages/tui/src/ui-state.ts:511-517`, `packages/coding-agent/src/interactive.ts:1748-1749` |
+| Model fallback | A durable info line: `[model fallback] <provider>/<id> → <provider>/<id>: <reason>`. | `packages/tui/src/ui-state.ts:519-532` |
+| Partial answer | The answer ends with a warning-colored `(response ended early; output is partial)`. | `packages/tui/src/components/MessageList.tsx:41-48`, `packages/tui/src/ui-state.ts:583` |
+| Interrupted tool result | The result renders in the warning color with `(interrupted; output is partial)` and the label `interrupted`, not as a red failure. | `packages/tui/src/components/MessageList.tsx:239-243`, `:402-421`, `packages/tui/src/ui-state.ts:639-641` |
+| Truncation | A compact tool result ends with `… N more characters · Ctrl+O for transcript`; the transcript view says `(output capped at 16,000 characters)`. `Ctrl+O transcript` is in the key help. | `packages/tui/src/components/MessageList.tsx:367-404`, `packages/tui/src/components/REPL.tsx:117-118` |
+| Permission feedback | The fourth option opens a one-line field. Enter sends the sentence to the model as the denial reason; an empty field is a plain deny; Esc goes back to the list. A pad sends the plain deny, because it cannot type. | `packages/tui/src/components/PermissionDialog.tsx:104-115`, `:174-186`, `packages/tui/src/permission-options.ts:36-60`, `:165-170` |
+| Free-text answer | A single-select question gains `Other…`, which opens a field. Enter submits a non-empty answer; Esc returns to the options; an empty field does not submit. Multi-select has no `Other…`. | `packages/tui/src/components/QuestionDialog.tsx:47-51`, `:96-105`, `:155-168` |
+| Interrupt report | Esc says `[interrupted · N queued message(s) dropped · type a new message to continue]` and previews up to ten dropped messages. | `packages/tui/src/ui-state.ts:671-690`, `packages/agent/src/session.ts:290-300` |
+
+Esc keeps its order: a dialog owns the press first, then the editor (insert mode, an `@` list, a half-typed command), then a command that declared itself cancellable, and only then the session (`packages/tui/src/components/REPL.tsx:676-693`). That order is what makes `/compact` cancellable without making Esc mean two things at once.
 
 ## Deliberately not built
 
@@ -81,7 +99,6 @@ The question is whether a change is acceptable. A JSON input asks the reader to 
 | A keybinding JSON file | The key inventory is crowded, and the vim and Emacs engines already own large parts of it. A user map would need a conflict model before it needs a file. |
 | Function keys | Measured in this tree: ink 7.1.1 delivers no bindable F-key sequence. It sends an empty input or splits Escape from the tail. |
 | Conversation rewind | `/rewind` restores file content from checkpoints. Moving the conversation leaf backwards is `/tree` plus `/fork`, and it keeps the append-only file honest. A rewind that rewrote the leaf would make the file say something that did not happen. |
-| Queued user messages | A run owns the prompt until it ends. The queue that exists is the queue of permission questions, which are answers the run is waiting for, not new instructions. |
 | A startup trust dialog | Project trust here is `/agents approve`, and it gates memory files, agents, skills, and output styles. It does not gate tool calls: the permission rules and the sandbox do. A second dialog would ask the same question with a different answer. |
 
 ## Tests that hold these claims
@@ -90,3 +107,5 @@ The question is whether a change is acceptable. A JSON input asks the reader to 
 - `packages/tui/test/filter-rank.test.ts`, `packages/tui/test/list-picker.test.tsx`, and `packages/tui/test/prompt-input.test.tsx`: the four tiers, stable order, the 8-row window, the original-index contract, the Space rule, and the two-stage `Esc`.
 - `packages/coding-agent/test/session-title.test.ts`, `packages/coding-agent/test/rename-command.test.ts`, and `packages/tui/test/terminal-title.test.ts`: normalization, the atomic sidecar, the clear path, the `/resume` label, and the terminal title.
 - `packages/coding-agent/test/session-preview.test.ts` and the preview group in `packages/tui/test/list-picker.test.tsx`: the tail read, the parent chain, the caps and notices, the requester, and the stale-answer guard.
+- `packages/tui/test/status-battery.test.tsx`: the retry label counts down and keeps the attempt after the wait; `packages/tui/test/components.test.tsx` and `packages/tui/test/resume-replay.test.tsx`: the fallback line, the partial marker, the interrupted result, the truncation notes, and the dropped-message previews. `packages/tui/test/queued.test.tsx` holds the interrupt report against the queue state.
+- `packages/tui/test/permission-options.test.ts`, `packages/tui/test/question-dialog.test.tsx`, and `packages/tui/test/pad-dialogs.test.tsx`: the fourth option's feedback field, `Other…` on a single-select only, the empty-field and Esc rules, and the pad's plain deny.

@@ -69,7 +69,7 @@ The import writes session files for past conversations below `~/.labunbun/projec
 - `DEFAULT_HISTORY_LIMIT` is 20 sessions per source. `DEFAULT_PROMPT_HISTORY_LIMIT` is 500 prompts, and `PROMPT_HISTORY_BYTES` is 4 MiB.
 - `narrowCandidates` applies the scope. `selectHistory` applies the user's choice before the cap, so a choice of twenty from the picker is not cut down again.
 - `readHistory` converts each chosen candidate. The run counts a candidate that it cannot convert. The reader's own reason comes first, so a result explained by its reader never becomes a bare count.
-- `renderHistorySession` writes the JSONL that `SessionStore` reads: a header with version 1, then one entry per line, each linked to the previous by id. See `packages/agent/src/session-store.ts:151`.
+- `renderHistorySession` writes the JSONL that `SessionStore` reads: a header with version 1, then one entry per line, each linked to the previous by id. See `packages/agent/src/session-store.ts:171`.
 - Ids come from the session id and the entry index, so the same source produces the same bytes and a second `--apply` changes nothing.
 - `importedSessionId` reads `imported-<source>-<first 8 hex digits of sha256(sourceId)>`. `historyPath` places the session file for the candidate's `cwd`.
 - A compaction entry carries `preTokens` from the source, `postTokens` 0, `model` "imported", `trigger` "manual" and `preservedFiles` []. Its summary message comes from the same `compactionBoundary` builder that a native session uses.

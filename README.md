@@ -90,6 +90,10 @@ Press Shift+Tab to go to the next mode.
 
 **Approval diff.** When the tool asks about an `Edit` or a `Write`, the dialog shows the change as a diff. A removed line starts with `-`. An added line starts with `+`. The dialog shows at most 40 lines, and each line is cut at 240 characters. Press Ctrl+A to show the full input. Press Ctrl+A again to return to the diff. Every other tool keeps the one-line preview.
 
+**Denial feedback.** The fourth answer opens a one-line field. Type a sentence and press Enter. The tool sends the sentence to the model as the reason for the denial. An empty field is a plain denial. Press Esc to return to the list. A controller sends the plain denial, because it cannot type.
+
+**Questions.** A single-choice question has an `Other…` row. Select it and type the answer. Press Enter to submit a non-empty answer. Press Esc to return to the options. An empty field does not submit. A multi-choice question has no `Other…` row.
+
 **Sandbox.** The OS enforces the sandbox on macOS with `sandbox-exec`. The OS enforces the sandbox on Linux with `bwrap`.
 
 > **WARNING**: A Linux system without `bubblewrap` confines nothing.
@@ -624,11 +628,15 @@ In `/resume`, press Space to preview the highlighted session. The preview shows 
 
 Use `/rename <title>` to name the current session. The terminal title shows the name instead of the directory name. The `/resume` row uses the name as its label. Use `/rename` alone to show the current title. Use `/rename --clear` to remove it.
 
+Press Ctrl+O to open the transcript. The transcript shows the full text of a tool result that the compact view cut. The compact view says how many characters it hid and names Ctrl+O. The transcript says when the output itself was capped at 16,000 characters. Press Ctrl+O again to return to the session.
+
 Press Ctrl+T to show the watch panel. The panel shows a background shell's tail, the subagent listing, or the session facts, and it takes no keys of its own. Press Ctrl+V while the panel is open to cycle the source: the shell tails in start order, then the subagent listing, then the session facts, wrapping back to the first shell. Press Alt+1 to Alt+9 while the panel is open to jump to the shell with that number. Each shell header shows its number on the left. The tool shows the last running shell, or the last shell that ended. The panel is a snapshot from the two-second poll, and it says so. Press Ctrl+T or Escape to close it. These keys do nothing while a dialog, a question, the command picker, or the transcript is open. Under the Emacs editor, `Alt+1` to `Alt+9` arms a count in the prompt, so the jump does not occur. A terminal that turns Ctrl+V into paste — Windows Terminal does by default — takes the key before the app sees it.
 
 ### Headless output
 
 Use `--output-format text` for plain text. Use `--output-format json` for one JSON object. Use `--output-format stream-json` for one JSON object per event.
+
+The JSON result carries `error_kind` and `error_remedy` when the run ended on a classified failure. It carries `incomplete: true` when the reported text is the partial answer of a failed or interrupted turn.
 
 A headless run that opens a stored session (`--resume <id>` or `-c`) prints the recovery line to stderr when the ledger holds one. It also warns about the subagent runs that a previous process left unfinished. The answer stays the only thing on stdout.
 

@@ -10,6 +10,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [Command classifier](command-classifier.md): the classifier that reports whether one command line can destroy data, and the permission engine that runs it.
 - [Compaction](compaction.md): the summary pass, the cheap preview rung, the hard limit, and what each host reports.
 - [Crash consistency](crash-consistency.md): what survives a killed process — the files replaced by a rename, the files appended to, and the writes still made in place.
+- [Error handling](error-handling.md): what a failure says and where it says it — the run contract, unreadable sessions and settings, retries and fallbacks, interruption, and dialog feedback.
 - [Gemini subscription](gemini-subscription.md): the app-side sign-in for a Gemini subscription — the credential store, the loopback and paste login shapes, and where the app wires them.
 - [MCP client](mcp.md): connecting `.mcp.json` and settings servers — tool adaptation, list-change refreshes, the approval gate, and the `/mcp` reads.
 - [Memory and style](memory.md): the two memory tiers, the trust gate, the live `#` note, `/memory`, and the output-style files the prompt adds.

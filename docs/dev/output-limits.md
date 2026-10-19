@@ -37,11 +37,11 @@
 
 ### The cheap compaction rung
 
-- `microcompact` replaces the oldest tool results with previews. With a writer, it writes the full text of a result before the preview replaces it, through the same `SpillWriter` the tools use. The first preview line points at the file, in the same `[full output: N chars → path]` format (`packages/agent/src/compaction.ts:1450-1500`, `packages/agent/src/output-limits.ts:36-38`).
-- The write is one call per result. A result with more than one text block is written as one text: its blocks joined by a newline. The result gets one file, and the header appears once, on the first preview (`packages/agent/src/compaction.ts:1473-1485`, `:1487-1496`).
-- A result that already opens with a spill header is not spilled again. Its full text is already on disk, and the header stays in the text the preview keeps (`packages/agent/src/compaction.ts:1471-1473`, `packages/agent/src/output-limits.ts:40-43`).
-- A writer that returns null or throws degrades to the plain preview. A failed spill is not a failed compaction: the preview is the one this rung made before it had a writer (`packages/agent/src/compaction.ts:1477-1485`).
-- Without a writer the preview is unchanged. The full text stays in the session file, and the model has no pointer to it (`packages/agent/src/compaction.ts:1471-1472`, `:1487-1496`).
+- `microcompact` replaces the oldest tool results with previews. With a writer, it writes the full text of a result before the preview replaces it, through the same `SpillWriter` the tools use. The first preview line points at the file, in the same `[full output: N chars → path]` format (`packages/agent/src/compaction.ts:1461-1511`, `packages/agent/src/output-limits.ts:36-38`).
+- The write is one call per result. A result with more than one text block is written as one text: its blocks joined by a newline. The result gets one file, and the header appears once, on the first preview (`packages/agent/src/compaction.ts:1484-1496`, `:1498-1507`).
+- A result that already opens with a spill header is not spilled again. Its full text is already on disk, and the header stays in the text the preview keeps (`packages/agent/src/compaction.ts:1482-1484`, `packages/agent/src/output-limits.ts:40-43`).
+- A writer that returns null or throws degrades to the plain preview. A failed spill is not a failed compaction: the preview is the one this rung made before it had a writer (`packages/agent/src/compaction.ts:1488-1496`).
+- Without a writer the preview is unchanged. The full text stays in the session file, and the model has no pointer to it (`packages/agent/src/compaction.ts:1482-1483`, `:1498-1507`).
 
 ### The cut marker
 
