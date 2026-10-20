@@ -78,10 +78,14 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 	// spelled inline.
 	const promptsPath = join(home, "prompts.json");
 	writeFileSync(promptsPath, JSON.stringify(options.prompts ?? ["new question", "and again"]));
+	// The payload crosses the process boundary through a file, not stdout: one
+	// test's request holds a 900k-character prompt, and a pipe write that large
+	// can still be draining when the child exits.
+	const resultPath = join(home, "result.json");
 
 	const script = `
 		import { mock } from "bun:test";
-		import { readFileSync } from "node:fs";
+		import { readFileSync, writeFileSync } from "node:fs";
 		import * as ai from "@labunbun/ai";
 		import * as tui from "@labunbun/tui";
 		const requests = [];
@@ -144,7 +148,7 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		const exitCode = await runInteractive(${JSON.stringify({ cwd, theme: "dark" })});
-		console.log(JSON.stringify({ exitCode, requests, written, replies, counts, infos, activity }));
+		writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ exitCode, requests, written, replies, counts, infos, activity }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
@@ -153,13 +157,15 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const [stdout, stderr, exitCode] = await Promise.all([
+	const [, stderr, exitCode] = await Promise.all([
+		// Drain stdout so a child that still writes there cannot block, but the
+		// assertions read the result file the child wrote before it exited.
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
 		proc.exited,
 	]);
 	expect(exitCode, stderr).toBe(0);
-	const parsed = JSON.parse(stdout.trim()) as {
+	const parsed = JSON.parse(readFileSync(resultPath, "utf8")) as {
 		exitCode: number;
 		requests: { messages: AgentMessage[]; model: string }[];
 		replies: string[];
