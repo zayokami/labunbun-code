@@ -10,13 +10,15 @@
  * format's tables holds, and the heaps hold the strings, GUIDs and blobs
  * those rows index into.
  *
- * This reads the identity, not the code: the module name and its MVID, the
- * assembly's own name and version, the assemblies it references, the target
- * framework attribute when one is present, and the ReadyToRun header when
- * the image was precompiled. It does not decode method bodies, signatures,
- * or custom attribute values beyond that one well-known attribute — a
- * reader that guesses at structures it does not fully parse is worse than
- * one that names what it read and stops.
+ * This reads the identity: the module name and its MVID, the assembly's own
+ * name and version, the assemblies it references, the target framework
+ * attribute when one is present, and the ReadyToRun header when the image was
+ * precompiled. It also walks managed method bodies to their operand lengths
+ * and resolves the tokens in calls, field accesses and `ldstr` instructions.
+ * That is a scan, not a disassembly: no instruction is executed and no
+ * signature or generic argument is decoded. A reader that guesses at
+ * structures it does not fully parse is worse than one that names what it
+ * read and stops.
  *
  * Row widths are load-bearing: the tables sit back to back with no offsets
  * of their own, so reaching any table means summing rows × column widths
@@ -198,6 +200,30 @@ const MAX_SCANNED_ATTRIBUTES = 200_000;
 /** Bytes of one metadata name decoded for display before the rest is counted. */
 const MAX_NAME_BYTES = 1024;
 
+/** Method bodies whose IL is walked per assembly. */
+const MAX_METHOD_BODIES = 2_000;
+
+/** IL bytes walked per assembly, across every method body. */
+const MAX_IL_BYTES = 8 * 1024 * 1024;
+
+/** Instructions walked in one method body before its listing stops. */
+const MAX_BODY_INSTRUCTIONS = 20_000;
+
+/** TypeDef rows whose names are listed. */
+const MAX_LISTED_TYPES = 40;
+
+/** Distinct user strings listed before the rest are counted. */
+const MAX_LISTED_USER_STRINGS = 20;
+
+/** Code-points of one user string shown before the rest is counted. */
+const MAX_USER_STRING_CHARS = 120;
+
+/** Distinct call or field edges retained per assembly. */
+const MAX_DISTINCT_EDGES = 4_000;
+
+/** Edges listed under a call or field heading. */
+const MAX_LISTED_EDGES = 20;
+
 export function dotnetManagedLines(data: Buffer): string[] {
 	const layout = readPeLayout(data);
 	if (layout === null) return [];
@@ -231,7 +257,7 @@ export function dotnetManagedLines(data: Buffer): string[] {
 		return lines;
 	}
 
-	lines.push(...metadataLines(data, rootAt));
+	lines.push(...metadataLines(data, rootAt, layout, entryPoint));
 	lines.push(...readyToRunLines(data, layout, cliAt));
 	return lines;
 }
@@ -246,7 +272,7 @@ interface MetadataStream {
 	readonly size: number;
 }
 
-function metadataLines(data: Buffer, rootAt: number): string[] {
+function metadataLines(data: Buffer, rootAt: number, layout: PeLayout, entryPoint: number): string[] {
 	const lines: string[] = [];
 	const magic = u32(data, rootAt);
 	if (magic !== 0x424a5342) {
@@ -297,7 +323,7 @@ function metadataLines(data: Buffer, rootAt: number): string[] {
 		lines.push("  no #~ or #- table stream: the tables could not be read");
 		return lines;
 	}
-	lines.push(...tablesLines(data, rootAt, streams, tableStream));
+	lines.push(...tablesLines(data, rootAt, streams, tableStream, layout, entryPoint));
 	return lines;
 }
 
@@ -489,7 +515,14 @@ interface Walk {
 	readonly heaps: ReadonlyMap<string, { base: number; size: number }>;
 }
 
-function tablesLines(data: Buffer, rootAt: number, streams: MetadataStream[], stream: MetadataStream): string[] {
+function tablesLines(
+	data: Buffer,
+	rootAt: number,
+	streams: MetadataStream[],
+	stream: MetadataStream,
+	layout: PeLayout,
+	entryPoint: number,
+): string[] {
 	const lines: string[] = [];
 	const at = rootAt + stream.offset;
 	const end = Math.min(at + stream.size, data.length);
@@ -559,6 +592,7 @@ function tablesLines(data: Buffer, rootAt: number, streams: MetadataStream[], st
 	}
 	const walk: Walk = { census, placements, heaps };
 	lines.push(...identityLines(data, walk));
+	lines.push(...managedCodeLines(data, walk, layout, entryPoint));
 	return lines;
 }
 
@@ -777,6 +811,617 @@ function targetFrameworkLine(data: Buffer, walk: Walk): string | null {
 	const total = walk.census.rowCount(0x0c);
 	if (total > scanned) return `  (the attribute scan stopped after ${scanned} of ${total} rows)`;
 	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Managed code: method headers, IL operands, and resolved tokens
+// ---------------------------------------------------------------------------
+
+/**
+ * Operand lengths for the one-byte opcodes. The sentinel values are not
+ * lengths: `SWITCH` reads a count and then that many branch targets, and
+ * `PREFIX` means the real opcode is the next byte. A `-1` is an opcode this
+ * format does not define (or a reserved one), and a body that reaches one is
+ * undecodable rather than silently skipped: guessing an operand length would
+ * misalign every instruction after it.
+ */
+const OP_SWITCH = 254;
+const OP_PREFIX = 253;
+const OPERAND_SIZES = new Int16Array(256).fill(-1);
+
+function operands(from: number, through: number, size: number): void {
+	for (let op = from; op <= through; op++) OPERAND_SIZES[op] = size;
+}
+
+// None, one, two, four and eight byte operands, by the ranges in ECMA-335
+// Partition III. Token operands are four bytes and are resolved separately.
+operands(0x00, 0x0d, 0);
+operands(0x0e, 0x13, 1);
+operands(0x14, 0x1e, 0);
+operands(0x1f, 0x1f, 1);
+operands(0x20, 0x20, 4);
+operands(0x21, 0x21, 8);
+operands(0x22, 0x22, 4);
+operands(0x23, 0x23, 8);
+operands(0x25, 0x26, 0);
+operands(0x27, 0x29, 4);
+operands(0x2a, 0x2a, 0);
+operands(0x2b, 0x37, 1);
+operands(0x38, 0x44, 4);
+OPERAND_SIZES[0x45] = OP_SWITCH;
+operands(0x46, 0x6e, 0);
+operands(0x6f, 0x75, 4);
+operands(0x76, 0x76, 0);
+OPERAND_SIZES[0x79] = 4;
+OPERAND_SIZES[0x7a] = 0;
+operands(0x7b, 0x81, 4);
+operands(0x82, 0x8b, 0);
+OPERAND_SIZES[0x8c] = 4;
+OPERAND_SIZES[0x8d] = 4;
+OPERAND_SIZES[0x8e] = 0;
+OPERAND_SIZES[0x8f] = 4;
+operands(0x90, 0xa2, 0);
+operands(0xa3, 0xa5, 4);
+OPERAND_SIZES[0xc2] = 4;
+OPERAND_SIZES[0xc3] = 0;
+OPERAND_SIZES[0xc6] = 4;
+OPERAND_SIZES[0xd0] = 4;
+operands(0xd1, 0xdc, 0);
+OPERAND_SIZES[0xdd] = 4;
+OPERAND_SIZES[0xde] = 1;
+OPERAND_SIZES[0xdf] = 0;
+OPERAND_SIZES[0xe0] = 0;
+OPERAND_SIZES[0xfe] = OP_PREFIX;
+
+/** Operand lengths for the two-byte opcodes behind the 0xFE prefix. */
+const FE_OPERAND_SIZES = new Int16Array(256).fill(-1);
+feOperands(0x00, 0x05, 0);
+feOperands(0x06, 0x07, 4);
+feOperands(0x09, 0x0e, 2);
+feOperands(0x0f, 0x0f, 0);
+feOperands(0x11, 0x11, 0);
+feOperands(0x12, 0x12, 1);
+feOperands(0x13, 0x14, 0);
+feOperands(0x15, 0x16, 4);
+feOperands(0x17, 0x18, 0);
+feOperands(0x19, 0x19, 1);
+feOperands(0x1a, 0x1a, 0);
+feOperands(0x1c, 0x1c, 4);
+feOperands(0x1d, 0x1e, 0);
+
+function feOperands(from: number, through: number, size: number): void {
+	for (let op = from; op <= through; op++) FE_OPERAND_SIZES[op] = size;
+}
+
+/** A table row or heap entry read for token resolution; null means it was not readable. */
+interface CodeIndex {
+	readonly typeCount: number;
+	readonly methodCount: number;
+	readonly fieldCount: number;
+	readonly typeNames: readonly string[];
+	readonly typeFirstFields: readonly (number | null)[];
+	readonly typeFirstMethods: readonly (number | null)[];
+	readonly methodNames: readonly string[];
+	readonly fieldNames: readonly string[];
+	readonly fieldOwners: readonly (string | null)[];
+	readonly typeRefs: readonly string[];
+	readonly moduleRefs: readonly string[];
+}
+
+function fullTypeName(name: string | null, namespace: string | null): string {
+	const shown = name === null ? "(name not readable)" : name === "" ? "(empty name)" : name;
+	return namespace === null || namespace === "" ? shown : `${namespace}.${shown}`;
+}
+
+/** A method or field range width: the next type's first row, minus this one's. */
+function rangeCount(first: number | null, next: number | null, total: number): number {
+	if (first === null || first < 1 || first > total) return 0;
+	const end = next === null ? total + 1 : next;
+	return end > first ? Math.min(end, total + 1) - first : 0;
+}
+
+/**
+ * Names, owners and ranges for the four tables token resolution needs.
+ * Rows are one-based in the format and zero-based in these arrays.
+ */
+function buildCodeIndex(data: Buffer, walk: Walk): CodeIndex {
+	const census = walk.census;
+	const stringWidth = census.stringWidth;
+	const typeCount = census.rowCount(0x02);
+	const methodCount = census.rowCount(0x06);
+	const fieldCount = census.rowCount(0x04);
+	const typeNames = new Array<string>(typeCount).fill("(type not readable)");
+	const typeFirstFields = new Array<number | null>(typeCount).fill(null);
+	const typeFirstMethods = new Array<number | null>(typeCount).fill(null);
+	const methodNames = new Array<string>(methodCount).fill("(method not readable)");
+	const fieldNames = new Array<string>(fieldCount).fill("(field not readable)");
+	const fieldOwners = new Array<string | null>(fieldCount).fill(null);
+	const methodOwners = new Array<string | null>(methodCount).fill(null);
+
+	const typePlacement = walk.placements.get(0x02);
+	if (typePlacement !== undefined) {
+		const fieldWidth = tableIndex(census, 0x04);
+		const methodWidth = tableIndex(census, 0x06);
+		const methodListAt = typePlacement.width - methodWidth;
+		const fieldListAt = methodListAt - fieldWidth;
+		for (let row = 1; row <= typeCount; row++) {
+			const base = rowBase(walk, 0x02, row);
+			if (base === null) continue;
+			const nameIndex = indexAt(data, base + 4, stringWidth);
+			const namespaceIndex = indexAt(data, base + 4 + stringWidth, stringWidth);
+			const name = nameIndex === null ? null : stringAt(data, walk, nameIndex);
+			const namespace = namespaceIndex === null ? null : stringAt(data, walk, namespaceIndex);
+			typeNames[row - 1] = fullTypeName(name, namespace);
+			typeFirstFields[row - 1] = indexAt(data, base + fieldListAt, fieldWidth);
+			typeFirstMethods[row - 1] = indexAt(data, base + methodListAt, methodWidth);
+		}
+	}
+
+	// A type's method range starts at its MethodList and ends at the next
+	// type's. The same rule gives each field its owner.
+	for (let row = 0; row < typeCount; row++) {
+		const first = typeFirstMethods[row];
+		const next = row + 1 < typeCount ? typeFirstMethods[row + 1] : null;
+		if (first === null || first < 1 || first > methodCount) continue;
+		const end = next === null ? methodCount + 1 : next;
+		if (end <= first) continue;
+		const last = Math.min(end - 1, methodCount);
+		for (let method = first; method <= last; method++) {
+			if (methodOwners[method - 1] === null) methodOwners[method - 1] = typeNames[row];
+		}
+	}
+	for (let row = 0; row < typeCount; row++) {
+		const first = typeFirstFields[row];
+		const next = row + 1 < typeCount ? typeFirstFields[row + 1] : null;
+		if (first === null || first < 1 || first > fieldCount) continue;
+		const end = next === null ? fieldCount + 1 : next;
+		if (end <= first) continue;
+		const last = Math.min(end - 1, fieldCount);
+		for (let field = first; field <= last; field++) {
+			if (fieldOwners[field - 1] === null) fieldOwners[field - 1] = typeNames[row];
+		}
+	}
+
+	for (let row = 1; row <= methodCount; row++) {
+		const base = rowBase(walk, 0x06, row);
+		if (base === null) continue;
+		// MethodDef columns: RVA (4), ImplFlags (2), Flags (2), Name.
+		const nameIndex = indexAt(data, base + 8, stringWidth);
+		const name = nameIndex === null ? null : stringAt(data, walk, nameIndex);
+		const owner = methodOwners[row - 1];
+		const shown = name === null ? "(name not readable)" : name === "" ? "(empty name)" : name;
+		methodNames[row - 1] = owner === null ? shown : `${owner}.${shown}`;
+	}
+	for (let row = 1; row <= fieldCount; row++) {
+		const base = rowBase(walk, 0x04, row);
+		if (base === null) continue;
+		// Field columns: Flags (2), Name.
+		const nameIndex = indexAt(data, base + 2, stringWidth);
+		const name = nameIndex === null ? null : stringAt(data, walk, nameIndex);
+		fieldNames[row - 1] = name === null ? "(name not readable)" : name === "" ? "(empty name)" : name;
+	}
+
+	const typeRefs = new Array<string>(census.rowCount(0x01)).fill("(type not readable)");
+	const resolutionScopeWidth = codedIndex(census, CODED.resolutionScope);
+	for (let row = 1; row <= typeRefs.length; row++) {
+		const base = rowBase(walk, 0x01, row);
+		if (base === null) continue;
+		const nameIndex = indexAt(data, base + resolutionScopeWidth, stringWidth);
+		const namespaceIndex = indexAt(data, base + resolutionScopeWidth + stringWidth, stringWidth);
+		const name = nameIndex === null ? null : stringAt(data, walk, nameIndex);
+		const namespace = namespaceIndex === null ? null : stringAt(data, walk, namespaceIndex);
+		typeRefs[row - 1] = fullTypeName(name, namespace);
+	}
+
+	const moduleRefs = new Array<string>(census.rowCount(0x1a)).fill("(module not readable)");
+	for (let row = 1; row <= moduleRefs.length; row++) {
+		const base = rowBase(walk, 0x1a, row);
+		if (base === null) continue;
+		const nameIndex = indexAt(data, base, stringWidth);
+		const name = nameIndex === null ? null : stringAt(data, walk, nameIndex);
+		moduleRefs[row - 1] = name === null ? "(module not readable)" : name === "" ? "(empty name)" : name;
+	}
+
+	return {
+		typeCount,
+		methodCount,
+		fieldCount,
+		typeNames,
+		typeFirstFields,
+		typeFirstMethods,
+		methodNames,
+		fieldNames,
+		fieldOwners,
+		typeRefs,
+		moduleRefs,
+	};
+}
+
+/** The type name a MemberRef's parent coded index names, or null when it names none. */
+function memberRefParentName(index: CodeIndex, parent: number): string | null {
+	const bits = CODED.memberRefParent.bits;
+	const tag = parent & ((1 << bits) - 1);
+	const row = parent >>> bits;
+	if (tag === 0) return index.typeNames[row - 1] ?? null;
+	if (tag === 1) return index.typeRefs[row - 1] ?? null;
+	if (tag === 2) return index.moduleRefs[row - 1] ?? null;
+	if (tag === 3) return index.methodNames[row - 1] ?? null;
+	if (tag === 4) return `TypeSpec(${row})`;
+	return null;
+}
+
+/** A MemberRef target: its parent's name and the member's own name, dot-joined. */
+function memberRefTarget(data: Buffer, walk: Walk, index: CodeIndex, row: number): string | null {
+	const base = rowBase(walk, 0x0a, row);
+	if (base === null) return null;
+	const parentWidth = codedIndex(walk.census, CODED.memberRefParent);
+	const parent = indexAt(data, base, parentWidth);
+	const nameIndex = indexAt(data, base + parentWidth, walk.census.stringWidth);
+	if (parent === null || nameIndex === null) return null;
+	const memberName = stringAt(data, walk, nameIndex);
+	const member = memberName === null ? "(member name not readable)" : memberName === "" ? "(empty name)" : memberName;
+	const parentName = memberRefParentName(index, parent);
+	return parentName === null ? `MemberRef(${row}).${member}` : `${parentName}.${member}`;
+}
+
+/** The MethodDef or MemberRef a call token names. Unresolved tokens keep their spelling. */
+function methodTarget(data: Buffer, walk: Walk, index: CodeIndex, token: number): string {
+	const table = token >>> 24;
+	const row = token & 0x00ffffff;
+	if (table === 0x06) return index.methodNames[row - 1] ?? `MethodDef(${hex(token)})`;
+	if (table === 0x0a) return memberRefTarget(data, walk, index, row) ?? `MemberRef(${hex(token)})`;
+	return `token ${hex(token)}`;
+}
+
+/** The Field or MemberRef a field instruction's token names. */
+function fieldTarget(data: Buffer, walk: Walk, index: CodeIndex, token: number): string {
+	const table = token >>> 24;
+	const row = token & 0x00ffffff;
+	if (table === 0x04) {
+		const name = index.fieldNames[row - 1];
+		if (name === undefined) return `Field(${hex(token)})`;
+		const owner = index.fieldOwners[row - 1];
+		return owner === null ? name : `${owner}.${name}`;
+	}
+	if (table === 0x0a) return memberRefTarget(data, walk, index, row) ?? `MemberRef(${hex(token)})`;
+	return `token ${hex(token)}`;
+}
+
+/**
+ * The string behind an `ldstr` token. The #US heap stores a compressed byte
+ * length that includes one trailing flag byte, then UTF-16LE code units; the
+ * flag is not part of the string.
+ */
+function userStringAt(data: Buffer, walk: Walk, token: number): string | null {
+	if (token >>> 24 !== 0x70) return null;
+	const index = token & 0x00ffffff;
+	const heap = walk.heaps.get("#US");
+	if (heap === undefined || index >= heap.size) return null;
+	const length = readCompressed(data, heap.base + index);
+	if (length === null) return null;
+	if (length.value === 0) return "";
+	if (length.next + length.value > heap.base + heap.size || length.next + length.value > data.length) return null;
+	const payload = data.subarray(length.next, length.next + length.value);
+	if (payload.length === 0) return "";
+	const text = payload.subarray(0, payload.length - 1);
+	if (text.length % 2 !== 0) return null;
+	return text.toString("utf16le");
+}
+
+/** A user string with quotes, backslashes and controls escaped, then capped for display. */
+function displayUserString(text: string): string {
+	const characters = Array.from(text);
+	let out = "";
+	let used = 0;
+	let cut = 0;
+	for (let i = 0; i < characters.length; i++) {
+		const character = characters[i];
+		const code = character.codePointAt(0) ?? 0;
+		const piece =
+			character === "\\"
+				? "\\\\"
+				: character === '"'
+					? '\\"'
+					: code < 0x20 || code === 0x7f
+						? `\\u${code.toString(16).padStart(4, "0")}`
+						: character;
+		if (used + piece.length > MAX_USER_STRING_CHARS) {
+			cut = characters.length - i;
+			break;
+		}
+		out += piece;
+		used += piece.length;
+	}
+	return cut > 0 ? `${out}… [${cut} more char(s)]` : out;
+}
+
+/** The method an entry point token names, or a line saying why it does not. */
+function entryPointLine(index: CodeIndex, token: number): string | null {
+	if (token === 0) return null;
+	if (token >>> 24 === 0x06) {
+		const name = index.methodNames[(token & 0x00ffffff) - 1];
+		if (name !== undefined) return `    entry point method: ${name}`;
+	}
+	return `    entry point method: (token ${hex(token)} does not name a readable MethodDef)`;
+}
+
+/** A method body's code range, after its header's sizes have been checked against the file. */
+interface BodyHeader {
+	readonly codeAt: number;
+	readonly codeSize: number;
+}
+
+function readBodyHeader(data: Buffer, layout: PeLayout, rva: number): BodyHeader | null {
+	const at = rvaToOffset(layout, data, rva);
+	if (at === null) return null;
+	const first = u8(data, at);
+	if (first === null) return null;
+	if ((first & 3) === 2) {
+		const codeSize = first >>> 2;
+		const codeAt = at + 1;
+		return codeAt + codeSize <= data.length ? { codeAt, codeSize } : null;
+	}
+	if ((first & 3) !== 3) return null;
+	const flags = u16(data, at);
+	if (flags === null) return null;
+	const headerSize = (flags >>> 12) * 4;
+	if (headerSize < 12 || at + headerSize > data.length) return null;
+	const codeSize = u32(data, at + 4);
+	if (codeSize === null) return null;
+	const codeAt = at + headerSize;
+	return codeAt + codeSize <= data.length ? { codeAt, codeSize } : null;
+}
+
+interface DecodedBody {
+	readonly ok: boolean;
+	readonly capped: boolean;
+	readonly calls: Map<string, number>;
+	readonly fields: Map<string, number>;
+	readonly strings: Set<string>;
+	readonly badStrings: number;
+}
+
+/**
+ * Walk one body's IL by operand length. Calls, field accesses and `ldstr`
+ * strings are collected only from a body walked to its end; an undefined
+ * opcode or an operand past the body makes the whole body undecodable.
+ */
+function decodeBody(data: Buffer, walk: Walk, index: CodeIndex, body: BodyHeader): DecodedBody {
+	const calls = new Map<string, number>();
+	const fields = new Map<string, number>();
+	const strings = new Set<string>();
+	const result = (ok: boolean, capped: boolean, badStrings: number): DecodedBody => ({
+		ok,
+		capped,
+		calls,
+		fields,
+		strings,
+		badStrings,
+	});
+	const add = (tally: Map<string, number>, key: string): void => {
+		tally.set(key, (tally.get(key) ?? 0) + 1);
+	};
+	const end = body.codeAt + body.codeSize;
+	let at = body.codeAt;
+	let instructions = 0;
+	let badStrings = 0;
+	while (at < end) {
+		if (instructions >= MAX_BODY_INSTRUCTIONS) return result(true, true, badStrings);
+		const op = data[at];
+		at += 1;
+		let operand = OPERAND_SIZES[op];
+		let twoByte = -1;
+		if (operand === OP_PREFIX) {
+			if (at >= end) return result(false, false, badStrings);
+			twoByte = data[at];
+			at += 1;
+			operand = FE_OPERAND_SIZES[twoByte];
+		}
+		if (operand < 0) return result(false, false, badStrings);
+		if (operand === OP_SWITCH) {
+			if (at + 4 > end) return result(false, false, badStrings);
+			const targets = data.readUInt32LE(at);
+			at += 4;
+			if (targets > (end - at) / 4) return result(false, false, badStrings);
+			at += targets * 4;
+			instructions++;
+			continue;
+		}
+		if (at + operand > end) return result(false, false, badStrings);
+		if (op === 0x28 || op === 0x6f || op === 0x73 || (op === 0xfe && (twoByte === 0x06 || twoByte === 0x07))) {
+			add(calls, methodTarget(data, walk, index, data.readUInt32LE(at)));
+		} else if (op >= 0x7b && op <= 0x80) {
+			add(fields, fieldTarget(data, walk, index, data.readUInt32LE(at)));
+		} else if (op === 0x72) {
+			const text = userStringAt(data, walk, data.readUInt32LE(at));
+			if (text === null) badStrings++;
+			else strings.add(text);
+		}
+		at += operand;
+		instructions++;
+	}
+	return result(true, false, badStrings);
+}
+
+interface EdgeTally {
+	readonly counts: Map<string, number>;
+	occurrences: number;
+	dropped: number;
+}
+
+function newEdgeTally(): EdgeTally {
+	return { counts: new Map(), occurrences: 0, dropped: 0 };
+}
+
+function addEdge(tally: EdgeTally, key: string): void {
+	tally.occurrences++;
+	const current = tally.counts.get(key);
+	if (current !== undefined) {
+		tally.counts.set(key, current + 1);
+		return;
+	}
+	if (tally.counts.size < MAX_DISTINCT_EDGES) {
+		tally.counts.set(key, 1);
+		return;
+	}
+	tally.dropped++;
+}
+
+function edgeLines(label: string, tally: EdgeTally): string[] {
+	if (tally.counts.size === 0) return [`    ${label}: none`];
+	const rows = [...tally.counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+	const lines = [
+		`    ${label} (${tally.counts.size} distinct${
+			tally.dropped > 0 ? " listed" : ""
+		}, ${tally.occurrences} ${tally.occurrences === 1 ? "occurrence" : "occurrences"}):`,
+	];
+	for (const [key, occurrences] of rows.slice(0, MAX_LISTED_EDGES)) {
+		lines.push(`      ${key} ${occurrences}`);
+	}
+	if (rows.length > MAX_LISTED_EDGES) lines.push(`      ... and ${rows.length - MAX_LISTED_EDGES} more`);
+	if (tally.dropped > 0) {
+		lines.push(
+			`      ${tally.dropped} occurrence(s) beyond the ${MAX_DISTINCT_EDGES}-edge cap were counted but not listed`,
+		);
+	}
+	return lines;
+}
+
+/**
+ * The managed-code block: type names with their method and field counts,
+ * method-body statistics, the resolved entry point, distinct user strings,
+ * and the call/field edges read from the IL. Every listing has a cap and
+ * says how much it did not show.
+ */
+function managedCodeLines(data: Buffer, walk: Walk, layout: PeLayout, entryPoint: number): string[] {
+	const typeCount = walk.census.rowCount(0x02);
+	const methodCount = walk.census.rowCount(0x06);
+	if (typeCount === 0 && methodCount === 0) return [];
+	const index = buildCodeIndex(data, walk);
+	const lines = ["  managed code:"];
+
+	if (typeCount === 0) {
+		lines.push("    types: none");
+	} else {
+		lines.push(`    types (${typeCount}):`);
+		const listed = Math.min(typeCount, MAX_LISTED_TYPES);
+		for (let row = 1; row <= listed; row++) {
+			const methodEnd = row < typeCount ? index.typeFirstMethods[row] : null;
+			const fieldEnd = row < typeCount ? index.typeFirstFields[row] : null;
+			const methods = rangeCount(index.typeFirstMethods[row - 1], methodEnd, methodCount);
+			const fields = rangeCount(index.typeFirstFields[row - 1], fieldEnd, index.fieldCount);
+			lines.push(
+				`      ${index.typeNames[row - 1]} (${count(methods, "method", "methods")}, ${count(fields, "field", "fields")})`,
+			);
+		}
+		if (typeCount > listed) lines.push(`      ... and ${typeCount - listed} more`);
+	}
+
+	let noBody = 0;
+	let withBody = 0;
+	let undecodable = 0;
+	let unreadMethods = 0;
+	let unreadIl = 0;
+	let attempted = 0;
+	let ilBytes = 0;
+	let cappedBodies = 0;
+	let badStrings = 0;
+	const calls = newEdgeTally();
+	const fields = newEdgeTally();
+	const strings = new Set<string>();
+
+	for (let row = 1; row <= methodCount; row++) {
+		const base = rowBase(walk, 0x06, row);
+		const rva = base === null ? null : u32(data, base);
+		if (rva === null) {
+			undecodable++;
+			continue;
+		}
+		if (rva === 0) {
+			noBody++;
+			continue;
+		}
+		if (attempted >= MAX_METHOD_BODIES) {
+			unreadMethods++;
+			continue;
+		}
+		attempted++;
+		const header = readBodyHeader(data, layout, rva);
+		if (header === null) {
+			undecodable++;
+			continue;
+		}
+		if (ilBytes + header.codeSize > MAX_IL_BYTES) {
+			unreadIl++;
+			continue;
+		}
+		const decoded = decodeBody(data, walk, index, header);
+		if (!decoded.ok) {
+			undecodable++;
+			continue;
+		}
+		ilBytes += header.codeSize;
+		withBody++;
+		if (decoded.capped) cappedBodies++;
+		badStrings += decoded.badStrings;
+		for (const text of decoded.strings) strings.add(text);
+		const source = index.methodNames[row - 1];
+		for (const [target, occurrences] of decoded.calls) {
+			for (let i = 0; i < occurrences; i++) addEdge(calls, `${source} -> ${target}`);
+		}
+		for (const [target, occurrences] of decoded.fields) {
+			for (let i = 0; i < occurrences; i++) addEdge(fields, `${source} -> ${target}`);
+		}
+	}
+
+	const unread = unreadMethods + unreadIl;
+	const summary = [
+		`${withBody} with a body`,
+		`${noBody} without`,
+		`${undecodable} undecodable`,
+		...(unread > 0 ? [`${unread} not read`] : []),
+	];
+	lines.push(methodCount === 0 ? "    methods: 0" : `    methods: ${methodCount} (${summary.join(", ")})`);
+	lines.push(
+		`    method bodies read: ${withBody} (${count(ilBytes, "byte", "bytes")} of IL; cap ${MAX_METHOD_BODIES} methods / ${
+			MAX_IL_BYTES / (1024 * 1024)
+		} MiB)`,
+	);
+	const entry = entryPointLine(index, entryPoint);
+	if (entry !== null) lines.push(entry);
+
+	if (strings.size === 0) {
+		lines.push("    user strings: none");
+	} else {
+		const all = [...strings];
+		const shown = all
+			.slice(0, MAX_LISTED_USER_STRINGS)
+			.map((text) => `"${displayUserString(text)}"`)
+			.join(", ");
+		lines.push(`    user strings (${all.length}): ${shown}`);
+		if (all.length > MAX_LISTED_USER_STRINGS) {
+			lines.push(`      ... and ${all.length - MAX_LISTED_USER_STRINGS} more`);
+		}
+	}
+	lines.push(...edgeLines("calls", calls), ...edgeLines("field accesses", fields));
+
+	if (cappedBodies > 0) {
+		lines.push(
+			`    ${cappedBodies} body(ies) stopped at the ${MAX_BODY_INSTRUCTIONS}-instruction cap; their remaining instructions were not read`,
+		);
+	}
+	if (badStrings > 0) lines.push(`    ${badStrings} ldstr token(s) did not resolve to a readable #US string`);
+	if (unreadMethods > 0) {
+		lines.push(`    ${unreadMethods} method(s) were not read after the ${MAX_METHOD_BODIES}-body cap`);
+	}
+	if (unreadIl > 0) {
+		lines.push(
+			`    ${unreadIl} method(s) were not read because the next body would pass the ${
+				MAX_IL_BYTES / (1024 * 1024)
+			} MiB IL cap`,
+		);
+	}
+	return lines;
 }
 
 // ---------------------------------------------------------------------------

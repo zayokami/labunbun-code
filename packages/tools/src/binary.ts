@@ -19,16 +19,17 @@
  * `.dep-v0` dependency JSON. A third block, .NET's managed metadata, is
  * found the way a loader finds it — through the CLI data directory a managed
  * PE embeds — and reports the module, the assembly identity and references,
- * and the target framework. The buildinfo blob has two layouts — the linker
+ * the target framework, and a summary of managed method bodies: their call
+ * and field-access targets and the user strings they load. The buildinfo blob has two layouts — the linker
  * has written the strings inline since Go 1.18, and behind two pointers
  * before that — and both are decoded here. The blob is located the way the Go
  * toolchain's own reader locates it: by section name where the platform gives
  * it one (`.go.buildinfo`, `__go_buildinfo`), and otherwise by scanning the
  * first writable data section. That fallback is load-bearing on Windows,
  * where the linker leaves the blob inside `.data` and no name matching will
- * ever find it. A third block, Electron's fuse wire, is found by its sentinel
- * string anywhere in the file: it is what says how packaging configured the
- * features Electron would otherwise accept from the environment. A binary
+ * ever find it. Electron's fuse wire is found by its sentinel string anywhere
+ * in the file: it is what says how packaging configured the features Electron
+ * would otherwise accept from the environment. A binary
  * without these blocks is still a fully reported binary; "no Go build info
  * found" is a finding, not a failure.
  *
@@ -41,8 +42,8 @@
  * what is missing; nothing in here throws over one.
  *
  * What this is not: a disassembler, a decompiler, or a security scanner. It
- * reads headers and two metadata sections; it never executes, loads or
- * interprets the file's code.
+ * reads headers, metadata and the operand lengths of managed IL; it never
+ * executes, loads or interprets the file's code.
  */
 import { readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -129,8 +130,9 @@ export function createInspectBinaryTool(cwd: string): AnyTool {
 			"subsystem and resource types, and for WASM its imports, exports and name section. Four known " +
 			"metadata blocks are extracted when present: Go build info " +
 			"(toolchain version and module list), cargo-auditable `.dep-v0` dependency data, Electron fuse " +
-			"states, and .NET managed metadata (assembly identity and references). It does not disassemble " +
-			"or decompile code. Use it to identify a binary and see how it was built.",
+			"states, and .NET managed metadata (assembly identity, references, and method call/field " +
+			"summaries). It does not disassemble or decompile code. Use it to identify a binary and see how " +
+			"it was built.",
 		inputSchema: z.object({
 			path: z.string().describe("Path to the executable or object file to inspect"),
 		}),

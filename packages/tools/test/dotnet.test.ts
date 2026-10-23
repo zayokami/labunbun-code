@@ -85,6 +85,7 @@ function managedImage(
 		entry?: number;
 		cliSize?: number;
 		cliRva?: number;
+		code?: Buffer;
 		nativeHeader?: Buffer;
 	} = {},
 ): Buffer {
@@ -98,12 +99,13 @@ function managedImage(
 	cli.writeUInt32LE(root.length, 12);
 	cli.writeUInt32LE(options.flags ?? 0x00000001, 16);
 	cli.writeUInt32LE(options.entry ?? 0, 20);
+	const code = options.code ?? Buffer.alloc(0);
 	const native = options.nativeHeader;
 	if (native !== undefined) {
-		cli.writeUInt32LE(0x1000 + cliSize + root.length, 64);
+		cli.writeUInt32LE(0x1000 + cliSize + root.length + code.length, 64);
 		cli.writeUInt32LE(native.length, 68);
 	}
-	const content = cat(cli, root, native ?? Buffer.alloc(0));
+	const content = cat(cli, root, code, native ?? Buffer.alloc(0));
 	return peWith(content, { rva: options.cliRva ?? 0x1000, size: cliSize });
 }
 
@@ -171,6 +173,76 @@ function blobsOf(...entries: Buffer[]): { bytes: Buffer; at: number[] } {
 	}
 	return { bytes, at };
 }
+
+/** A one-byte compressed length; every fixture string is short. */
+const compressed = (value: number): Buffer => Buffer.from([value]);
+
+/** A #US heap: UTF-16LE text plus the trailing flag byte a user-string entry carries. */
+function userStringsOf(...entries: string[]): { bytes: Buffer; at: number[] } {
+	let bytes: Buffer = Buffer.from([0]);
+	const at: number[] = [];
+	for (const entry of entries) {
+		at.push(bytes.length);
+		const payload = cat(Buffer.from(entry, "utf16le"), Buffer.from([1]));
+		bytes = cat(bytes, compressed(payload.length), payload);
+	}
+	return { bytes, at };
+}
+
+// Table rows, at the widths a fixture with two-byte heap and table indexes
+// has. MemberRefParent tag 0 is TypeDef and tag 1 is TypeRef; both carry the
+// row number in the upper bits.
+
+const typeRefRow = (scope: number, nameAt: number, namespaceAt: number): Buffer =>
+	cat(u16le(scope), u16le(nameAt), u16le(namespaceAt));
+const typeDefRow = (
+	nameAt: number,
+	namespaceAt: number,
+	fieldList: number,
+	methodList: number,
+	options: { flags?: number; extends?: number } = {},
+): Buffer =>
+	cat(
+		u32le(options.flags ?? 0),
+		u16le(nameAt),
+		u16le(namespaceAt),
+		u16le(options.extends ?? 0),
+		u16le(fieldList),
+		u16le(methodList),
+	);
+const fieldRow = (nameAt: number): Buffer => cat(u16le(0), u16le(nameAt), u16le(0));
+const methodDefRow = (rva: number, nameAt: number): Buffer =>
+	cat(u32le(rva), u16le(0), u16le(0), u16le(nameAt), u16le(0), u16le(1));
+const memberRefRow = (parent: number, nameAt: number): Buffer => cat(u16le(parent), u16le(nameAt), u16le(0));
+
+/** The CLI header and metadata root occupy the start of the `.text` content. */
+const codeRva = (root: Buffer, cliSize = 72): number => 0x1000 + cliSize + root.length;
+
+/** A tiny method body: one header byte whose upper six bits are the code length. */
+const tinyBody = (il: Buffer): Buffer => cat(Buffer.from([(il.length << 2) | 2]), il);
+
+/** A fat method body: a 12-byte header, then the code. */
+const fatBody = (il: Buffer, options: { headerSize?: number; maxStack?: number } = {}): Buffer => {
+	const headerSize = options.headerSize ?? 12;
+	const head = Buffer.alloc(headerSize);
+	head.writeUInt16LE(((headerSize / 4) << 12) | 3, 0);
+	head.writeUInt16LE(options.maxStack ?? 8, 2);
+	head.writeUInt32LE(il.length, 4);
+	return cat(head, il);
+};
+
+// IL fragments. Token operands are little-endian four-byte table tokens.
+const ilNop = Buffer.from([0x00]);
+const ilRet = Buffer.from([0x2a]);
+const ilCall = (token: number): Buffer => cat(Buffer.from([0x28]), u32le(token));
+const ilCallvirt = (token: number): Buffer => cat(Buffer.from([0x6f]), u32le(token));
+const ilNewobj = (token: number): Buffer => cat(Buffer.from([0x73]), u32le(token));
+const ilLdftn = (token: number): Buffer => cat(Buffer.from([0xfe, 0x06]), u32le(token));
+const ilLdvirtftn = (token: number): Buffer => cat(Buffer.from([0xfe, 0x07]), u32le(token));
+const ilLdstr = (token: number): Buffer => cat(Buffer.from([0x72]), u32le(token));
+const ilLdfld = (token: number): Buffer => cat(Buffer.from([0x7b]), u32le(token));
+const ilStfld = (token: number): Buffer => cat(Buffer.from([0x7d]), u32le(token));
+const ilLdsfld = (token: number): Buffer => cat(Buffer.from([0x7e]), u32le(token));
 
 /** The 16 bytes of the one GUID every fixture heap carries. */
 const GUID_BYTES = Buffer.from([
@@ -299,6 +371,183 @@ describe("managed metadata", () => {
 		]);
 
 		expect(text(root)).toContain(`  module: Test.dll (MVID ${GUID_TEXT})`);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// managed method bodies
+// ---------------------------------------------------------------------------
+
+describe("managed code", () => {
+	test("types, bodies, tokens, strings and the entry point resolve from the tables", () => {
+		const strings = stringsOf(
+			"Test.dll",
+			"Ns",
+			"Widget",
+			"Field",
+			"Run",
+			"Helper",
+			"Other",
+			"Target",
+			"System",
+			"Console",
+			"WriteLine",
+			"OtherField",
+		);
+		const users = userStringsOf("hello");
+		const buildRoot = (runRva: number, helperRva: number): Buffer =>
+			metadataRoot("v4.0.30319", [
+				{
+					name: "#~",
+					bytes: tablesStream([
+						{ id: 0x01, rows: [typeRefRow(0, strings.at[9], strings.at[8])] },
+						{
+							id: 0x02,
+							rows: [typeDefRow(strings.at[2], strings.at[1], 1, 1), typeDefRow(strings.at[6], strings.at[1], 2, 3)],
+						},
+						{ id: 0x04, rows: [fieldRow(strings.at[3]), fieldRow(strings.at[11])] },
+						{
+							id: 0x06,
+							rows: [
+								methodDefRow(runRva, strings.at[4]),
+								methodDefRow(helperRva, strings.at[5]),
+								methodDefRow(0, strings.at[7]),
+							],
+						},
+						{
+							id: 0x0a,
+							rows: [memberRefRow(2 << 3, strings.at[7]), memberRefRow((1 << 3) | 1, strings.at[10])],
+						},
+					]),
+				},
+				{ name: "#Strings", bytes: strings.bytes },
+				{ name: "#US", bytes: users.bytes },
+				{ name: "#Blob", bytes: Buffer.from([0]) },
+			]);
+		const probe = buildRoot(0, 0);
+		const runRva = codeRva(probe);
+		const runBody = tinyBody(
+			cat(
+				ilNop,
+				ilNewobj(0x0a000001),
+				ilLdstr(0x70000000 | users.at[0]),
+				ilStfld(0x04000001),
+				ilLdfld(0x04000001),
+				ilLdsfld(0x04000002),
+				ilRet,
+			),
+		);
+		const helperBody = fatBody(
+			cat(ilCall(0x0a000002), ilCallvirt(0x0a000001), ilLdftn(0x06000001), ilLdvirtftn(0x06000002), ilRet),
+		);
+		const root = buildRoot(runRva, runRva + runBody.length);
+		const report = text(root, { code: cat(runBody, helperBody), entry: 0x06000001 });
+
+		expect(report).toContain("  managed code:");
+		expect(report).toContain("    types (2):");
+		expect(report).toContain("      Ns.Widget (2 methods, 1 field)");
+		expect(report).toContain("      Ns.Other (1 method, 1 field)");
+		expect(report).toContain("    methods: 3 (2 with a body, 1 without, 0 undecodable)");
+		expect(report).toContain("    method bodies read: 2 (50 bytes of IL; cap 2000 methods / 8 MiB)");
+		expect(report).toContain("    entry point method: Ns.Widget.Run");
+		expect(report).toContain('    user strings (1): "hello"');
+		expect(report).toContain("    calls (5 distinct, 5 occurrences):");
+		expect(report).toContain("      Ns.Widget.Helper -> Ns.Other.Target 1");
+		expect(report).toContain("      Ns.Widget.Helper -> Ns.Widget.Helper 1");
+		expect(report).toContain("      Ns.Widget.Helper -> Ns.Widget.Run 1");
+		expect(report).toContain("      Ns.Widget.Helper -> System.Console.WriteLine 1");
+		expect(report).toContain("      Ns.Widget.Run -> Ns.Other.Target 1");
+		expect(report).toContain("    field accesses (2 distinct, 3 occurrences):");
+		expect(report).toContain("      Ns.Widget.Run -> Ns.Widget.Field 2");
+		expect(report).toContain("      Ns.Widget.Run -> Ns.Other.OtherField 1");
+	});
+
+	test("a reserved opcode makes one body undecodable; the next body is still read", () => {
+		const strings = stringsOf("M");
+		const buildRoot = (badRva: number, goodRva: number): Buffer =>
+			metadataRoot("v4.0.30319", [
+				{
+					name: "#~",
+					bytes: tablesStream([
+						{
+							id: 0x06,
+							rows: [methodDefRow(badRva, strings.at[0]), methodDefRow(goodRva, strings.at[0])],
+						},
+					]),
+				},
+				{ name: "#Strings", bytes: strings.bytes },
+			]);
+		const probe = buildRoot(0, 0);
+		const badRva = codeRva(probe);
+		const badBody = tinyBody(Buffer.from([0x24]));
+		const goodBody = fatBody(ilRet, { headerSize: 16 });
+		const root = buildRoot(badRva, badRva + badBody.length);
+		const report = text(root, { code: cat(badBody, goodBody) });
+
+		expect(report).toContain("    types: none");
+		expect(report).toContain("    methods: 2 (1 with a body, 0 without, 1 undecodable)");
+		expect(report).toContain("    method bodies read: 1 (1 byte of IL");
+		expect(report).toContain("    calls: none");
+		expect(report).toContain("    field accesses: none");
+	});
+
+	test("user strings are escaped and a bad ldstr token is counted", () => {
+		const strings = stringsOf("M");
+		const users = userStringsOf('a\n"\\b');
+		const buildRoot = (rva: number): Buffer =>
+			metadataRoot("v4.0.30319", [
+				{
+					name: "#~",
+					bytes: tablesStream([{ id: 0x06, rows: [methodDefRow(rva, strings.at[0])] }]),
+				},
+				{ name: "#Strings", bytes: strings.bytes },
+				{ name: "#US", bytes: users.bytes },
+			]);
+		const probe = buildRoot(0);
+		const body = tinyBody(cat(ilLdstr(0x70000000 | users.at[0]), ilLdstr(0x7000ffff), ilRet));
+		const report = text(buildRoot(codeRva(probe)), { code: body });
+
+		expect(report).toContain('    user strings (1): "a\\u000a\\"\\\\b"');
+		expect(report).toContain("    1 ldstr token(s) did not resolve to a readable #US string");
+	});
+
+	test("the method-body cap stops the read and says how many were left", () => {
+		const strings = stringsOf("M");
+		const buildRoot = (rva: number): Buffer =>
+			metadataRoot("v4.0.30319", [
+				{
+					name: "#~",
+					bytes: tablesStream([
+						{ id: 0x06, rows: Array.from({ length: 2001 }, () => methodDefRow(rva, strings.at[0])) },
+					]),
+				},
+				{ name: "#Strings", bytes: strings.bytes },
+			]);
+		const probe = buildRoot(0);
+		const report = text(buildRoot(codeRva(probe)), { code: tinyBody(ilRet) });
+
+		expect(report).toContain("    methods: 2001 (2000 with a body, 0 without, 0 undecodable, 1 not read)");
+		expect(report).toContain("    method bodies read: 2000 (2000 bytes of IL; cap 2000 methods / 8 MiB)");
+		expect(report).toContain("    1 method(s) were not read after the 2000-body cap");
+	});
+
+	test("a body past the IL budget is counted but not walked", () => {
+		const strings = stringsOf("M");
+		const il = Buffer.alloc(8 * 1024 * 1024 + 1);
+		const buildRoot = (rva: number): Buffer =>
+			metadataRoot("v4.0.30319", [
+				{
+					name: "#~",
+					bytes: tablesStream([{ id: 0x06, rows: [methodDefRow(rva, strings.at[0])] }]),
+				},
+				{ name: "#Strings", bytes: strings.bytes },
+			]);
+		const probe = buildRoot(0);
+		const report = text(buildRoot(codeRva(probe)), { code: fatBody(il) });
+
+		expect(report).toContain("    methods: 1 (0 with a body, 0 without, 0 undecodable, 1 not read)");
+		expect(report).toContain("    method bodies read: 0 (0 bytes of IL");
+		expect(report).toContain("    1 method(s) were not read because the next body would pass the 8 MiB IL cap");
 	});
 });
 
