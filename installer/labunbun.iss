@@ -1,7 +1,8 @@
 ; LaBunbun Code - Windows installer (Alpha)
 ; Compile with:
-;   "D:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\labunbun.iss
+;   bun run installer:build
 ; The release binary must already exist at dist\labunbun-x64.exe.
+; The build script finds ISCC.exe without assuming an install path.
 
 #define AppName "LaBunbun Code"
 #define AppVersion "0.1.0"

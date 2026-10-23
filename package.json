@@ -12,7 +12,8 @@
 		"test": "bun test",
 		"lint": "biome check --error-on-warnings .",
 		"fmt": "biome format --write .",
-		"bin:build": "bun build --compile --minify packages/coding-agent/src/main.ts --outfile dist/labunbun-x64.exe"
+		"bin:build": "bun build --compile --minify packages/coding-agent/src/main.ts --outfile dist/labunbun-x64.exe",
+		"installer:build": "bun run scripts/build-installer.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.9",
