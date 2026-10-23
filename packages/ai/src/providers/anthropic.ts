@@ -165,11 +165,11 @@ export const OAUTH_BETA = "oauth-2025-04-20";
  * The API version both clients ask for unless `ANTHROPIC_API_VERSION` says
  * otherwise.
  *
- * The 2023-06-01 version is still supported. An SDK sends the version that was
- * current when its major line was released: the installed 0.x sends this one,
- * and a later major sends 2026-10-21. Leaving the header to the SDK therefore
- * makes the wire version a property of a dependency bump. Pinning it here keeps
- * the choice in this repository, where a migration can be reviewed and tested.
+ * The 2023-06-01 version is still supported. SDK 1.x sends 2026-10-21 unless
+ * told otherwise — the version that was current when its major line was
+ * released. Leaving the header to the SDK therefore makes the wire version a
+ * property of a dependency bump. Pinning it here keeps the choice in this
+ * repository, where a migration can be reviewed and tested.
  */
 export const DEFAULT_ANTHROPIC_API_VERSION = "2023-06-01";
 
@@ -820,9 +820,9 @@ export interface AnthropicAuthOptions {
  * Precedence: an explicit per-call key first (the most deliberate statement
  * there is), then the stored subscription (the order Claude Code uses — a
  * logged-in account is a statement too), then the environment. The
- * credentials branch passes `authToken: null` because the SDK otherwise
- * adopts `ANTHROPIC_AUTH_TOKEN` from the environment, and a set authToken
- * makes it ignore `credentials` entirely.
+ * credentials branch passes `apiKey: null` and `authToken: null` so the
+ * trio names one credential option. SDK 1.x reads no environment token when
+ * `credentials` is that one option; a second non-null one throws.
  */
 export function anthropicAuthOptions(
 	model: Model,
@@ -838,15 +838,25 @@ export function anthropicAuthOptions(
  * The SDK options both client constructions share. Exported because the
  * version header is decided here, and a construction is otherwise only
  * observable through the SDK instance.
+ *
+ * The credential header is decided here too. SDK 1.x sends an API key only as
+ * `Authorization: Bearer`, while a reseller gateway built against 0.x reads
+ * `X-Api-Key`. Reseller rows therefore carry both headers, so either door
+ * opens; a first-party row keeps the SDK's official single-header shape.
  */
 export function anthropicClientDefaults(
 	model: Model,
 	env: Record<string, string | undefined> = process.env,
+	auth?: Pick<AnthropicAuthOptions, "apiKey">,
 ): { baseURL: string | undefined; maxRetries: number; defaultHeaders: Record<string, string> } {
+	const headers = anthropicVersionHeaders(model, env);
+	if (model.provider !== "anthropic" && typeof auth?.apiKey === "string" && auth.apiKey !== "") {
+		headers["X-Api-Key"] = auth.apiKey;
+	}
 	return {
 		baseURL: model.baseUrl || undefined,
 		maxRetries: 0, // our retry wrapper owns retry policy
-		defaultHeaders: anthropicVersionHeaders(model, env),
+		defaultHeaders: headers,
 	};
 }
 
@@ -860,9 +870,10 @@ async function defaultClient(
 	// its timeout timer aborts through that one — so replacing it with the
 	// caller's alone would leave the timeout with no listener.
 	const callerSignal = options?.signal;
+	const auth = anthropicAuthOptions(model, options, credentials);
 	return new Anthropic({
-		...anthropicAuthOptions(model, options, credentials),
-		...anthropicClientDefaults(model),
+		...auth,
+		...anthropicClientDefaults(model, process.env, auth),
 		fetch: callerSignal
 			? (input, init) => fetch(input, { ...init, signal: composeSignals(init?.signal, callerSignal) })
 			: undefined,
@@ -937,8 +948,9 @@ async function defaultModelsClient(model: Model): Promise<AnthropicModelsClientL
 	const { default: Anthropic } = await import("@anthropic-ai/sdk");
 	// No retries and no timeout of its own: how long the caller is willing to
 	// wait is the caller's policy, and it says so with the signal it passes.
+	const auth = { apiKey: resolveApiKey(model) ?? "" };
 	return new Anthropic({
-		apiKey: resolveApiKey(model) ?? "",
-		...anthropicClientDefaults(model),
+		...auth,
+		...anthropicClientDefaults(model, process.env, auth),
 	}) as unknown as AnthropicModelsClientLike;
 }

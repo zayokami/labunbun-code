@@ -336,6 +336,27 @@ describe("the pinned API version", () => {
 		});
 	});
 
+	test("a reseller row also carries the credential header the 0.x SDK sent", () => {
+		// SDK 1.x sends an API key only as `Authorization: Bearer`. A gateway
+		// built against 0.x reads `X-Api-Key`, so reseller rows carry both; a
+		// first-party row keeps the official single-header shape.
+		expect(anthropicClientDefaults(GATEWAY, {}, { apiKey: "sk-gateway" }).defaultHeaders).toEqual({
+			"anthropic-version": "2023-06-01",
+			"X-Api-Key": "sk-gateway",
+		});
+		expect(anthropicClientDefaults(MODEL, {}, { apiKey: "sk-first-party" }).defaultHeaders).toEqual({
+			"anthropic-version": "2023-06-01",
+		});
+		// The subscription path has no api key, and a keyless row has nothing to
+		// echo: neither gets a header.
+		expect(anthropicClientDefaults(GATEWAY, {}, { apiKey: null }).defaultHeaders).toEqual({
+			"anthropic-version": "2023-06-01",
+		});
+		expect(anthropicClientDefaults(GATEWAY, {}, { apiKey: "" }).defaultHeaders).toEqual({
+			"anthropic-version": "2023-06-01",
+		});
+	});
+
 	test("the request body carries none of the sampling parameters 2026-10-21 removed", () => {
 		for (const model of [MODEL, HAIKU, BINDING_MODEL, GATEWAY]) {
 			const params = buildAnthropicRequest(model, ctx({ messages: [userMessage("hi")] }), {
@@ -363,6 +384,119 @@ describe("the pinned API version", () => {
 		const serialized = JSON.stringify(wire);
 		expect(serialized).not.toContain('"type":"document"');
 		expect(serialized).not.toContain('"citations"');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The SDK's own wire
+// ---------------------------------------------------------------------------
+
+describe("the SDK's wire", () => {
+	/**
+	 * The headers of the one request an SDK client sends, captured at the fetch
+	 * boundary. The fake fetch throws before any network call, and `maxRetries`
+	 * is zero, so a single capture is the whole exchange.
+	 */
+	async function wireHeaders(model: Model, apiKey: string): Promise<{ headers: Headers; calls: number }> {
+		const { default: Anthropic } = await import("@anthropic-ai/sdk");
+		let calls = 0;
+		let captured: Headers | undefined;
+		const client = new Anthropic({
+			apiKey,
+			...anthropicClientDefaults(model, {}, { apiKey }),
+			fetch: async (_input, init) => {
+				calls++;
+				captured = new Headers(init?.headers);
+				throw new Error("the test stops before the network");
+			},
+		});
+		// The SDK's `APIPromise` is a thenable rather than a native Promise, so
+		// `expect(...).rejects` does not recognize it; catching the wait by hand
+		// is what makes the rejected exchange observable here.
+		let failure: unknown;
+		try {
+			await client.messages.create({
+				model: model.id,
+				max_tokens: 1,
+				messages: [{ role: "user", content: "hi" }],
+			});
+		} catch (error) {
+			failure = error;
+		}
+		if (!(failure instanceof Error)) throw new Error("the SDK did not fail at the fake fetch");
+		if (!captured) throw new Error("the SDK never reached its fetch");
+		return { headers: captured, calls };
+	}
+
+	test("a gateway request carries both credential headers and the pinned version", async () => {
+		const { headers, calls } = await wireHeaders(GATEWAY, "sk-gateway");
+		// One attempt: the defaults also keep the SDK's own retry loop out of
+		// the way of the wrapper that owns retry policy.
+		expect(calls).toBe(1);
+		expect(headers.get("authorization")).toBe("Bearer sk-gateway");
+		expect(headers.get("x-api-key")).toBe("sk-gateway");
+		expect(headers.get("anthropic-version")).toBe("2023-06-01");
+	});
+
+	test("a first-party request keeps the SDK's single auth header", async () => {
+		const { headers } = await wireHeaders(MODEL, "sk-first");
+		expect(headers.get("authorization")).toBe("Bearer sk-first");
+		expect(headers.get("x-api-key")).toBeNull();
+		// The pin survives the SDK's new default of 2026-10-21.
+		expect(headers.get("anthropic-version")).toBe("2023-06-01");
+	});
+
+	test("the stream yields the event sequence the mapper consumes", async () => {
+		// The mapper above is tested with plain fixtures, and every other test
+		// injects a fake client, so nothing else holds the real SDK to the shape
+		// this adapter reads. A dependency bump that renamed or reordered these
+		// events would otherwise surface only at a live request.
+		const { default: Anthropic } = await import("@anthropic-ai/sdk");
+		const event = (name: string, data: unknown) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+		const body = [
+			event("message_start", {
+				type: "message_start",
+				message: { model: MODEL.id, usage: { input_tokens: 5, output_tokens: 0 } },
+			}),
+			event("content_block_start", {
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "text", text: "" },
+			}),
+			event("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "text_delta", text: "hi" },
+			}),
+			event("content_block_stop", { type: "content_block_stop", index: 0 }),
+			event("message_delta", {
+				type: "message_delta",
+				delta: { stop_reason: "end_turn" },
+				usage: { output_tokens: 1 },
+			}),
+			event("message_stop", { type: "message_stop" }),
+		].join("");
+		const client = new Anthropic({
+			apiKey: "sk-test",
+			...anthropicClientDefaults(MODEL, {}, { apiKey: "sk-test" }),
+			fetch: async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		});
+		const stream = await client.messages.create({
+			model: MODEL.id,
+			max_tokens: 8,
+			messages: [{ role: "user", content: "hi" }],
+			stream: true,
+		});
+		const types: string[] = [];
+		for await (const raw of stream) types.push(raw.type);
+		expect(types).toEqual([
+			"message_start",
+			"content_block_start",
+			"content_block_delta",
+			"content_block_stop",
+			"message_delta",
+			"message_stop",
+		]);
 	});
 });
 
@@ -1465,9 +1599,9 @@ describe("createAnthropicStreamFn — the Claude subscription", () => {
 		expect(anthropicAuthOptions(MODEL, { apiKey: "sk-explicit" }, credentials.provider)).toEqual({
 			apiKey: "sk-explicit",
 		});
-		// `authToken: null` is not decoration: the SDK adopts ANTHROPIC_AUTH_TOKEN
-		// from the environment when it is not told otherwise, and a set authToken
-		// makes it ignore `credentials` entirely.
+		// The nulls keep the trio to one credential option. SDK 1.x reads no
+		// environment token when `credentials` is that option, and two non-null
+		// options throw before a request.
 		expect(anthropicAuthOptions(MODEL, undefined, credentials.provider)).toEqual({
 			apiKey: null,
 			authToken: null,
