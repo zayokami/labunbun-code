@@ -500,7 +500,7 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 ### Requirements
 
 - The tool does not use Node.js.
-- Bun 1.3.0 or later
+- Bun 1.4.4 or later
 - pnpm 10.33.2 or later
 - An API key for one provider
 
