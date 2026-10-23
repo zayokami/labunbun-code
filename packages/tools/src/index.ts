@@ -96,6 +96,7 @@ export {
 	type WebSearchBackend,
 	type WebSearchOptions,
 } from "./web.ts";
+export { createInspectWebCaptureTool } from "./web-capture.ts";
 export { createWriteTool } from "./write.ts";
 
 import type { AnyTool } from "@labunbun/agent";
@@ -123,6 +124,7 @@ import {
 	type WebFetchBackend,
 	type WebSearchBackend,
 } from "./web.ts";
+import { createInspectWebCaptureTool } from "./web-capture.ts";
 import { createWriteTool } from "./write.ts";
 
 export interface CreateAllToolsOptions {
@@ -152,7 +154,7 @@ export interface CreateAllToolsOptions {
  * The default coding tool set. Order is frozen here so the wire-tool list
  * stays prompt-cache stable: core file/shell tools first, then task and web
  * tools, with the standalone read-only probes (Digest, InspectSqlite,
- * InspectArtifact, InspectBinary, InspectSourceMap, CompareArtifacts) last — a new tool is
+ * InspectArtifact, InspectBinary, InspectSourceMap, CompareArtifacts, InspectWebCapture) last — a new tool is
  * appended, never inserted, so no existing tool's schema slot moves.
  */
 export function createAllTools(cwd: string, options: CreateAllToolsOptions = {}): AnyTool[] {
@@ -219,5 +221,6 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createInspectBinaryTool(cwd),
 		createInspectSourceMapTool(cwd),
 		createCompareArtifactsTool(cwd),
+		createInspectWebCaptureTool(cwd),
 	];
 }

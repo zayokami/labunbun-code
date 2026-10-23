@@ -1041,6 +1041,7 @@ describe("tool registry shape", () => {
 			"InspectBinary",
 			"InspectSourceMap",
 			"CompareArtifacts",
+			"InspectWebCapture",
 		]);
 	});
 

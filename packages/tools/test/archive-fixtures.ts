@@ -60,6 +60,8 @@ export interface FixtureEntry {
 	zip64Sizes?: boolean;
 	/** Write the local-header offset as the ZIP64 sentinel, with the real value in a 0x0001 extra field. */
 	zip64LocalOffset?: boolean;
+	/** Uncompressed length written to the headers; defaults to the data's real length. */
+	declaredUncompressed?: number;
 	/** General-purpose bit flags carried by both the local header and the central record. */
 	flags?: number;
 	/** DOS date/time words; 0/0 renders as "no mtime". */
@@ -90,6 +92,7 @@ export function buildZip(options: { entries: FixtureEntry[]; comment?: string; z
 		const flags = entry.flags ?? 0;
 		const stored = method === 8 ? deflateRawSync(entry.data) : entry.data;
 		const crc = crc32(entry.data);
+		const uncompressed = entry.declaredUncompressed ?? entry.data.length;
 		const date = entry.date ?? DOS_DATE;
 		const time = entry.time ?? DOS_TIME;
 		const local = [
@@ -101,13 +104,13 @@ export function buildZip(options: { entries: FixtureEntry[]; comment?: string; z
 			...le16(date),
 			...le32(crc),
 			...le32(stored.length),
-			...le32(entry.data.length),
+			...le32(uncompressed),
 			...le16(name.length),
 			...le16(0),
 		];
 		chunks.push(byteArray(local), name, stored);
 		const zip64Data: number[] = [];
-		if (entry.zip64Sizes) zip64Data.push(...le64(entry.data.length), ...le64(stored.length));
+		if (entry.zip64Sizes) zip64Data.push(...le64(uncompressed), ...le64(stored.length));
 		if (entry.zip64LocalOffset) zip64Data.push(...le64(localOffset));
 		const zip64Extra = zip64Data.length === 0 ? [] : [...le16(0x0001), ...le16(zip64Data.length), ...zip64Data];
 		central.push(
@@ -120,7 +123,7 @@ export function buildZip(options: { entries: FixtureEntry[]; comment?: string; z
 			...le16(date),
 			...le32(crc),
 			...le32(entry.zip64Sizes ? 0xffffffff : stored.length),
-			...le32(entry.zip64Sizes ? 0xffffffff : entry.data.length),
+			...le32(entry.zip64Sizes ? 0xffffffff : uncompressed),
 			...le16(name.length),
 			...le16(zip64Extra.length),
 			...le16(0),
