@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI_NAME, CODING_AGENT_VERSION } from "../src/index.ts";
-import { main, parseArgs } from "../src/main.ts";
+import { main, parseArgs, promptFromStdin } from "../src/main.ts";
 
 describe("@labunbun/coding-agent smoke", () => {
 	test("reports its version", () => {
@@ -41,6 +41,50 @@ describe("flags that cannot mean anything are refused, not dropped", () => {
 			console.error = original;
 		}
 		expect(errors.join("\n")).toContain("Invalid --settings");
+	});
+});
+
+describe("headless automation flags", () => {
+	const home = mkdtempSync(join(tmpdir(), "labunbun-output-flags-"));
+
+	test("parse the schema and last-message paths, including the -o alias", () => {
+		expect(parseArgs(["--output-schema", "s.json", "--output-last-message", "o.txt"])).toMatchObject({
+			outputSchema: "s.json",
+			outputLastMessage: "o.txt",
+		});
+		expect(parseArgs(["-o", "o.txt"])).toMatchObject({ outputLastMessage: "o.txt" });
+	});
+
+	test("a bare flag is an empty path, which the headless branch refuses", async () => {
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+		try {
+			expect(await main(["-p", "hello", "--output-schema"], { home })).toBe(2);
+			expect(await main(["-p", "hello", "--output-last-message"], { home })).toBe(2);
+		} finally {
+			console.error = original;
+		}
+		expect(errors.join("\n")).toContain("--output-schema requires a file path");
+		expect(errors.join("\n")).toContain("--output-last-message requires a file path");
+	});
+
+	test("acp refuses the flags it has no use for", async () => {
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+		try {
+			expect(await main(["acp", "--output-schema", "s.json"], { home })).toBe(2);
+		} finally {
+			console.error = original;
+		}
+		expect(errors.join("\n")).toContain("--output-schema");
+	});
+
+	test("piped text becomes a prompt; whitespace alone does not", () => {
+		expect(promptFromStdin("  task\n")).toBe("task");
+		expect(promptFromStdin(" \n\t")).toBeNull();
+		expect(promptFromStdin("")).toBeNull();
 	});
 });
 

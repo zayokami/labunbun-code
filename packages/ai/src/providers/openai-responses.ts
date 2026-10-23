@@ -94,6 +94,15 @@ export interface ResponsesRequestParams {
 	include?: string[];
 	prompt_cache_key?: string;
 	prompt_cache_retention?: string;
+	/** The answer's shape, in this wire's spelling. */
+	text?: {
+		format: {
+			type: "json_schema";
+			name: string;
+			schema: Record<string, unknown>;
+			strict?: boolean;
+		};
+	};
 }
 
 // Long-form design notes: docs/dev/ai-layer.md
@@ -154,6 +163,14 @@ export function buildResponsesRequest(
 
 	const effort = responsesEffort(model, options?.thinkingLevel);
 	if (effort) params.reasoning = { ...effort, summary: "auto" };
+
+	// The same `strict` default Codex uses: the schema is a constraint on the
+	// answer, not a hint about it.
+	if (options?.outputSchema) {
+		params.text = {
+			format: { type: "json_schema", name: "response", schema: options.outputSchema, strict: true },
+		};
+	}
 
 	return params;
 }

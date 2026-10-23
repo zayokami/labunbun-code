@@ -6,7 +6,7 @@
  * - json: single JSON result object at the end
  * - stream-json: one JSON line per event, live
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AgentEvent, NetworkSandboxPolicy, PermissionMode, SandboxMode } from "@labunbun/agent";
 import {
@@ -151,6 +151,19 @@ export interface HeadlessOptions {
 	cwd?: string;
 	outputFormat?: OutputFormat;
 	/**
+	 * `--output-schema <file>`: a JSON Schema the final answer must follow. The
+	 * file is read once here; the parsed object rides on every request the
+	 * session makes, because the constraint applies to each answer, not just the
+	 * last one.
+	 */
+	outputSchemaPath?: string;
+	/**
+	 * `--output-last-message <file>`: where the final answer is also written.
+	 * Written atomically and after the run has settled, so a reader never sees a
+	 * half-finished answer.
+	 */
+	outputLastMessagePath?: string;
+	/**
 	 * Which home the run reads. Threaded into every loader below that would
 	 * otherwise resolve one for itself — the settings tiers, the session file,
 	 * the memory files, the skills, the agent definitions — so that a run given
@@ -225,7 +238,59 @@ function cacheResult(messages: AgentMessage[], tracker?: CacheTracker): CacheRes
 	};
 }
 
+/**
+ * The wires that can carry a JSON Schema for the answer. The Gemini Code Assist
+ * wire is a proprietary shape with no equivalent field, so a run on it refuses
+ * the flag rather than sending a request that would silently ignore it.
+ */
+const OUTPUT_SCHEMA_APIS = new Set([
+	"anthropic-messages",
+	"openai-completions",
+	"openai-responses",
+	"chatgpt-responses",
+]);
+
+/** Read `--output-schema`; the caller prints the error and returns its code. */
+function readOutputSchema(path: string | undefined): { schema?: Record<string, unknown>; error?: string } {
+	if (path === undefined) return {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			return { error: "--output-schema must name a JSON object" };
+		}
+		return { schema: parsed as Record<string, unknown> };
+	} catch (error) {
+		return { error: `Invalid --output-schema: ${error instanceof Error ? error.message : String(error)}` };
+	}
+}
+
+/**
+ * Write the final answer to the path `--output-last-message` named.
+ *
+ * Temporary file then rename, the same shape every sidecar write in this
+ * package uses: a reader either sees the previous answer or this one, never
+ * half of two. The parent directory is the caller's to have created — a run
+ * that invented directories from a filename would be writing somewhere the
+ * user did not name.
+ */
+function writeLastMessage(path: string, text: string): void {
+	const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		writeFileSync(temporary, text, "utf8");
+		renameSync(temporary, path);
+	} catch (error) {
+		rmSync(temporary, { force: true });
+		throw error;
+	}
+}
+
 export async function runHeadless(options: HeadlessOptions): Promise<number> {
+	const schemaRead = readOutputSchema(options.outputSchemaPath);
+	if (schemaRead.error !== undefined) {
+		console.error(schemaRead.error);
+		return 2;
+	}
+	const outputSchema = schemaRead.schema;
 	const cwd = options.cwd ?? process.cwd();
 	const format = options.outputFormat ?? "text";
 	const home = options.home ?? homedir();
@@ -281,6 +346,13 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// the log or it is nowhere. stderr so a piped stdout stays machine-readable.
 	if (model.toolCalling === false) {
 		console.error(`Warning: ${noToolCallingNotice(model)}`);
+	}
+	// Refused before the first request, not after a 400: the wire either has a
+	// field for the schema or it does not, and sending one that is ignored would
+	// hand the caller free-form text under a flag that promised a shape.
+	if (outputSchema && !OUTPUT_SCHEMA_APIS.has(model.api)) {
+		console.error(`--output-schema is not supported on the ${model.api} wire`);
+		return 2;
 	}
 
 	// `settings.compaction`, resolved once and shared down the same seams
@@ -839,6 +911,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		permissionMode: effectiveMode,
 		sandbox: effectiveSandbox,
 		network: effectiveNetwork,
+		outputSchema,
 		deps: {
 			streamFn,
 			// Constant in a `-p` run — nothing moves it mid-run — but read per request
@@ -1073,6 +1146,26 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const finalIncomplete = finalMessage?.incomplete === true;
 	const usage = totalUsage(session.messages);
 
+	// Before the result goes to stdout, so a script that reads the file as soon
+	// as the process exits can never win a race with the write. A missing
+	// message is a warning, not a failure: a run a hook blocked before the model
+	// has no answer to write, and the exit code already says how it ended.
+	let lastMessageWritten = true;
+	if (options.outputLastMessagePath !== undefined) {
+		if (finalMessage === undefined) {
+			console.error(
+				`Warning: --output-last-message: the run produced no assistant message; ${options.outputLastMessagePath} was not written`,
+			);
+		} else {
+			try {
+				writeLastMessage(options.outputLastMessagePath, finalText);
+			} catch (error) {
+				console.error(`--output-last-message: ${error instanceof Error ? error.message : String(error)}`);
+				lastMessageWritten = false;
+			}
+		}
+	}
+
 	if (format === "json") {
 		const result: JsonResult = {
 			type: "result",
@@ -1159,7 +1252,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// them attached: closing here is the difference between a `-p` run that ends
 	// cleanly and one that leaves a server process behind on every invocation.
 	await disconnectAllMcpServers(mcpConnections);
-	return reason === "completed" ? 0 : reason === "aborted" ? 130 : 1;
+	const code = reason === "completed" ? 0 : reason === "aborted" ? 130 : 1;
+	// A requested artifact that could not be written is a failed run even when
+	// the answer itself succeeded; an abort keeps its own code, which the caller
+	// reads as the human's decision rather than the run's failure.
+	return lastMessageWritten ? code : Math.max(code, 1);
 }
 
 /**

@@ -188,6 +188,22 @@ describe("buildAnthropicRequest", () => {
 		expect(deeperCapped.thinking).toEqual({ type: "enabled", budget_tokens: 1999 });
 	});
 
+	test("an output schema rides beside the effort, not over it", () => {
+		const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
+		// `output_config` is one object on the wire. Replacing it with the schema
+		// would silently drop the effort this adaptive row was just given.
+		expect(buildAnthropicRequest(MODEL, ctx(), { outputSchema: schema }).output_config).toEqual({
+			effort: "medium",
+			format: { type: "json_schema", schema },
+		});
+		// A budget row has no effort to preserve, and still carries the schema.
+		expect(buildAnthropicRequest(HAIKU, ctx(), { outputSchema: schema }).output_config).toEqual({
+			format: { type: "json_schema", schema },
+		});
+		// Absent schema means no key at all, on both regimes.
+		expect(buildAnthropicRequest(HAIKU, ctx()).output_config).toBeUndefined();
+	});
+
 	test("thinking: a row that declares no thinking shape is sent none, whatever the session asks", () => {
 		// The declaration is the gate, not the model's name. On a row that has
 		// neither `reasoning` nor a `thinkingMode`, a session level used to sail

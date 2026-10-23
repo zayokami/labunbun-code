@@ -235,7 +235,11 @@ export interface AnthropicRequestParams {
 	 * through: that signature is exactly why an omission here is invisible to
 	 * the compiler, and this field is what the whole adaptive path hangs on.
 	 */
-	output_config?: { effort: AnthropicEffort };
+	output_config?: {
+		effort?: AnthropicEffort;
+		/** The answer's shape, in this wire's spelling. */
+		format?: { type: "json_schema"; schema: Record<string, unknown> };
+	};
 	metadata?: { user_id?: string };
 	/**
 	 * Removed in API version 2026-10-21: sending any of the three is a 400,
@@ -374,6 +378,16 @@ export function buildAnthropicRequest(
 		if (budget >= 1024) {
 			params.thinking = { type: "enabled", budget_tokens: budget };
 		}
+	}
+
+	// The schema rides beside the effort knob: `output_config` is one object on
+	// the wire, so overwriting it with the schema would silently drop the effort
+	// that adaptive models were just given.
+	if (options?.outputSchema) {
+		params.output_config = {
+			...params.output_config,
+			format: { type: "json_schema", schema: options.outputSchema },
+		};
 	}
 
 	return params;

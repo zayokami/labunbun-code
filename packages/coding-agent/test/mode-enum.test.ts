@@ -115,7 +115,10 @@ describe("every value reaches every consumer", () => {
 	test("both startup paths go through the validator, not just -p", () => {
 		const call = mainSource.indexOf("validateModeFlags(args)");
 		expect(call).toBeGreaterThan(-1);
-		const printBranch = mainSource.indexOf("args.print !== null");
+		// The branch is keyed on the resolved prompt rather than on the flag: a
+		// piped stdin can make a `-p` run out of one that has no flag at all, and
+		// the flag alone stopped naming the branch when that landed.
+		const printBranch = mainSource.indexOf("printPrompt !== null");
 		expect(printBranch).toBeGreaterThan(-1);
 		expect(call).toBeLessThan(printBranch);
 	});

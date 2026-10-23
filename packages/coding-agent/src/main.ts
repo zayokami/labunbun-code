@@ -100,6 +100,10 @@ interface CliArgs {
 	resume: string | null;
 	continueLast: boolean;
 	outputFormat: string | null;
+	/** `--output-schema <file>`: a JSON Schema the final answer must follow. */
+	outputSchema: string | null;
+	/** `--output-last-message <file>` / `-o`: where the final answer is also written. */
+	outputLastMessage: string | null;
 	/**
 	 * `--settings <json>`: a settings object for this run alone, merged over every
 	 * file tier. Kept as the raw string here; `main` parses it so a malformed one
@@ -137,6 +141,8 @@ export function parseArgs(argv: string[]): CliArgs {
 		resume: null,
 		continueLast: false,
 		outputFormat: null,
+		outputSchema: null,
+		outputLastMessage: null,
 		settings: null,
 		gamepad: null,
 		apply: false,
@@ -209,6 +215,15 @@ export function parseArgs(argv: string[]): CliArgs {
 			case "--output-format":
 				args.outputFormat = rest[++i] ?? null;
 				break;
+			case "--output-schema":
+				// Empty string rather than null when the value is missing, so a
+				// bare flag is a visible error rather than "flag not given".
+				args.outputSchema = rest[++i] ?? "";
+				break;
+			case "--output-last-message":
+			case "-o":
+				args.outputLastMessage = rest[++i] ?? "";
+				break;
 			case "--settings":
 				// Empty string rather than null when the value is missing, so a
 				// bare `--settings` is a visible error instead of "flag not given"
@@ -267,6 +282,7 @@ function printHelp(): void {
 Usage:
   labunbun                     Interactive REPL
   labunbun -p "<prompt>"       Headless: run one prompt and print the result
+  cat prompt.md | labunbun     Headless: read the prompt from stdin
   labunbun acp                 Serve the Agent Client Protocol on stdio (for editors)
   labunbun login [claude|chatgpt|gemini]  Sign in to a subscription (a browser opens)
   labunbun logout [claude|chatgpt|gemini] Sign out of a subscription
@@ -287,6 +303,9 @@ Options:
       --resume <id>            Resume a saved session
   -c, --continue               Continue the most recent session
       --output-format <f>      Headless output: text | json | stream-json
+      --output-schema <file>   JSON Schema the final answer must follow
+  -o, --output-last-message <file>
+                               Also write the final answer to a file
       --acp                    Same as the \`acp\` subcommand
       --settings <json>        Settings for this run as a JSON object (wins over files)
       --gamepad                Read a DualShock 4 this run (or --no-gamepad)
@@ -302,6 +321,31 @@ yoshi options:
 
   Both \`yoshi\` and \`--yoshi\` run this; \`migrate\` and \`--migrate\` are the
   spellings this command had before it was renamed, and still work.`);
+}
+
+/**
+ * Read a piped stdin as the prompt.
+ *
+ * Only called when stdin is not a terminal and `-p` named no prompt:
+ * `cat task.md | labunbun` is how a script hands over a prompt longer than an
+ * argv entry can comfortably hold, and a terminal keeps the REPL. The caller
+ * decides what an empty read means; this function only collects bytes.
+ */
+async function readStdinText(): Promise<string> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+	return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * What a piped stdin contributes to a prompt. Whitespace-only input is no
+ * prompt, so a closed empty pipe falls through to the interactive path rather
+ * than sending the model a blank message. Exported for the test that pins the
+ * rule without opening a pipe.
+ */
+export function promptFromStdin(text: string): string | null {
+	const trimmed = text.trim();
+	return trimmed.length > 0 ? trimmed : null;
 }
 
 /**
@@ -476,6 +520,8 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			["continueLast", "-c"],
 			["noSession", "--no-session"],
 			["outputFormat", "--output-format"],
+			["outputSchema", "--output-schema"],
+			["outputLastMessage", "--output-last-message"],
 			["gamepad", "--gamepad/--no-gamepad"],
 		];
 		const stray = conflicting.filter(([key]) => args[key] !== null && args[key] !== false).map(([, flag]) => flag);
@@ -495,14 +541,31 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		});
 	}
 
-	if (args.print !== null) {
-		if (!args.print.trim()) {
+	// A piped stdin with no `-p` is the prompt. Only a non-TTY stdin qualifies:
+	// an interactive terminal keeps the REPL, and a subcommand owns its own
+	// input. Whitespace-only input is not a prompt and falls through, the same
+	// way an empty `-p` is refused below.
+	let printPrompt = args.print;
+	if (printPrompt === null && args.subcommand === null && process.stdin.isTTY !== true) {
+		printPrompt = promptFromStdin(await readStdinText());
+	}
+
+	if (printPrompt !== null) {
+		if (!printPrompt.trim()) {
 			console.error("-p requires a prompt string");
 			return 2;
 		}
 		const validFormats = new Set(["text", "json", "stream-json"]);
 		if (args.outputFormat && !validFormats.has(args.outputFormat)) {
 			console.error(`Invalid output format: ${args.outputFormat} (text | json | stream-json)`);
+			return 2;
+		}
+		if (args.outputSchema === "") {
+			console.error("--output-schema requires a file path");
+			return 2;
+		}
+		if (args.outputLastMessage === "") {
+			console.error("--output-last-message requires a file path");
 			return 2;
 		}
 		// `--no-session` writes nothing and a resume target reads what a previous
@@ -522,7 +585,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		}
 		const { runHeadless } = await import("./headless.ts");
 		return runHeadless({
-			prompt: args.print,
+			prompt: printPrompt,
 			modelRef: args.model ?? undefined,
 			permissionMode: flags.mode,
 			sandbox: flags.sandbox,
@@ -532,6 +595,8 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			resumeSessionId: args.resume ?? undefined,
 			continueLast: args.continueLast,
 			outputFormat: (args.outputFormat as never) ?? undefined,
+			outputSchemaPath: args.outputSchema ?? undefined,
+			outputLastMessagePath: args.outputLastMessage ?? undefined,
 			flagSettings,
 			home: options.home,
 		});
@@ -542,6 +607,16 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	// silent drop the yoshi flags had. Reject it where it cannot mean anything.
 	if (args.noSession) {
 		console.error("--no-session works in headless mode only; interactive sessions always persist");
+		return 2;
+	}
+	// The same class, for the two flags added with the headless automation
+	// surface: an interactive run has no single final answer to shape or write.
+	if (args.outputSchema !== null) {
+		console.error("--output-schema works in headless mode only; it shapes a one-shot run's answer");
+		return 2;
+	}
+	if (args.outputLastMessage !== null) {
+		console.error("--output-last-message works in headless mode only; a one-shot run has one final answer");
 		return 2;
 	}
 

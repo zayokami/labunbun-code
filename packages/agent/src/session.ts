@@ -58,6 +58,12 @@ export interface AgentSessionOptions {
 	sandbox?: SandboxMode;
 	/** The network axis. Defaults to `enabled` with no table — today's behaviour. */
 	network?: NetworkAxis;
+	/**
+	 * A JSON Schema the assistant's text must follow, carried on every request
+	 * this session sends. The host gates it to wires that can express one; the
+	 * session only forwards it, so the gate and the schema stay one decision.
+	 */
+	outputSchema?: Record<string, unknown>;
 }
 
 const MAX_OUTPUT_TOKENS_CAP = 64_000;
@@ -84,6 +90,7 @@ export class AgentSession {
 	#permissionMode: PermissionMode;
 	#sandbox: SandboxMode;
 	#network: NetworkAxis;
+	#outputSchema: Record<string, unknown> | undefined;
 
 	#handlers = new Set<AgentEventHandler>();
 	#steering: string[] = [];
@@ -113,6 +120,7 @@ export class AgentSession {
 		this.#permissionMode = options.permissionMode ?? DEFAULT_MODE_CHOICE.mode;
 		this.#sandbox = options.sandbox ?? DEFAULT_SANDBOX_FOR_MODE[this.#permissionMode];
 		this.#network = options.network ?? { access: "enabled", domains: [] };
+		this.#outputSchema = options.outputSchema;
 		// Freeze wire-tool order at construction for prompt-cache stability.
 		this.#wireTools = toWireTools(this.#tools);
 	}
@@ -472,6 +480,7 @@ export class AgentSession {
 				const streamOptions: StreamOptions = {
 					signal: this.#abortController.signal,
 					maxOutputTokens: escalatedOnce ? Math.min(this.#model.maxOutputTokens * 2, MAX_OUTPUT_TOKENS_CAP) : undefined,
+					outputSchema: this.#outputSchema,
 					// Read per request, not captured at construction: the host's reader can
 					// answer differently after a mid-session change, and the next call is
 					// meant to see the new answer.

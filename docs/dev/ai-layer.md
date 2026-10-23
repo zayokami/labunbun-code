@@ -434,6 +434,12 @@ Each adapter hands the SDK a custom `fetch`. The SDK calls it with its own signa
 - The adapter sends `output_config.effort` even for a level that once meant "think less" (`packages/ai/src/providers/anthropic.ts:281`). To compare the effort against the default and then skip the field saves nothing, because the prompt carries the resolved setting either way.
 - On the `enabled` path the budget is `min(THINKING_BUDGETS[level], max_tokens - 1)`, and it goes out only when it stays at 1024 or above (`packages/ai/src/providers/anthropic.ts:283`).
 
+#### The answer's shape
+
+- `StreamOptions.outputSchema` carries a JSON Schema from the host to every adapter (`packages/ai/src/types.ts:318`). The session forwards it on each request (`packages/agent/src/session.ts:483`), so the constraint applies to every answer rather than only the last one.
+- Each wire has its own spelling. Anthropic puts the schema in `output_config.format` beside the effort, not in place of it, because `output_config` is one object (`packages/ai/src/providers/anthropic.ts:386`). Chat Completions uses `response_format` (`packages/ai/src/providers/openai-compat.ts:126`), and Responses uses `text.format` (`packages/ai/src/providers/openai-responses.ts:169`). Both OpenAI wires send `strict: true`, the default Codex uses: the schema is a constraint, not a hint. A schema outside the provider's strict subset is a 400 that names the field.
+- The host gates the flag to those four wires (`packages/coding-agent/src/headless.ts:246`). The Gemini Code Assist wire has no field for a schema, so a run on it refuses the flag before the first request (`packages/coding-agent/src/headless.ts:353`) rather than sending a request that would ignore it.
+
 #### Message conversion
 
 - `convertMessages` merges consecutive tool results into one user message of `tool_result` blocks. The API needs tool use and its results paired inside user turns (`packages/ai/src/providers/anthropic.ts:294`).

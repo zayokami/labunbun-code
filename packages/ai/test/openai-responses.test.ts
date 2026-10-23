@@ -113,6 +113,15 @@ describe("buildResponsesRequest", () => {
 		expect(params.max_output_tokens).toBe(512);
 		expect(params.max_tokens).toBeUndefined();
 	});
+
+	test("an output schema is text.format, with strict on", () => {
+		const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
+		const params = buildResponsesRequest(MODEL, ctx(), { outputSchema: schema });
+		expect(params.text).toEqual({
+			format: { type: "json_schema", name: "response", schema, strict: true },
+		});
+		expect(buildResponsesRequest(MODEL, ctx()).text).toBeUndefined();
+	});
 });
 
 describe("responsesEffort", () => {

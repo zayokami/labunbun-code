@@ -85,6 +85,11 @@ export interface OpenAIRequestParams {
 	prompt_cache_key?: string;
 	/** How long the provider should keep the entry, where it lets the caller say. */
 	prompt_cache_retention?: string;
+	/** The answer's shape, in this wire's spelling. */
+	response_format?: {
+		type: "json_schema";
+		json_schema: { name: string; schema: Record<string, unknown>; strict?: boolean };
+	};
 }
 
 export function buildOpenAIRequest(
@@ -116,6 +121,16 @@ export function buildOpenAIRequest(
 		// only understand max_tokens. Send both — unknown fields are ignored.
 		params.max_completion_tokens = options.maxOutputTokens;
 		params.max_tokens = options.maxOutputTokens;
+	}
+
+	if (options?.outputSchema) {
+		// `strict` is the default Codex uses, and it is what makes the schema a
+		// constraint rather than a hint. A schema that cannot satisfy the
+		// provider's strict subset is the caller's to fix; the API's 400 names it.
+		params.response_format = {
+			type: "json_schema",
+			json_schema: { name: "response", schema: options.outputSchema, strict: true },
+		};
 	}
 
 	if (context.tools && context.tools.length > 0) {

@@ -308,6 +308,15 @@ export interface StreamOptions {
 	apiKey?: string;
 	headers?: Record<string, string>;
 	/**
+	 * A JSON Schema the answer's text must follow.
+	 *
+	 * The host gates it to wires that can express one; an adapter that receives
+	 * it puts it on the request in that wire's own spelling. A provider that
+	 * cannot express the constraint must refuse rather than send a request that
+	 * silently ignores it.
+	 */
+	outputSchema?: Record<string, unknown>;
+	/**
 	 * Called once per retry, just before the wrapper sleeps.
 	 *
 	 * A ladder that backs off to thirty seconds a step runs for minutes, and

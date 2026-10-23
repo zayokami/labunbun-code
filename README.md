@@ -557,6 +557,8 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 | `--resume <id>` | Open this session in the terminal. A headless run continues the session with the prompt of the run. |
 | `-c`, `--continue` | Open the last session in this directory. A headless run continues it with the prompt of the run. |
 | `--output-format <format>` | Set the output format. The values are `text`, `json`, `stream-json`. |
+| `--output-schema <file>` | Make the final answer follow this JSON Schema. The value is a path to a JSON object. This option works in headless mode only. The run stops with an error when the model's wire cannot send a schema. |
+| `-o`, `--output-last-message <file>` | Also write the final answer to this file. This option works in headless mode only. The tool writes the file before it prints the result. |
 | `--settings <json>` | Merge this settings object over the settings files for one run. The value is JSON. A value that is not valid JSON stops the run. |
 | `--gamepad` | Use the controller for this run. The tool does not write a setting. |
 | `--no-gamepad` | Do not use the controller for this run. |
@@ -566,7 +568,7 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 
 Every option takes the next argument. The tool does not accept `--option=value`.
 
-The tool stops with an error when `--acp` shares a command line with `-p`, `--resume`, `-c`, `--no-session`, `--output-format`, or a gamepad option.
+The tool stops with an error when `--acp` shares a command line with `-p`, `--resume`, `-c`, `--no-session`, `--output-format`, `--output-schema`, `--output-last-message`, or a gamepad option.
 
 The default model is `anthropic/claude-sonnet-5`. The number of turns has no limit by default.
 
@@ -637,6 +639,12 @@ Press Ctrl+T to show the watch panel. The panel shows a background shell's tail,
 ### Headless output
 
 Use `--output-format text` for plain text. Use `--output-format json` for one JSON object. Use `--output-format stream-json` for one JSON object per event.
+
+Use a pipe with no `-p` to read the prompt from stdin: `cat task.md | labunbun`. Whitespace-only input is not a prompt. A terminal keeps the interactive mode.
+
+`--output-schema` makes the answer follow a JSON Schema. The run refuses the flag on a wire with no field for a schema (the Gemini subscription wire). It does not send a request that ignores the schema. The Anthropic, OpenAI Chat Completions, OpenAI Responses, and ChatGPT wires send it in their own shape.
+
+`--output-last-message` writes the final answer to the named file. The tool writes a temporary file and renames it, so a reader never sees a partial answer. The run writes nothing when it produced no assistant text. It warns on stderr in that case. A write that fails makes the run exit with code 1.
 
 The JSON result carries `error_kind` and `error_remedy` when the run ended on a classified failure. It carries `incomplete: true` when the reported text is the partial answer of a failed or interrupted turn.
 

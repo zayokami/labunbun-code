@@ -50,6 +50,15 @@ describe("buildOpenAIRequest", () => {
 		});
 	});
 
+	test("an output schema becomes a strict response_format", () => {
+		const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
+		expect(buildOpenAIRequest(MODEL, ctx(), { outputSchema: schema }).response_format).toEqual({
+			type: "json_schema",
+			json_schema: { name: "response", schema, strict: true },
+		});
+		expect(buildOpenAIRequest(MODEL, ctx()).response_format).toBeUndefined();
+	});
+
 	test("reasoning_effort only for reasoning levels", () => {
 		expect(buildOpenAIRequest(MODEL, ctx(), { thinkingLevel: "high" }).reasoning_effort).toBe("high");
 		expect(buildOpenAIRequest(MODEL, ctx(), { thinkingLevel: "off" }).reasoning_effort).toBeUndefined();
