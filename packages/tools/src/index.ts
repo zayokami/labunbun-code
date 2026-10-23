@@ -17,6 +17,7 @@ export {
 	createKillBashTool,
 } from "./bash.ts";
 export { createInspectBinaryTool } from "./binary.ts";
+export { createCompareArtifactsTool } from "./compare-artifacts.ts";
 export { caseInsensitivePaths } from "./containment.ts";
 export { createDigestTool } from "./digest.ts";
 export { createEditTool } from "./edit.ts";
@@ -102,6 +103,7 @@ import { createInspectArtifactTool } from "./artifact.ts";
 import { BackgroundShellManager } from "./background.ts";
 import { createBashOutputTool, createBashTool, createKillBashTool } from "./bash.ts";
 import { createInspectBinaryTool } from "./binary.ts";
+import { createCompareArtifactsTool } from "./compare-artifacts.ts";
 import { createDigestTool } from "./digest.ts";
 import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
@@ -150,7 +152,7 @@ export interface CreateAllToolsOptions {
  * The default coding tool set. Order is frozen here so the wire-tool list
  * stays prompt-cache stable: core file/shell tools first, then task and web
  * tools, with the standalone read-only probes (Digest, InspectSqlite,
- * InspectArtifact, InspectBinary, InspectSourceMap) last — a new tool is
+ * InspectArtifact, InspectBinary, InspectSourceMap, CompareArtifacts) last — a new tool is
  * appended, never inserted, so no existing tool's schema slot moves.
  */
 export function createAllTools(cwd: string, options: CreateAllToolsOptions = {}): AnyTool[] {
@@ -216,5 +218,6 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createInspectArtifactTool(cwd),
 		createInspectBinaryTool(cwd),
 		createInspectSourceMapTool(cwd),
+		createCompareArtifactsTool(cwd),
 	];
 }

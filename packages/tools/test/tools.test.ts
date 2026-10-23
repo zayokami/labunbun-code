@@ -1040,6 +1040,7 @@ describe("tool registry shape", () => {
 			"InspectArtifact",
 			"InspectBinary",
 			"InspectSourceMap",
+			"CompareArtifacts",
 		]);
 	});
 

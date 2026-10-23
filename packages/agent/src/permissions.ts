@@ -500,6 +500,7 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 	"InspectArtifact",
 	"InspectBinary",
 	"InspectSourceMap",
+	"CompareArtifacts",
 	"TaskList",
 	"TaskGet",
 	"Skill",
