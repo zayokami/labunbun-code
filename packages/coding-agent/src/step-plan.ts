@@ -760,9 +760,10 @@ export function planStepCode(
 			containsSecret: false,
 		});
 	}
-	// A key path this parser had to requote to read the document at all (a model
-	// id with a dot in it, written bare) is named: the file on disk still holds
-	// the unquoted spelling, which is what the user will go looking for.
+	// A key path whose digits-only segment turns it into a nested table rather
+	// than the name the user probably meant (a model id with a dot in it, written
+	// bare) is named: the file on disk still holds the unquoted spelling, which
+	// is what the user will go looking for.
 	if (raw.configDottedKeys.length > 0) {
 		items.push({
 			source: "step-code",
@@ -770,8 +771,8 @@ export function planStepCode(
 			to: "—",
 			action: "skip",
 			detail:
-				"key paths whose dotted segments had to be requoted to parse this document, as the grok reader does with its own — " +
-				"the file keeps the spelling it was written in",
+				"key paths with a bare digits-only segment after a dot, read as nested tables rather than as part of a name, " +
+				"as the grok reader names its own — the file keeps the spelling it was written in",
 			containsSecret: false,
 		});
 	}

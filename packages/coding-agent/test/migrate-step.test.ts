@@ -351,15 +351,16 @@ describe("the live document, and the two retired ones", () => {
 		).toHaveLength(1);
 	});
 
-	test("a key path this parser had to requote is named, and the rest of the file still arrives", () => {
-		// TOML 1.0 allows a digits-only segment after a dot and `Bun.TOML` rejects
-		// the whole document over it; Step's own parser is spec-compliant, so the
-		// document is one Step reads (`readStepConfigDocument`, migrate.ts:3245-3268).
+	test("a digits-only key path is named, and the rest of the file still arrives", () => {
+		// TOML 1.0 allows a digits-only segment after a dot, and Bun 1.4.4 parses
+		// it as written; Step's own parser is spec-compliant too, so the document
+		// is one Step reads. The path is still named: the file keeps the unquoted
+		// spelling, and a reader of this report has to know where it went.
 		const { home } = stepHome({
 			"config.toml": 'theme = "dark"\n\n[whatever.4]\nkey = "value"\n',
 		});
 		const planned = plan(home);
-		expect(detailsMatching(planned, /had to be requoted to parse this document/)).toHaveLength(1);
+		expect(detailsMatching(planned, /bare digits-only segment after a dot/)).toHaveLength(1);
 		expect(settingsWritten(planned).theme).toBe("dark");
 	});
 });

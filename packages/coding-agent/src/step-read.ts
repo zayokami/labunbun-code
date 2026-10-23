@@ -205,13 +205,18 @@ function readStepConfigDocument(root: string): Pick<RawStepCode, "config" | "con
 	if (text === null) return { config: {}, configDottedKeys: [] };
 	try {
 		const parsed = Bun.TOML.parse(text);
-		return { config: isRecord(parsed) ? parsed : {}, configDottedKeys: [] };
+		if (!isRecord(parsed)) return { config: {}, configDottedKeys: [] };
+		// Bun 1.4.4 accepts a digits-only segment after a dot, which is what TOML
+		// 1.0 has always said and what Step's own parser (`smol-toml`) does. The
+		// retry below is therefore no longer reached for these documents, but the
+		// planner still has to name the paths: the file on disk keeps the unquoted
+		// spelling the user will go looking for.
+		const requoted = requoteNumericKeyPaths(text);
+		return { config: parsed, configDottedKeys: requoted?.changed ?? [] };
 	} catch {
-		// The same parser deviation the grok reader repairs: TOML 1.0 allows a
-		// digits-only segment after a dot and this parser rejects the whole
-		// document over it. Step's own parser is spec-compliant (`smol-toml`), so
-		// the document is one Step reads; quoting the segments is a no-op under
-		// the spec and recovers every other setting in the file.
+		// Older parsers rejected the whole document over a digits-only segment
+		// after a dot. Quoting the segments is a no-op under the spec and recovers
+		// every other setting in a document such a parser refused.
 		const requoted = requoteNumericKeyPaths(text);
 		if (requoted !== null) {
 			try {

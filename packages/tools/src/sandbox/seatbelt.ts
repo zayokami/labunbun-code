@@ -1,6 +1,9 @@
 // The macOS backend: a `sandbox-exec` profile generated from a `SandboxPolicy`.
-// Pure: the caller passes the policy and the command, and gets back an argv.
+// The only filesystem read is resolving a policy path's symlinks, so a rule and
+// the syscall it is meant to cover agree on the spelling; everything else is a
+// function of the policy and the command.
 // Long-form design notes: docs/dev/sandbox.md
+import { realpathSync } from "node:fs";
 import { canWrite, type SandboxPolicy } from "@labunbun/agent";
 
 // Long-form design notes: docs/dev/sandbox.md
@@ -145,30 +148,62 @@ export function buildSeatbeltArgs(
 	}
 
 	const params: SeatbeltParam[] = [];
+	/**
+	 * One policy path, named in every spelling the kernel or the sandbox may
+	 * compare it under: as the policy wrote it, and — when it exists through a
+	 * symlink — the resolved path.
+	 *
+	 * **Measured on `macos-latest` under Bun 1.4.4:** the smoke test's positive
+	 * row, a write inside a workspace under `$TMPDIR`, was refused with EPERM
+	 * while the identical write outside the profile succeeded, and the same row
+	 * had passed under Bun 1.3.5 with an unchanged profile. `$TMPDIR` is
+	 * `/var/folders/…`, a symlink to `/private/var/folders/…`, and the rule
+	 * named the first spelling. Which of the two a given syscall is matched
+	 * under is not something a profile should have to know: a profile that
+	 * speaks only one of them is one that can refuse a write it promised to
+	 * allow. Both are emitted; on a path with no symlink in it the second is
+	 * identical and is dropped.
+	 */
+	const pathSpellings = (value: string): string[] => {
+		try {
+			const resolved = realpathSync(value);
+			return resolved === value ? [value] : [value, resolved];
+		} catch {
+			// A writable root that does not exist yet has no resolved spelling to
+			// offer; the literal one is all the executor can bind.
+			return [value];
+		}
+	};
+	const addParam = (base: string, value: string): string[] =>
+		pathSpellings(value).map((spelling, variant) => {
+			const key = variant === 0 ? base : `${base}_RESOLVED_${variant}`;
+			params.push({ key, value: spelling });
+			return key;
+		});
+
 	const writableKeys: string[] = [];
 	for (const [index, entry] of policy.fileSystem.entries.entries()) {
 		if (!canWrite(entry.access)) continue;
-		const key = `WRITABLE_ROOT_${index}`;
-		params.push({ key, value: entry.path });
-		writableKeys.push(key);
+		writableKeys.push(...addParam(`WRITABLE_ROOT_${index}`, entry.path));
 	}
 
 	const deniedKeys: string[] = [];
 	for (const [index, entry] of policy.fileSystem.entries.entries()) {
 		if (entry.access !== "deny") continue;
-		const key = `DENIED_${index}`;
-		params.push({ key, value: entry.path });
-		deniedKeys.push(key);
+		deniedKeys.push(...addParam(`DENIED_${index}`, entry.path));
 	}
 
 	const protectedKeys: string[] = [];
 	for (const [index, path] of policy.protected.entries()) {
-		const key = `PROTECTED_${index}`;
-		params.push({ key, value: path });
-		protectedKeys.push(key);
+		protectedKeys.push(...addParam(`PROTECTED_${index}`, path));
 	}
 
-	const ancestorParams = protectedAncestors(policy);
+	const ancestorParams = protectedAncestors(policy).flatMap((param) =>
+		pathSpellings(param.value).map((value, variant) => ({
+			key: variant === 0 ? param.key : `${param.key}_RESOLVED_${variant}`,
+			value,
+		})),
+	);
 
 	const sections: string[] = [
 		BASE_POLICY,

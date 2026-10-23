@@ -737,12 +737,12 @@ export function planGrokBuild(
 		});
 	}
 
-	// Key paths this parser can only read once a digits-only segment is quoted.
-	// TOML spells a dot in a bare key as a path separator, so `[model.grok-4.6]` is
-	// a table named `grok-4.6` to nobody: grok reads `grok-4` → `6`, and so does the
-	// reader above. The user who wrote it meant a model by that name, which is a
-	// different override and is not what either parser has — so the path is named
-	// rather than imported as what it looks like.
+	// Key paths whose digits-only segment makes them a nested table rather than a
+	// name. TOML spells a dot in a bare key as a path separator, so
+	// `[model.grok-4.6]` is a table named `grok-4.6` to nobody: grok reads
+	// `grok-4` → `6`, and so does the reader above. The user who wrote it meant a
+	// model by that name, which is a different override and is not what either
+	// parser has — so the path is named rather than imported as what it looks like.
 	for (const path of raw.configDottedKeys) {
 		const segments = path.split(".");
 		const leaf = segments.at(-1) ?? "";

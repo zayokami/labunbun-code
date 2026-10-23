@@ -326,7 +326,15 @@ function readGrokConfig(root: string): Pick<RawGrokBuild, "config" | "configErro
 	if (text === null) return { config: {}, configDottedKeys: [] };
 	try {
 		const parsed = Bun.TOML.parse(text);
-		return { config: isRecord(parsed) ? parsed : {}, configDottedKeys: [] };
+		if (!isRecord(parsed)) return { config: {}, configDottedKeys: [] };
+		// The retry below used to be the only place these paths were noticed: a
+		// digits-only segment after a dot made `Bun.TOML` reject the document.
+		// Bun 1.4.4's parser reads them as TOML 1.0 says it should, so the first
+		// parse now succeeds and the planner would lose the explanation for
+		// `[model.grok-4.6]` — that it is a table named "6" inside "model.grok-4",
+		// not a model id. Detection is textual, so it does not need the failure.
+		const requoted = requoteNumericKeyPaths(text);
+		return { config: parsed, configDottedKeys: requoted?.changed ?? [] };
 	} catch {
 		const requoted = requoteNumericKeyPaths(text);
 		if (requoted !== null) {

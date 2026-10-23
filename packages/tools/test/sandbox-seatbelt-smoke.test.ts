@@ -3,9 +3,9 @@
  *
  * **Why this file exists, and why it is not a fourth translator test.** Every
  * other test of `seatbelt.ts` compares a string. That catches a drifted rule and
- * nothing else: `seatbelt.ts:87-89` says so itself — *"the tests here compare
- * generated strings, and only a Mac parses SBPL, so a name this profile would
- * reject is invisible to the whole suite."*
+ * nothing else: `docs/dev/sandbox.md` says so itself — *"The tests here compare
+ * generated strings only, because Mac alone parses SBPL, so a rejected name is
+ * invisible to the whole suite."*
  *
  * That blind spot has already cost this repository a defect that seven green CI
  * runs did not see. With no `sysctl` rule at all under the `(deny default)`, a

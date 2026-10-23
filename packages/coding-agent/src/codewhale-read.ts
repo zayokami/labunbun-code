@@ -380,9 +380,14 @@ function readCodewhaleToml(path: string): CodewhaleToml {
 	if (text.kind === "unreadable") return { kind: "invalid", reason: text.reason };
 	try {
 		const parsed = Bun.TOML.parse(text.value);
-		return isRecord(parsed)
-			? { kind: "table", value: parsed, requoted: [] }
-			: { kind: "invalid", reason: "not a TOML table" };
+		if (!isRecord(parsed)) return { kind: "invalid", reason: "not a TOML table" };
+		// Bun 1.4.4 accepts a digits-only segment after a dot, which TOML 1.0 has
+		// always required and the `toml` crate Codewhale uses complies with. The
+		// retry below is therefore not reached for these documents any more, but
+		// the report still has to name the paths, because the file keeps the
+		// unquoted spelling that read as nested tables.
+		const requoted = requoteNumericKeyPaths(text.value);
+		return { kind: "table", value: parsed, requoted: requoted?.changed ?? [] };
 	} catch {
 		const requoted = requoteNumericKeyPaths(text.value);
 		if (requoted !== null) {
@@ -691,7 +696,10 @@ export function readCodewhale(home: string, cwd: string | undefined, env: Codewh
 	} else if (configDocument.kind === "table" && configDocument.requoted.length > 0) {
 		skipped.push({
 			name: tildePath(home, configPath),
-			reason: `read after quoting ${configDocument.requoted.length} digits-only dotted key path(s) (${configDocument.requoted.join(", ")}) — TOML 1.0 allows them and this importer's parser does not, so every other setting in the file came across and none was lost`,
+			reason:
+				`${configDocument.requoted.length} digits-only dotted key path(s) read as nested tables rather than names ` +
+				`(${configDocument.requoted.join(", ")}) — TOML 1.0 reads them that way and so does this reader, so the ` +
+				"rest of the file came across and nothing under those paths was imported as the name it looks like",
 		});
 	}
 	// The scrub runs before anything reads a field out of the document, so no
