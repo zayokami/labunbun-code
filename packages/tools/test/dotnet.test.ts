@@ -491,6 +491,25 @@ describe("managed code", () => {
 		expect(report).toContain("    field accesses: none");
 	});
 
+	test("checked conversion opcodes are decoded as operand-free instructions", () => {
+		const strings = stringsOf("M");
+		const buildRoot = (rva: number): Buffer =>
+			metadataRoot("v4.0.30319", [
+				{
+					name: "#~",
+					bytes: tablesStream([{ id: 0x06, rows: [methodDefRow(rva, strings.at[0])] }]),
+				},
+				{ name: "#Strings", bytes: strings.bytes },
+			]);
+		const probe = buildRoot(0);
+		// conv.ovf.i1 through conv.ovf.u8, then ret.
+		const body = tinyBody(Buffer.from([0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0x2a]));
+		const report = text(buildRoot(codeRva(probe)), { code: body });
+
+		expect(report).toContain("    methods: 1 (1 with a body, 0 without, 0 undecodable)");
+		expect(report).toContain("    method bodies read: 1 (9 bytes of IL; cap 2000 methods / 8 MiB)");
+	});
+
 	test("user strings are escaped and a bad ldstr token is counted", () => {
 		const strings = stringsOf("M");
 		const users = userStringsOf('a\n"\\b');

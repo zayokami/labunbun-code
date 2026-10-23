@@ -862,6 +862,8 @@ OPERAND_SIZES[0x8e] = 0;
 OPERAND_SIZES[0x8f] = 4;
 operands(0x90, 0xa2, 0);
 operands(0xa3, 0xa5, 4);
+// The checked conversions (conv.ovf.i1 ... conv.ovf.u8) take no operand.
+operands(0xb3, 0xba, 0);
 OPERAND_SIZES[0xc2] = 4;
 OPERAND_SIZES[0xc3] = 0;
 OPERAND_SIZES[0xc6] = 4;
