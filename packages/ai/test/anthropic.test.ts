@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { cacheCapability } from "../src/cache.ts";
 import {
+	ANTHROPIC_API_VERSION_ENV,
 	type AnthropicClientLike,
 	anthropicAuthOptions,
 	anthropicBetaHeaders,
+	anthropicClientDefaults,
+	anthropicVersionHeaders,
 	buildAnthropicRequest,
 	convertMessages,
 	createAnthropicStreamFn,
+	DEFAULT_ANTHROPIC_API_VERSION,
 	mapAnthropicStream,
 	OAUTH_BETA,
 	planAnthropicBreakpoints,
@@ -284,6 +288,81 @@ describe("thinking-block binding", () => {
 			{ headers: { "x-gateway": "a", "anthropic-beta": THINKING_BLOCK_BINDING_BETA } },
 			{ headers: { "x-gateway": "a" } },
 		]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// API version
+// ---------------------------------------------------------------------------
+
+describe("the pinned API version", () => {
+	test("first-party rows pin the supported version the installed SDK already sends", () => {
+		// Spelled out rather than compared to itself: the point of the pin is the
+		// exact date, and a typo would be a 400 on every request.
+		expect(DEFAULT_ANTHROPIC_API_VERSION).toBe("2023-06-01");
+		expect(anthropicVersionHeaders(MODEL, {})).toEqual({ "anthropic-version": "2023-06-01" });
+	});
+
+	test("ANTHROPIC_API_VERSION opts first-party rows into another version", () => {
+		expect(anthropicVersionHeaders(MODEL, { [ANTHROPIC_API_VERSION_ENV]: "2026-10-21" })).toEqual({
+			"anthropic-version": "2026-10-21",
+		});
+	});
+
+	test("a reseller row keeps the pinned version whatever the environment says", () => {
+		// A gateway speaks the wire shape it was built for; the version it
+		// forwards is not ours to change.
+		expect(anthropicVersionHeaders(GATEWAY, { [ANTHROPIC_API_VERSION_ENV]: "2026-10-21" })).toEqual({
+			"anthropic-version": "2023-06-01",
+		});
+	});
+
+	test("a malformed override is refused rather than sent", () => {
+		expect(() => anthropicVersionHeaders(MODEL, { [ANTHROPIC_API_VERSION_ENV]: "latest" })).toThrow(
+			'ANTHROPIC_API_VERSION="latest" is not an API version',
+		);
+	});
+
+	test("both client constructions carry the same version header", () => {
+		// The header rides on the client rather than in the request body, so this
+		// is the seam where the choice is wired to the SDK.
+		expect(anthropicClientDefaults(MODEL, {})).toEqual({
+			baseURL: "https://api.anthropic.com",
+			maxRetries: 0,
+			defaultHeaders: { "anthropic-version": "2023-06-01" },
+		});
+		expect(anthropicClientDefaults(GATEWAY, { [ANTHROPIC_API_VERSION_ENV]: "2026-10-21" }).defaultHeaders).toEqual({
+			"anthropic-version": "2023-06-01",
+		});
+	});
+
+	test("the request body carries none of the sampling parameters 2026-10-21 removed", () => {
+		for (const model of [MODEL, HAIKU, BINDING_MODEL, GATEWAY]) {
+			const params = buildAnthropicRequest(model, ctx({ messages: [userMessage("hi")] }), {
+				thinkingLevel: "high",
+			});
+			expect(Object.keys(params)).not.toContain("temperature");
+			expect(Object.keys(params)).not.toContain("top_p");
+			expect(Object.keys(params)).not.toContain("top_k");
+		}
+	});
+
+	test("wire messages carry no assistant document block and no citations", () => {
+		// The neutral model cannot produce either; this holds the conversion to
+		// that promise, which 2026-10-21 turns into a 400.
+		const wire = convertMessages([
+			userMessage("read this"),
+			assistantMessage({
+				content: [
+					{ type: "text", text: "ok" },
+					{ type: "toolCall", id: "t1", name: "read", arguments: "{}" },
+				],
+			}),
+			toolResultMessage("t1", "read", [{ type: "text", text: "contents" }]),
+		]);
+		const serialized = JSON.stringify(wire);
+		expect(serialized).not.toContain('"type":"document"');
+		expect(serialized).not.toContain('"citations"');
 	});
 });
 
@@ -1136,6 +1215,21 @@ describe("createAnthropicStreamFn — the TTL ladder", () => {
 			}),
 		});
 		await expect(collect(streamFn(MODEL, longCtx()))).rejects.toThrow("expected an array");
+		expect(calls).toBe(1);
+	});
+
+	test("a 400 about a version-removed sampling parameter is not read as a cache refusal", async () => {
+		// 2026-10-21 rejects any of the three even at its default. The request
+		// builder sends none, but a future regression must surface the API's own
+		// answer rather than spend the TTL ladder on it.
+		let calls = 0;
+		const streamFn = createAnthropicStreamFn({
+			clientFactory: fakeClient(() => {
+				calls++;
+				throw statusError(400, "temperature: unsupported parameter for API version 2026-10-21");
+			}),
+		});
+		await expect(collect(streamFn(MODEL, longCtx()))).rejects.toThrow("unsupported parameter");
 		expect(calls).toBe(1);
 	});
 

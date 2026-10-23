@@ -160,6 +160,49 @@ export const THINKING_BLOCK_BINDING_BETA = "thinking-binding-controls-2026-08-01
  */
 export const OAUTH_BETA = "oauth-2025-04-20";
 
+// Long-form design notes: docs/dev/ai-layer.md
+/**
+ * The API version both clients ask for unless `ANTHROPIC_API_VERSION` says
+ * otherwise.
+ *
+ * The 2023-06-01 version is still supported. An SDK sends the version that was
+ * current when its major line was released: the installed 0.x sends this one,
+ * and a later major sends 2026-10-21. Leaving the header to the SDK therefore
+ * makes the wire version a property of a dependency bump. Pinning it here keeps
+ * the choice in this repository, where a migration can be reviewed and tested.
+ */
+export const DEFAULT_ANTHROPIC_API_VERSION = "2023-06-01";
+
+/**
+ * Opts first-party rows into another version, such as 2026-10-21, without a
+ * source change. Reseller rows ignore it: a gateway speaks the wire shape it
+ * was built for, and the newer version is not known to be part of that shape.
+ */
+export const ANTHROPIC_API_VERSION_ENV = "ANTHROPIC_API_VERSION";
+
+/** Date-form versions are the only ones the header accepts. */
+const API_VERSION_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The version header a row's clients carry. Exported because it rides on the
+ * client construction rather than in the request body, which is the only part
+ * the tests can drive through `buildAnthropicRequest`.
+ */
+export function anthropicVersionHeaders(
+	model: Pick<Model, "provider">,
+	env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+	if (model.provider !== "anthropic") return { "anthropic-version": DEFAULT_ANTHROPIC_API_VERSION };
+	const configured = env[ANTHROPIC_API_VERSION_ENV]?.trim();
+	if (!configured) return { "anthropic-version": DEFAULT_ANTHROPIC_API_VERSION };
+	if (!API_VERSION_PATTERN.test(configured)) {
+		throw new Error(
+			`${ANTHROPIC_API_VERSION_ENV}="${configured}" is not an API version; expected a date such as 2026-10-21.`,
+		);
+	}
+	return { "anthropic-version": configured };
+}
+
 /**
  * Beta headers this model needs on every request, or nothing.
  *
@@ -194,6 +237,15 @@ export interface AnthropicRequestParams {
 	 */
 	output_config?: { effort: AnthropicEffort };
 	metadata?: { user_id?: string };
+	/**
+	 * Removed in API version 2026-10-21: sending any of the three is a 400,
+	 * even at its default. They are typed `never` so a future addition fails
+	 * to compile — the index signature above would otherwise wave it through,
+	 * and the request would fail only at the API.
+	 */
+	temperature?: never;
+	top_p?: never;
+	top_k?: never;
 }
 
 interface AnthropicCacheControl {
@@ -782,6 +834,22 @@ export function anthropicAuthOptions(
 	return { apiKey: resolveApiKey(model) ?? "" };
 }
 
+/**
+ * The SDK options both client constructions share. Exported because the
+ * version header is decided here, and a construction is otherwise only
+ * observable through the SDK instance.
+ */
+export function anthropicClientDefaults(
+	model: Model,
+	env: Record<string, string | undefined> = process.env,
+): { baseURL: string | undefined; maxRetries: number; defaultHeaders: Record<string, string> } {
+	return {
+		baseURL: model.baseUrl || undefined,
+		maxRetries: 0, // our retry wrapper owns retry policy
+		defaultHeaders: anthropicVersionHeaders(model, env),
+	};
+}
+
 async function defaultClient(
 	model: Model,
 	options?: StreamOptions,
@@ -794,8 +862,7 @@ async function defaultClient(
 	const callerSignal = options?.signal;
 	return new Anthropic({
 		...anthropicAuthOptions(model, options, credentials),
-		baseURL: model.baseUrl || undefined,
-		maxRetries: 0, // our retry wrapper owns retry policy
+		...anthropicClientDefaults(model),
 		fetch: callerSignal
 			? (input, init) => fetch(input, { ...init, signal: composeSignals(init?.signal, callerSignal) })
 			: undefined,
@@ -872,7 +939,6 @@ async function defaultModelsClient(model: Model): Promise<AnthropicModelsClientL
 	// wait is the caller's policy, and it says so with the signal it passes.
 	return new Anthropic({
 		apiKey: resolveApiKey(model) ?? "",
-		baseURL: model.baseUrl || undefined,
-		maxRetries: 0,
+		...anthropicClientDefaults(model),
 	}) as unknown as AnthropicModelsClientLike;
 }

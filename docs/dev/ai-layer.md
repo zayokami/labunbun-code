@@ -400,6 +400,15 @@ Each adapter hands the SDK a custom `fetch`. The SDK calls it with its own signa
 - The module exports `anthropicBetaHeaders` because the headers ride on the client call rather than in the body. `buildAnthropicRequest`, the pure piece the tests drive, cannot see them (`packages/ai/src/providers/anthropic.ts:132`).
 - `AnthropicRequestParams` spells `output_config` out even though the index signature lets any key through (`packages/ai/src/providers/anthropic.ts:157`). That signature is exactly why an omission is invisible to the compiler, and this field is what the whole adaptive path hangs on.
 
+#### The API version
+
+- The adapter pins `anthropic-version` on both SDK clients, through the options that `defaultClient` and `defaultModelsClient` share. Version 2023-06-01 is still supported. An SDK otherwise sends the version that was current when its major line was released, so the wire version would change with a dependency bump. The pin keeps that choice in this repository, where a migration can be reviewed and tested.
+- Version 2026-10-21 removes `temperature`, `top_p`, and `top_k`: any of the three is a 400 even at its default. It also rejects a `document` block directly in an assistant message and a non-empty `citations` array on a text block in a user message. This build sends none of them. The request builder assigns no sampling field, and the neutral content model has no document or citation block. The sampling fields are typed `never` on the request params, so a future addition fails to compile rather than at the API.
+- `ANTHROPIC_API_VERSION` overrides the version for first-party rows, which is how to try 2026-10-21 without a source change. Reseller rows keep the pinned version, because a gateway speaks the wire shape it was built for. A value that is not a date is refused when the client is built.
+- A request under the override can still carry `oauth-2025-04-20` and the thinking-binding beta. The release notes do not say whether either beta remains valid under 2026-10-21, so a live check is part of trying the new version. The pinned default is what ships until that check happens.
+- The Admin API and Claude Enterprise Analytics field renames in the same release do not apply: this package calls neither API.
+- Upgrading `@anthropic-ai/sdk` to 1.0.0 is a separate decision from the version pin. That release also sends the API key as `Authorization: Bearer` instead of `X-Api-Key`, and a gateway that reads the old header would miss the key. The pin keeps the Messages semantics stable, but the credential header change needs its own review.
+
 #### The four breakpoint slots
 
 - `AnthropicBreakpointPlan` names four positions: `tools`, `system`, `previous`, and `tail` (`packages/ai/src/providers/anthropic.ts:184`). Anthropic orders its tiers `tools`, then `system`, then `messages`, and a change at one level invalidates that level and everything below it. So the four positions are the longest prefixes that do not change between the requests of one conversation.
