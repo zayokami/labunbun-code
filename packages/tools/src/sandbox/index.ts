@@ -12,6 +12,7 @@ import {
 	type SandboxPolicy,
 	type WritableRoot,
 } from "@labunbun/agent";
+import { canonicalPathForChild, isWithinRoot } from "./appcontainer.ts";
 import { type ProbeShell, probeAppContainerSelection } from "./appcontainer-probe.ts";
 import type { UnixBridge } from "./bridge.ts";
 import { buildBwrapArgs } from "./bwrap.ts";
@@ -299,18 +300,26 @@ function probeOnce(shell: ProbeShell | null): ReturnType<typeof probeAppContaine
 }
 
 /**
- * The policy's protected paths that sit strictly inside some grant root. The
- * spelling is the one a policy uses (`canonicalPolicyPath` writes `/`), and
- * "inside" is the strict lexical rule the narrowing itself enforces
- * (`isWithinRoot` in `appcontainer.ts`): trailing slashes dropped, equality
- * refused. A protected path outside every root — or equal to one, which would
- * ask the grant to narrow the whole workspace — is dropped here rather than
- * carried: the narrowing refuses domains it does not own, and a resolution
- * must not ask for one.
+ * The policy's protected paths that sit strictly inside some grant root, judged
+ * by the same rule the narrowing itself enforces (`isWithinRoot` in
+ * `appcontainer.ts`): both sides canonicalised — links, junctions and 8.3 names
+ * resolved — then compared case-insensitively across a separator boundary.
+ *
+ * The previous lexical `startsWith` compared the policy's spelling of the root
+ * with `findProtectedPaths`' realpath spelling. A workspace opened through a
+ * junction or a differently-cased path therefore dropped its nested
+ * repositories' `.git` directories, and the inheritable workspace ACE stayed on
+ * exactly the directories the grant exists to narrow. A protected path outside
+ * every root — or equal to one, which would ask the grant to narrow the whole
+ * workspace — is still dropped here rather than carried: the narrowing refuses
+ * domains it does not own, and a resolution must not ask for one.
  */
 function protectedWithinGrant(paths: readonly string[], grantRoots: readonly string[]): string[] {
-	const stripped = grantRoots.map((root) => root.replace(/\/+$/, ""));
-	return paths.filter((path) => stripped.some((root) => path.startsWith(`${root}/`)));
+	const roots = grantRoots.map((root) => canonicalPathForChild(root));
+	return paths.filter((path) => {
+		const canonical = canonicalPathForChild(path);
+		return roots.some((root) => isWithinRoot(canonical, root));
+	});
 }
 
 // Long-form design notes: docs/dev/sandbox.md

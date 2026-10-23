@@ -4,11 +4,20 @@
  * are the ones an attacker would try, not the ones a well-behaved caller sends.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-	caseInsensitivePaths,
+	filesystemFoldsCase,
 	guardPathContainment,
 	guardWritablePath,
 	isContainedIn,
@@ -90,9 +99,17 @@ describe("isContainedIn", () => {
 	// case-sensitive filesystem those two spellings are genuinely different
 	// directories, so accepting one as the other would be the bug.
 	test("compares case-insensitively only where the filesystem does", () => {
-		expect(isContainedIn("C:/Work/Project/src/a.ts", "c:/work/project")).toBe(caseInsensitivePaths);
-		expect(isContainedIn("c:/work/project", "C:/WORK/PROJECT")).toBe(caseInsensitivePaths);
+		const folds = filesystemFoldsCase("c:/work/project");
+		expect(isContainedIn("C:/Work/Project/src/a.ts", "c:/work/project")).toBe(folds);
+		expect(isContainedIn("c:/work/project", "C:/WORK/PROJECT")).toBe(folds);
 		expect(isContainedIn("C:/Work/Other/x.ts", "c:/work/project")).toBe(false);
+	});
+
+	test("an explicit case-sensitive answer keeps case-variant siblings apart", () => {
+		// The seam models the macOS volume format the probe cannot create here.
+		// Folding these two would accept `/Users/me/WS` as `/Users/me/ws`.
+		expect(isContainedIn("/Users/me/WS/payload", "/Users/me/ws", false)).toBe(false);
+		expect(isContainedIn("/Users/me/WS/payload", "/Users/me/ws", true)).toBe(true);
 	});
 
 	test("a deeply nested descendant is still contained", () => {
@@ -205,7 +222,7 @@ describe("guardWritablePath", () => {
 	});
 
 	test("rejects a case-variant spelling where the filesystem would too", () => {
-		if (caseInsensitivePaths) {
+		if (filesystemFoldsCase(CWD)) {
 			expect(() => guardWritablePath(".GIT/config", CWD, "Write")).toThrow(/version-control metadata/);
 		} else {
 			// On a case-sensitive filesystem `.GIT` is simply a different directory.
@@ -263,6 +280,23 @@ describe("guardWritablePath", () => {
 		expect(guardWritablePath("build/output.", CWD, "Write")).toBe(`${CWD}/build/output.`);
 		expect(guardWritablePath("src/.gitignore", CWD, "Write")).toBe(`${CWD}/src/.gitignore`);
 		expect(guardWritablePath("src/x.git/config.ts", CWD, "Write")).toBe(`${CWD}/src/x.git/config.ts`);
+	});
+});
+
+describe("filesystemFoldsCase", () => {
+	test("reports what the volume does with a case-variant lookup", () => {
+		const root = mkdtempSync(join(tmpdir(), "lbb-case-probe-"));
+		try {
+			const file = join(root, "probe.txt");
+			writeFileSync(file, "x");
+			// The independent answer: if the other spelling resolves, does it reach
+			// the same directory entry, or a sibling that genuinely exists?
+			const variant = join(root, "PROBE.TXT");
+			const sameFile = existsSync(variant) && statSync(variant).ino === statSync(file).ino;
+			expect(filesystemFoldsCase(root)).toBe(sameFile);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

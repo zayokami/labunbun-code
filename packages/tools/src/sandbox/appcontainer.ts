@@ -1564,6 +1564,12 @@ interface ActiveGrant {
 	sid: Uint8Array;
 	/** How many commands are running under it right now. */
 	refs: number;
+	/**
+	 * The roots this grant wrote FILE_ALL_ACCESS on, canonicalised: the bound a
+	 * joining caller's protected narrowing may use, and the set that caller's
+	 * write roots must already be covered by.
+	 */
+	writeRoots: string[];
 	// Long-form design notes: docs/dev/sandbox.md
 	/** Every root this grant wrote an ACE on, the workspace first. */
 	roots: string[];
@@ -1601,7 +1607,7 @@ export function canonicalPathForChild(path: string): string {
  * from separate `realpathSync` calls; a backslash boundary because
  * `D:\Program Files\Git` must not count as containing `D:\Program Files\GitHub`.
  */
-function isWithinRoot(candidate: string, root: string): boolean {
+export function isWithinRoot(candidate: string, root: string): boolean {
 	// Separators fold before the compare: a root that exists canonicalises to
 	// backslashes, while a not-yet-existing child keeps whatever spelling it
 	// was handed — the policy spells paths with forward slashes. Measured
@@ -1612,6 +1618,16 @@ function isWithinRoot(candidate: string, root: string): boolean {
 	if (candidateFolded.length <= rootFolded.length) return false;
 	const boundary = rootFolded.endsWith("\\") ? rootFolded : `${rootFolded}\\`;
 	return candidateFolded.toLowerCase().startsWith(boundary.toLowerCase());
+}
+
+/** Whether two spellings name the same root, with the separators and case rules `isWithinRoot` uses. */
+function sameRoot(path: string, root: string): boolean {
+	return path.replace(/\//g, "\\").toLowerCase() === root.replace(/\//g, "\\").toLowerCase();
+}
+
+/** Whether some granted root already covers `path` for the same access: the path itself, or a directory above it. */
+function coveredByGrant(path: string, granted: readonly string[]): boolean {
+	return granted.some((root) => sameRoot(path, root) || isWithinRoot(path, root));
 }
 
 export interface GrantOutcome {
@@ -1632,8 +1648,47 @@ export function acquireWorkspaceGrant(
 	if ("error" in profile) return { error: profile.error };
 	const existing = activeGrants.get(profile.name);
 	if (existing !== undefined) {
-		// The first acquire wrote every root; a command joining the open grant
-		// is covered by it.
+		// A join is not automatically covered. The open grant wrote the roots and
+		// narrowed the protected directories the first caller named; either half
+		// can be narrower than what this caller asks for, and reusing it anyway
+		// is how a repository created after the first acquire — a nested `.git`
+		// from a clone or a submodule update — keeps the inheritable full-mask
+		// ACE the first grant handed down, on a path the current policy calls
+		// protected. Narrow what can be narrowed under the open grant; refuse
+		// the join for a root it never granted, rather than run a command with
+		// less access than the policy promises. Both failures are returned
+		// without a reference, so the caller's error path cannot release a
+		// grant it never held.
+		const requestedWrites = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
+		const missingWrite = requestedWrites.find((root) => !coveredByGrant(root, existing.writeRoots));
+		if (missingWrite !== undefined) {
+			return {
+				profile,
+				error: `the grant for ${workspace} is already open without write access to ${missingWrite}; release it before granting more`,
+			};
+		}
+		const requestedExec = Array.from(new Set(executableRoots.map(canonicalPathForChild)));
+		const missingExec = requestedExec.find((root) => !coveredByGrant(root, existing.roots));
+		if (missingExec !== undefined) {
+			return {
+				profile,
+				error: `the grant for ${workspace} is already open without read+execute access to ${missingExec}; release it before granting more`,
+			};
+		}
+		for (const dir of [...new Set(protectedRoots.map(canonicalPathForChild))]) {
+			// The same domain filter the acquire path applies: a path outside
+			// every write root is not something this grant reaches.
+			if (!existing.writeRoots.some((root) => isWithinRoot(dir, root))) continue;
+			// A directory narrowed once is already protected, and its pre-grant
+			// list is on the release list; narrowing again would capture the
+			// narrowed list as its own restore.
+			if (existing.protectedRestores.some((restore) => sameRoot(restore.path, dir))) continue;
+			const outcome = protectDirForGrant(dir, existing.sid, existing.writeRoots);
+			if (outcome.error !== undefined) return { profile, error: outcome.error };
+			// A directory that does not exist yet carries nothing to narrow; it
+			// stays off the release list, and the next join tries again.
+			if (outcome.restore !== undefined) existing.protectedRestores.push(outcome.restore);
+		}
 		existing.refs += 1;
 		return { profile };
 	}
@@ -1752,6 +1807,7 @@ export function acquireWorkspaceGrant(
 	activeGrants.set(profile.name, {
 		sid,
 		refs: 1,
+		writeRoots,
 		roots: [...writeRoots, ...execRoots],
 		protectedRestores: protectRestores,
 		protectedAsFound: protectAsFound,

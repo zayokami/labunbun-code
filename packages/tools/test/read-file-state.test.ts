@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { caseInsensitivePaths, resolveCanonical } from "../src/containment.ts";
+import { filesystemFoldsCase, resolveCanonical } from "../src/containment.ts";
 import { createAllTools, createReadTool, defaultOperations, ReadFileState } from "../src/index.ts";
 
 const roots: string[] = [];
@@ -114,7 +114,10 @@ describe("ReadFileState.record", () => {
 	test("separators and, where the filesystem folds case, case name one entry", () => {
 		const state = new ReadFileState();
 		state.record("/tmp/Repo/FOO.ts", { content: "seen" });
-		expect(state.getState("/tmp/Repo/foo.ts")?.content).toBe(caseInsensitivePaths ? "seen" : undefined);
+		// The volume's answer, not the platform's: a case-sensitive macOS volume
+		// keeps these apart exactly as Linux does.
+		const folds = filesystemFoldsCase(resolveCanonical("/tmp/Repo/FOO.ts", "/tmp"));
+		expect(state.getState("/tmp/Repo/foo.ts")?.content).toBe(folds ? "seen" : undefined);
 		expect(state.getState("/tmp\\Repo\\FOO.ts")?.content).toBe("seen");
 		expect(state.paths()).toEqual(["/tmp/Repo/FOO.ts"]);
 	});

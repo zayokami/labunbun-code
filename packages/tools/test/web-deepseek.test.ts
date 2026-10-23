@@ -694,7 +694,7 @@ describe("createAllTools wiring", () => {
 		}
 	});
 
-	test("LBB_WEB_FETCH=deepseek moves WebFetch onto the API; unset fetches the URL here", async () => {
+	test("LBB_WEB_FETCH=deepseek moves WebFetch onto the API; unset keeps the local tool", async () => {
 		const deep = stubFetch(() => jsonResponse({ title: "T", content: "api body" }));
 		try {
 			await withEnv({ LBB_WEB_FETCH: "deepseek", [DEEPSEEK_API_KEY_ENV]: "test-key" }, async () => {
@@ -708,22 +708,17 @@ describe("createAllTools wiring", () => {
 			deep.restore();
 		}
 
-		const free = stubFetch(
-			() => new Response("local body", { status: 200, headers: { "content-type": "text/plain" } }),
-		);
-		try {
-			await withEnv({ LBB_WEB_SEARCH: undefined, LBB_WEB_FETCH: undefined }, async () => {
-				const fetchTool = createAllTools(process.cwd()).find((tool) => tool.name === "WebFetch");
-				if (!fetchTool) throw new Error("WebFetch is not in the default tool set");
-				// Literal public address: the local guard resolves hostnames over
-				// DNS, and a real lookup has no business in this file.
-				const result = await fetchTool.call({ url: "http://93.184.216.34/" }, ctxOf(enabled()));
-				expect(free.calls[0].url).toBe("http://93.184.216.34/");
-				expect(textOf(result)).toBe("http://93.184.216.34/\n\nlocal body");
-			});
-		} finally {
-			free.restore();
-		}
+		await withEnv({ LBB_WEB_SEARCH: undefined, LBB_WEB_FETCH: undefined }, async () => {
+			const fetchTool = createAllTools(process.cwd()).find((tool) => tool.name === "WebFetch");
+			if (!fetchTool) throw new Error("WebFetch is not in the default tool set");
+			// The local hop no longer goes through global `fetch` — it dials an
+			// address the guard vetted — so a fetch stub cannot stand in for it.
+			// What the default tool set still has to prove here is the wiring:
+			// unset means the tool it built is the local one. The hop itself is
+			// covered with an injected transport in web-network-axis.test.ts.
+			expect(fetchTool.description).toContain("Fetches a URL and returns");
+			expect(fetchTool.description).not.toContain("DeepSeek Fetch API");
+		});
 	});
 
 	test("a switch with no key still builds every tool; the error belongs to the call", async () => {

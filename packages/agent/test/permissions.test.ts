@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
 	collectReadOnlyToolNames,
@@ -463,6 +465,52 @@ describe("evaluatePermissions", () => {
 		expect(evaluatePermissions("Bash", { command: "echo secret/key" }, config).behavior).toBe("ask");
 		expect(evaluatePermissions("Bash", { command: "git status" }, config).behavior).toBe("ask");
 	});
+
+	/**
+	 * The rule names the file the tool will open, not the spelling the model
+	 * chose. `resolveCanonical` used to be lexical, so a link inside the
+	 * workspace was enough to step around a deny rule: the permission layer
+	 * approved the alias and the tool followed it to the forbidden target.
+	 */
+	test("a symlink alias cannot launder a deny rule", () => {
+		const root = mkdtempSync(join(tmpdir(), "lbb-perm-"));
+		try {
+			const workspace = realpathSync(root).replace(/^\\\\\?\\/, "");
+			mkdirSync(join(workspace, "secrets"));
+			writeFileSync(join(workspace, "secrets", "key"), "k");
+			symlinkSync(
+				join(workspace, "secrets"),
+				join(workspace, "alias"),
+				process.platform === "win32" ? "junction" : "dir",
+			);
+			const config = {
+				mode: "agent" as const,
+				sandbox: SANDBOX,
+				rules: rules([["Read(secrets/**)", "deny"]]),
+				cwd: workspace,
+			};
+
+			expect(evaluatePermissions("Read", { file_path: join(workspace, "alias", "key") }, config).behavior).toBe("deny");
+			// The shell cross-check reads the same matcher, so `cat alias/key` is
+			// the same bypass one tool over.
+			expect(evaluatePermissions("Bash", { command: "cat alias/key" }, config).behavior).toBe("deny");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	/**
+	 * Folding one side only was the second half of the same defect: a rule
+	 * carrying an upper-case segment never met a call spelled in lower case,
+	 * even though both name one file on Windows and default APFS. The relative
+	 * spelling is used so the assertion does not depend on a drive existing.
+	 */
+	test.skipIf(process.platform !== "win32" && process.platform !== "darwin")(
+		"a rule and a path spelled in different cases still meet",
+		() => {
+			expect(inputMatchesSpecifier("Read", "src/SECRET/**", { file_path: "src/secret/key" }, CWD)).toBe(true);
+		},
+	);
 
 	test("bare deny blocks the whole tool before the model sees matching input", () => {
 		const config = { mode: "ask" as const, rules: rules([["WebFetch", "deny"]]), sandbox: SANDBOX, cwd: CWD };

@@ -10,18 +10,20 @@
  * refused, and no mode closed the gap: `agent` allows the call outright and
  * `plan` lists both web tools as read-only.
  *
- * `fetch` is stubbed, so nothing is contacted — the assertion is on whether the
- * request was attempted at all, which is the decision under test. `calls` is the
- * load-bearing part: a refusal that still calls `fetch` would pass an assertion
- * on the returned text and confine nothing.
+ * The WebFetch transport is stubbed, so nothing is contacted — the assertion is
+ * on whether the request was attempted at all, which is the decision under
+ * test. `urls` is the load-bearing part: a refusal that still dialled would
+ * pass an assertion on the returned text and confine nothing. Global `fetch` is
+ * stubbed only for WebSearch, which still uses it; WebFetch must not, and the
+ * rebinding test below makes a fallback to it fail loudly.
  *
  * **The resolver is stubbed too, and that is not belt-and-braces.** Stubbing
- * `fetch` was not enough to keep the network out: `guardPublicUrl` resolves the
- * hostname itself, so every test here was also asserting on live DNS. The one
- * that noticed was the control — it fetches a name that exists nowhere, which
- * resolved on the machine it was written on and did not resolve on CI, so the
- * test passed at home and failed in all three jobs on every push. A test whose
- * verdict depends on a resolver is a test about the resolver.
+ * the transport was not enough to keep the network out: `guardPublicUrl`
+ * resolves the hostname itself, so every test here was also asserting on live
+ * DNS. The one that noticed was the control — it fetches a name that exists
+ * nowhere, which resolved on the machine it was written on and did not resolve
+ * on CI, so the test passed at home and failed in all three jobs on every push.
+ * A test whose verdict depends on a resolver is a test about the resolver.
  *
  * There is deliberately no test here that scans this file for a bare
  * `createWebFetchTool()` call. It was written, and it failed on its own text —
@@ -34,8 +36,15 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import type { NetworkAxis, NetworkDomainRule } from "@labunbun/agent";
-import { createWebFetchTool, createWebSearchTool, type HostResolver } from "../src/web.ts";
+import {
+	createWebFetchTool,
+	createWebSearchTool,
+	defaultWebFetchTransport,
+	type HostResolver,
+	type WebFetchTransport,
+} from "../src/web.ts";
 
 const allow = (...patterns: string[]): NetworkDomainRule[] =>
 	patterns.map((pattern) => ({ pattern, permission: "allow" as const }));
@@ -64,9 +73,7 @@ function stubResolver(addresses: Record<string, string[]> = {}): HostResolver & 
 /**
  * A stub that records every URL it was handed and answers 200 with a body.
  *
- * A real host would make these tests depend on the internet and on a host that
- * is *not* on the allowlist being reachable, which is exactly the property
- * under test and so cannot be the thing that provides it.
+ * Used by WebSearch, which still goes through global `fetch`.
  */
 function recordingFetch() {
 	const original = globalThis.fetch;
@@ -88,6 +95,36 @@ function recordingFetch() {
 	};
 }
 
+/**
+ * A transport that records the URL and vetted addresses of every hop, and
+ * answers 200 with a page unless the test supplies another response.
+ *
+ * `urls` is derived from the same records, so a test cannot assert on one view
+ * of a hop while the other drifts. The addresses are asserted here because they
+ * are the whole point of the transport seam: the guard's answer, not a second
+ * lookup's, is what the socket would be opened to.
+ */
+function recordingTransport(respond?: (url: string) => Response) {
+	const hits: { url: string; addresses: readonly string[] }[] = [];
+	const transport: WebFetchTransport = async (url, _init, addresses) => {
+		hits.push({ url, addresses });
+		return (
+			respond?.(url) ??
+			new Response("<html><body><p>hello</p></body></html>", {
+				status: 200,
+				headers: { "content-type": "text/html" },
+			})
+		);
+	};
+	return {
+		hits,
+		get urls(): string[] {
+			return hits.map((hit) => hit.url);
+		},
+		transport,
+	};
+}
+
 const ctx = (network: NetworkAxis) => ({
 	callId: "t1",
 	signal: new AbortController().signal,
@@ -104,43 +141,36 @@ function textOf(result: { content: { type: string; text?: string }[] }): string 
 
 describe("WebFetch is subject to the network axis", () => {
 	test("a host outside a restricted allowlist is refused without a request going out", async () => {
-		const stub = recordingFetch();
+		const stub = recordingTransport();
 		const resolver = stubResolver();
-		try {
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call(
-				{ url: "https://exfil.example.net/collect" },
-				ctx({ access: "restricted", domains: allow("registry.npmjs.org") }),
-			);
-			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain("Network policy refuses");
-			// The assertion that carries the finding. A refusal message produced
-			// *after* the fetch would read identically and stop nothing. The
-			// resolver is asserted too, because the refusal has to come from the
-			// table rather than from a lookup that happens to fail — which is
-			// precisely the confusion this file's last CI run had.
-			expect(stub.urls).toEqual([]);
-			expect(resolver.asked).toEqual([]);
-		} finally {
-			stub.restore();
-		}
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call(
+			{ url: "https://exfil.example.net/collect" },
+			ctx({ access: "restricted", domains: allow("registry.npmjs.org") }),
+		);
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("Network policy refuses");
+		// The assertion that carries the finding. A refusal message produced
+		// *after* the fetch would read identically and stop nothing. The
+		// resolver is asserted too, because the refusal has to come from the
+		// table rather than from a lookup that happens to fail — which is
+		// precisely the confusion this file's last CI run had.
+		expect(stub.urls).toEqual([]);
+		expect(resolver.asked).toEqual([]);
 	});
 
 	test("a host on the allowlist is fetched", async () => {
-		const stub = recordingFetch();
+		const stub = recordingTransport();
 		const resolver = stubResolver();
-		try {
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call(
-				{ url: "https://registry.npmjs.org/lodash" },
-				ctx({ access: "restricted", domains: allow("registry.npmjs.org") }),
-			);
-			expect(result.isError).toBeFalsy();
-			expect(stub.urls).toEqual(["https://registry.npmjs.org/lodash"]);
-			expect(resolver.asked).toEqual(["registry.npmjs.org"]);
-		} finally {
-			stub.restore();
-		}
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call(
+			{ url: "https://registry.npmjs.org/lodash" },
+			ctx({ access: "restricted", domains: allow("registry.npmjs.org") }),
+		);
+		expect(result.isError).toBeFalsy();
+		expect(stub.urls).toEqual(["https://registry.npmjs.org/lodash"]);
+		expect(stub.hits[0]?.addresses).toEqual(["93.184.216.34"]);
+		expect(resolver.asked).toEqual(["registry.npmjs.org"]);
 	});
 
 	test("the control: an open network with no rules still fetches anything", async () => {
@@ -152,45 +182,37 @@ describe("WebFetch is subject to the network axis", () => {
 		// refused it: green on a machine whose resolver answers, red on every CI
 		// runner. The stub below is what makes the assertion about the network
 		// axis rather than about `example.net`.
-		const stub = recordingFetch();
+		const stub = recordingTransport();
 		const resolver = stubResolver();
-		try {
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call(
-				{ url: "https://exfil.example.net/collect" },
-				ctx({ access: "enabled", domains: [] }),
-			);
-			expect(result.isError).toBeFalsy();
-			expect(stub.urls).toHaveLength(1);
-			expect(resolver.asked).toEqual(["exfil.example.net"]);
-		} finally {
-			stub.restore();
-		}
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call(
+			{ url: "https://exfil.example.net/collect" },
+			ctx({ access: "enabled", domains: [] }),
+		);
+		expect(result.isError).toBeFalsy();
+		expect(stub.urls).toHaveLength(1);
+		expect(resolver.asked).toEqual(["exfil.example.net"]);
 	});
 
 	test("a denied pattern refuses even while other domains are allowed", async () => {
 		// `enabled` with a deny rule is the other common shape, and it is the one
 		// that catches a fix written only against `restricted`'s default-deny.
-		const stub = recordingFetch();
+		const stub = recordingTransport();
 		const resolver = stubResolver();
-		try {
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call(
-				{ url: "https://exfil.example.net/collect" },
-				ctx({
-					access: "enabled",
-					domains: [
-						{ pattern: "registry.npmjs.org", permission: "allow" },
-						{ pattern: "exfil.example.net", permission: "deny" },
-					],
-				}),
-			);
-			expect(result.isError).toBe(true);
-			expect(stub.urls).toEqual([]);
-			expect(resolver.asked).toEqual([]);
-		} finally {
-			stub.restore();
-		}
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call(
+			{ url: "https://exfil.example.net/collect" },
+			ctx({
+				access: "enabled",
+				domains: [
+					{ pattern: "registry.npmjs.org", permission: "allow" },
+					{ pattern: "exfil.example.net", permission: "deny" },
+				],
+			}),
+		);
+		expect(result.isError).toBe(true);
+		expect(stub.urls).toEqual([]);
+		expect(resolver.asked).toEqual([]);
 	});
 
 	test("a redirect to a refused host is refused too", async () => {
@@ -198,74 +220,87 @@ describe("WebFetch is subject to the network axis", () => {
 		// the entry would see an allowed URL, follow the 302, and land on the
 		// host the allowlist names — and the test above would still pass, because
 		// that test never redirects.
-		const original = globalThis.fetch;
-		const visited: string[] = [];
-		globalThis.fetch = ((url: string | URL | Request) => {
-			const target = typeof url === "string" ? url : url.toString();
-			visited.push(target);
-			if (target === "https://example.com/start") {
-				return Promise.resolve(
-					new Response(null, { status: 302, headers: { location: "https://example.net/collect" } }),
-				);
-			}
-			return Promise.resolve(new Response("<p>secret</p>", { status: 200 }));
-		}) as typeof fetch;
-		try {
-			const resolver = stubResolver();
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call(
-				{ url: "https://example.com/start" },
-				// The resolver is stubbed to answer publicly, so the first hop passes
-				// the SSRF guard and the refusal under test is the network axis's on
-				// the second. This used to lean on `example.com` and `example.net`
-				// being the two reserved names that *do* resolve — a real-network
-				// dependency that happened to hold, and would have held only while
-				// the DNS did.
-				ctx({ access: "restricted", domains: allow("example.com") }),
-			);
-			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain("Network policy refuses");
-			// The first hop happened and was allowed; the second was refused. Both
-			// facts are asserted, because "no fetch at all" would mean the test
-			// proved something else.
-			expect(visited).toEqual(["https://example.com/start"]);
-			// One lookup, for the first hop only. The second was refused before it
-			// needed one, so a guard that resolved first and decided later would
-			// show two.
-			expect(resolver.asked).toEqual(["example.com"]);
-		} finally {
-			globalThis.fetch = original;
-		}
+		const stub = recordingTransport((url) =>
+			url === "https://example.com/start"
+				? new Response(null, { status: 302, headers: { location: "https://example.net/collect" } })
+				: new Response("<p>secret</p>", { status: 200 }),
+		);
+		const resolver = stubResolver();
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call(
+			{ url: "https://example.com/start" },
+			// The resolver is stubbed to answer publicly, so the first hop passes
+			// the SSRF guard and the refusal under test is the network axis's on
+			// the second. This used to lean on `example.com` and `example.net`
+			// being the two reserved names that *do* resolve — a real-network
+			// dependency that happened to hold, and would have held only while
+			// the DNS did.
+			ctx({ access: "restricted", domains: allow("example.com") }),
+		);
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("Network policy refuses");
+		// The first hop happened and was allowed; the second was refused. Both
+		// facts are asserted, because "no fetch at all" would mean the test
+		// proved something else.
+		expect(stub.urls).toEqual(["https://example.com/start"]);
+		// One lookup, for the first hop only. The second was refused before it
+		// needed one, so a guard that resolved first and decided later would
+		// show two.
+		expect(resolver.asked).toEqual(["example.com"]);
 	});
 
 	test("the SSRF guard still runs, and now runs on the policy path too", async () => {
 		// The control for the ordering claim in `guardPublicUrl`: the network
 		// check was added ahead of the DNS lookup, so this is the test that says
 		// the check that was already there still is.
-		const original = globalThis.fetch;
-		const urls: string[] = [];
-		globalThis.fetch = ((url: string | URL | Request) => {
-			urls.push(typeof url === "string" ? url : url.toString());
-			return Promise.resolve(new Response("<p>ok</p>", { status: 200 }));
-		}) as typeof fetch;
+		const stub = recordingTransport();
+		const resolver = stubResolver();
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call(
+			{ url: "http://127.0.0.1:8080/admin" },
+			// `enabled`, so the network axis has no opinion at all and the SSRF
+			// guard is the only thing that can refuse this.
+			ctx({ access: "enabled", domains: [] }),
+		);
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("private/internal");
+		expect(stub.urls).toEqual([]);
+		// A literal needs no resolution, and this is the only assertion that
+		// could tell the difference — the shape above it is the one that used to
+		// depend on a live resolver.
+		expect(resolver.asked).toEqual([]);
+	});
+
+	test("the hop dials the address the guard vetted, not a second lookup", async () => {
+		// DNS rebinding in one sentence: the guard resolves the name and checks
+		// the answer, then a client that resolves it again gets to choose the
+		// destination the guard never saw. The transport seam sees what the real
+		// hop would dial; the throwing global stub makes "the request quietly
+		// went back through `fetch`" a failure rather than a network call, and a
+		// resolver that would answer `127.0.0.1` the second time makes a second
+		// lookup observable as a refused request.
+		const stub = recordingTransport();
+		const answers = [["93.184.216.34"], ["127.0.0.1"]];
+		let resolutions = 0;
+		const resolveHost: HostResolver = async () => answers[resolutions++] ?? ["127.0.0.1"];
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (() => {
+			fetchCalls += 1;
+			throw new Error("WebFetch must not resolve the name twice through fetch");
+		}) as unknown as typeof fetch;
 		try {
-			const resolver = stubResolver();
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call(
-				{ url: "http://127.0.0.1:8080/admin" },
-				// `enabled`, so the network axis has no opinion at all and the SSRF
-				// guard is the only thing that can refuse this.
-				ctx({ access: "enabled", domains: [] }),
-			);
-			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain("private/internal");
-			expect(urls).toEqual([]);
-			// A literal needs no resolution, and this is the only assertion that
-			// could tell the difference — the shape above it is the one that used to
-			// depend on a live resolver.
-			expect(resolver.asked).toEqual([]);
+			const tool = createWebFetchTool({ resolveHost, transport: stub.transport });
+			const result = await tool.call({ url: "https://rebind.example/x" }, ctx({ access: "enabled", domains: [] }));
+			expect(result.isError).toBeFalsy();
+			// The address checked is the address handed to the transport...
+			expect(stub.hits).toEqual([{ url: "https://rebind.example/x", addresses: ["93.184.216.34"] }]);
+			// ...and the resolver was asked exactly once, so a second answer
+			// never existed to be used.
+			expect(resolutions).toBe(1);
+			expect(fetchCalls).toBe(0);
 		} finally {
-			globalThis.fetch = original;
+			globalThis.fetch = originalFetch;
 		}
 	});
 
@@ -275,37 +310,43 @@ describe("WebFetch is subject to the network axis", () => {
 		// written before without a real host that resolves to a private address,
 		// which is not a thing anyone can arrange on demand. The cloud metadata
 		// endpoint is the canonical target: a public name, a link-local answer.
-		const stub = recordingFetch();
+		const stub = recordingTransport();
 		const resolver = stubResolver({ "metadata.example": ["169.254.169.254"] });
-		try {
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call(
-				{ url: "http://metadata.example/latest/meta-data/" },
-				ctx({ access: "enabled", domains: [] }),
-			);
-			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain("private/internal");
-			expect(stub.urls).toEqual([]);
-		} finally {
-			stub.restore();
-		}
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call(
+			{ url: "http://metadata.example/latest/meta-data/" },
+			ctx({ access: "enabled", domains: [] }),
+		);
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("private/internal");
+		expect(stub.urls).toEqual([]);
+	});
+
+	test("one private answer refuses a name that also resolves publicly", async () => {
+		// The first answer is not the only one a client may use, so the guard
+		// cannot approve a name on the strength of its first address. A client
+		// that picked the second answer would reach the metadata endpoint
+		// through a name the policy allowed.
+		const stub = recordingTransport();
+		const resolver = stubResolver({ "mixed.example": ["93.184.216.34", "169.254.169.254"] });
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call({ url: "https://mixed.example/x" }, ctx({ access: "enabled", domains: [] }));
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("private/internal");
+		expect(stub.urls).toEqual([]);
 	});
 
 	test("a name that does not resolve is refused rather than fetched", async () => {
 		// Fail-closed, and asserted rather than assumed: the alternative — treat an
 		// unresolvable name as harmless and fetch it — is indistinguishable from
 		// working code until the day the resolver starts answering.
-		const stub = recordingFetch();
+		const stub = recordingTransport();
 		const resolver = stubResolver({ "gone.example": [] });
-		try {
-			const tool = createWebFetchTool({ resolveHost: resolver });
-			const result = await tool.call({ url: "https://gone.example/thing" }, ctx({ access: "enabled", domains: [] }));
-			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain("Could not resolve host");
-			expect(stub.urls).toEqual([]);
-		} finally {
-			stub.restore();
-		}
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call({ url: "https://gone.example/thing" }, ctx({ access: "enabled", domains: [] }));
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("Could not resolve host");
+		expect(stub.urls).toEqual([]);
 	});
 
 	test("a resolver that answers with nothing at all is a refusal, not a pass", async () => {
@@ -314,17 +355,27 @@ describe("WebFetch is subject to the network axis", () => {
 		// every iteration vacuously and the guard concludes "nothing private" about
 		// a name it never checked. That is the shape of a security control that
 		// can be switched off by making its input smaller.
-		const stub = recordingFetch();
+		const stub = recordingTransport();
 		const resolveHost: HostResolver = async () => [];
-		try {
-			const tool = createWebFetchTool({ resolveHost });
-			const result = await tool.call({ url: "https://quiet.example/thing" }, ctx({ access: "enabled", domains: [] }));
-			expect(result.isError).toBe(true);
-			expect(textOf(result)).toContain("Could not resolve host");
-			expect(stub.urls).toEqual([]);
-		} finally {
-			stub.restore();
-		}
+		const tool = createWebFetchTool({ resolveHost, transport: stub.transport });
+		const result = await tool.call({ url: "https://quiet.example/thing" }, ctx({ access: "enabled", domains: [] }));
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("Could not resolve host");
+		expect(stub.urls).toEqual([]);
+	});
+
+	test("a resolver that answers with a name is refused, not pinned", async () => {
+		// `isBlockedAddress` is false for anything that is not a literal, so an
+		// answer like `localhost` passes the private-range loop untouched. If it
+		// were handed to the transport it would be a hostname again — exactly the
+		// second resolution the transport exists to prevent.
+		const stub = recordingTransport();
+		const resolver = stubResolver({ "alias.example": ["localhost"] });
+		const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+		const result = await tool.call({ url: "https://alias.example/thing" }, ctx({ access: "enabled", domains: [] }));
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("Could not resolve host");
+		expect(stub.urls).toEqual([]);
 	});
 
 	test("every private range the guard knows is refused by the same path", async () => {
@@ -349,31 +400,24 @@ describe("WebFetch is subject to the network axis", () => {
 			"::ffff:127.0.0.1",
 		];
 		for (const address of blocked) {
-			const stub = recordingFetch();
+			const stub = recordingTransport();
 			const resolver = stubResolver({ "probe.test": [address] });
-			try {
-				const tool = createWebFetchTool({ resolveHost: resolver });
-				const result = await tool.call({ url: "https://probe.test/x" }, ctx({ access: "enabled", domains: [] }));
-				expect(result.isError, `${address} must be refused`).toBe(true);
-				expect(textOf(result)).toContain("private/internal");
-				expect(stub.urls).toEqual([]);
-			} finally {
-				stub.restore();
-			}
+			const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+			const result = await tool.call({ url: "https://probe.test/x" }, ctx({ access: "enabled", domains: [] }));
+			expect(result.isError, `${address} must be refused`).toBe(true);
+			expect(textOf(result)).toContain("private/internal");
+			expect(stub.urls).toEqual([]);
 		}
 		// The two neighbours of each boundary, because a range check that is one
 		// octet too wide is a false alarm and one too narrow is a hole.
 		for (const address of ["172.15.0.1", "172.32.0.1", "100.63.0.1", "100.128.0.1", "126.255.255.255", "128.0.0.1"]) {
-			const stub = recordingFetch();
+			const stub = recordingTransport();
 			const resolver = stubResolver({ "probe.test": [address] });
-			try {
-				const tool = createWebFetchTool({ resolveHost: resolver });
-				const result = await tool.call({ url: "https://probe.test/x" }, ctx({ access: "enabled", domains: [] }));
-				expect(result.isError, `${address} must be allowed`).toBeFalsy();
-				expect(stub.urls).toEqual(["https://probe.test/x"]);
-			} finally {
-				stub.restore();
-			}
+			const tool = createWebFetchTool({ resolveHost: resolver, transport: stub.transport });
+			const result = await tool.call({ url: "https://probe.test/x" }, ctx({ access: "enabled", domains: [] }));
+			expect(result.isError, `${address} must be allowed`).toBeFalsy();
+			expect(stub.urls).toEqual(["https://probe.test/x"]);
+			expect(stub.hits[0]?.addresses).toEqual([address]);
 		}
 	});
 
@@ -388,6 +432,7 @@ describe("WebFetch is subject to the network axis", () => {
 		const defaults = source.match(/resolveHost: HostResolver = resolveHostWithDns/g) ?? [];
 		expect(defaults).toHaveLength(1);
 		expect(source).toContain("options.resolveHost ?? resolveHostWithDns");
+		expect(source).toContain("options.transport ?? defaultWebFetchTransport");
 		// Exactly three references and no fourth: the declaration, the one
 		// parameter default, and the one fallback. A fourth would be a second way
 		// for the resolver to be chosen, and which one a call got would depend on
@@ -398,8 +443,8 @@ describe("WebFetch is subject to the network axis", () => {
 
 describe("WebSearch is subject to the network axis", () => {
 	test("a search whose destination is refused never sends the query", async () => {
-		// The query is free text the model chose and it leaves the machine inside
-		// a URL, so this is the exfiltration channel: an allowlist that admits one
+		// The query is free text the model chose and it leaves the machine inside a
+		// URL, so this is the exfiltration channel: an allowlist that admits one
 		// registry and refuses the search endpoint has to refuse the search, or the
 		// model can put whatever it has read into the query box.
 		const stub = recordingFetch();
@@ -440,4 +485,83 @@ describe("WebSearch is subject to the network axis", () => {
 			stub.restore();
 		}
 	});
+});
+
+describe("the pinned hop", () => {
+	test("dials the vetted address while Host and path name the origin", async () => {
+		// The guard resolves and vets; this hop must then dial the literal it
+		// vetted rather than resolving the name again. A local server can stand
+		// where that literal points without any DNS at all.
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: (request) => {
+				const url = new URL(request.url);
+				return new Response(`host=${request.headers.get("host")} path=${url.pathname}${url.search}`);
+			},
+		});
+		try {
+			const response = await defaultWebFetchTransport(
+				`http://origin.example:${server.port}/page?q=1`,
+				{ method: "GET" },
+				["127.0.0.1"],
+			);
+			expect(await response.text()).toBe(`host=origin.example:${server.port} path=/page?q=1`);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	test("a content-coded body is decoded, and the response does not describe encoded bytes", async () => {
+		// The global `fetch` this replaced advertised and decoded gzip, deflate
+		// and br. A pinned hop talks to the origin itself, so it owes the same
+		// two halves: a page that arrives compressed must still reach the HTML
+		// stripper as text.
+		const payload = "<html><body><p>compressed</p></body></html>";
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				new Response(gzipSync(payload), {
+					status: 200,
+					headers: { "content-encoding": "gzip", "content-type": "text/html" },
+				}),
+		});
+		try {
+			const response = await defaultWebFetchTransport(`http://origin.example:${server.port}/`, {}, ["127.0.0.1"]);
+			expect(await response.text()).toBe(payload);
+			// The body is decoded now, so headers describing the encoded bytes
+			// would be lies.
+			expect(response.headers.get("content-encoding")).toBeNull();
+			expect(response.headers.get("content-length")).toBeNull();
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	test("an abort tears down a hop that has not answered", async () => {
+		// The deadline and the run's cancel both arrive as an abort, and both
+		// have to reach the socket: a transport that ignored the signal would
+		// hold the tool open after Esc and after FETCH_TIMEOUT_MS.
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => new Promise<Response>(() => {}),
+		});
+		try {
+			const controller = new AbortController();
+			const started = Date.now();
+			const pending = defaultWebFetchTransport(
+				`http://origin.example:${server.port}/`,
+				{},
+				["127.0.0.1"],
+				controller.signal,
+			);
+			setTimeout(() => controller.abort(), 25);
+			await expect(pending).rejects.toThrow(/abort/i);
+			expect(Date.now() - started).toBeLessThan(5_000);
+		} finally {
+			server.stop(true);
+		}
+	}, 10_000);
 });

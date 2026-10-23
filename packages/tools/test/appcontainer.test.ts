@@ -983,6 +983,54 @@ describeWindows("the protected directory inside a grant", () => {
 		}
 	});
 
+	test("a protected directory created after the first acquire is narrowed when the next command joins", () => {
+		// The joined-grant shape: the first command names a nested repository
+		// before it exists, so the narrowing skips it; the container's
+		// inheritable full-mask ACE is already on the workspace and lands on the
+		// directory the moment the repository is created. A second command
+		// re-scans the policy, sees the new `.git`, and joins the open grant —
+		// which must narrow it rather than answer `refs++` and reuse a grant
+		// that never protected it.
+		const profile = refresh();
+		const nestedGit = `${workspace}\\vendor\\.git`;
+		try {
+			execSync(`cmd /c if exist "${workspace}\\vendor" rmdir /s /q "${workspace}\\vendor"`, { stdio: "ignore" });
+			// First acquire: the path is in the policy but does not exist yet.
+			const first = acquireWorkspaceGrant(workspace, false, [], [], [nestedGit]);
+			expect(first.error).toBeUndefined();
+			try {
+				// The repository appears while the grant is open; the host creates
+				// it, exactly as a clone or a submodule update would.
+				execSync(`cmd /c mkdir "${nestedGit}"`, { stdio: "ignore" });
+				writeFileSync(`${nestedGit}\\config`, "[core]\n");
+				const second = acquireWorkspaceGrant(workspace, false, [], [], [nestedGit]);
+				expect(second.error).toBeUndefined();
+				// The file system is the witness, not the exit code: `&& exit 42`
+				// runs even when the redirection is refused.
+				const write = runConfined(
+					profile,
+					`"C:\\Windows\\System32\\cmd.exe" /c echo x > "${nestedGit}\\evil.txt" && exit 42`,
+					{ cwd: workspace },
+				);
+				expect(write.exitCode).not.toBe(42);
+				expect(existsSync(`${nestedGit}\\evil.txt`)).toBe(false);
+				// Read+execute survives: the child must still read the repository
+				// it is protected from editing.
+				const read = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${nestedGit}\\config"`, {
+					cwd: workspace,
+				});
+				expect(read.exitCode).toBe(0);
+				expect(read.stdout).toContain("[core]");
+			} finally {
+				expect(releaseWorkspaceGrant(workspace, false)).toBeNull(); // the first reference
+			}
+			expect(releaseWorkspaceGrant(workspace, false)).toBeNull(); // the last
+		} finally {
+			execSync(`cmd /c if exist "${workspace}\\vendor" rmdir /s /q "${workspace}\\vendor"`, { stdio: "ignore" });
+			cleanup();
+		}
+	});
+
 	test("a protected path outside the grant fails the whole acquire, leaving no ACE behind", () => {
 		// The narrowing runs after the grants and inside the same
 		// all-or-nothing rule: a bad protected path must roll the written

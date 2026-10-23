@@ -3,7 +3,7 @@
 // this process", never as "the write could not have happened".
 // Long-form design notes: docs/dev/sandbox.md
 import { canRead, canWrite, type FileSystemAccessMode, type SandboxPolicy } from "@labunbun/agent";
-import { normalizePathSeparators, resolveCanonical } from "../containment.ts";
+import { filesystemFoldsCase, normalizePathSeparators, resolveCanonical } from "../containment.ts";
 
 // Long-form design notes: docs/dev/sandbox.md
 /** The one sentence every surface that shows this layer has to show. */
@@ -27,7 +27,11 @@ export interface SandboxDecisionOptions {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** Whether paths on this platform may differ only in case, mirroring the tool layer's own rule. */
+/**
+ * The platform default, kept for callers that have no path to probe and for
+ * tests that name the platform explicitly. Production decisions ask the volume
+ * itself (`filesystemFoldsCase`), because macOS can be formatted case-sensitive.
+ */
 export function caseInsensitiveSandboxPaths(platform: string = process.platform): boolean {
 	return platform === "win32" || platform === "darwin";
 }
@@ -40,7 +44,10 @@ export function decideWrite(
 	cwd: string,
 	options: SandboxDecisionOptions = {},
 ): SandboxDecision {
-	const platform = options.platform ?? process.platform;
+	// Undefined means production: the volume decides whether case folds. A
+	// supplied platform is the test override that keeps both semantics reachable
+	// from one machine.
+	const platform = options.platform;
 	const resolved = resolveCanonical(candidatePath, cwd);
 
 	// `danger-full-access` is recognised as the absence of a policy rather than
@@ -120,7 +127,8 @@ export function decideRead(
 	cwd: string,
 	options: SandboxDecisionOptions = {},
 ): SandboxDecision {
-	const platform = options.platform ?? process.platform;
+	// Undefined means production: the volume decides whether case folds.
+	const platform = options.platform;
 	const resolved = resolveCanonical(candidatePath, cwd);
 
 	if (policy.fileSystem.kind === "unrestricted") {
@@ -176,16 +184,15 @@ export function describeSimulatedSandbox(policy: SandboxPolicy): string {
 
 // Long-form design notes: docs/dev/sandbox.md
 /** Whether `candidate` sits inside `root`, the root itself included, with the case rule supplied. */
-function isWithinRoot(candidate: string, root: string, platform: string): boolean {
-	const fold = caseInsensitiveSandboxPaths(platform)
-		? (value: string) => value.toLowerCase()
-		: (value: string) => value;
+function isWithinRoot(candidate: string, root: string, platform?: string): boolean {
 	// `resolveCanonical(root, root)` is `guardPathContainment`'s own spelling:
 	// resolve the absolute path against itself, which is a no-op for the
 	// `resolve` step and a symlink walk for the rest. A root that does not exist
 	// degrades to the lexical form rather than throwing, which is what keeps the
 	// decision usable for a workspace that has not been created yet.
 	const normalizedRoot = normalizePathSeparators(resolveCanonical(root, root)).replace(/\/$/, "");
+	const folds = platform === undefined ? filesystemFoldsCase(normalizedRoot) : caseInsensitiveSandboxPaths(platform);
+	const fold = folds ? (value: string) => value.toLowerCase() : (value: string) => value;
 	const path = fold(normalizePathSeparators(candidate));
 	const trimmedRoot = fold(normalizedRoot);
 	return path === trimmedRoot || path.startsWith(`${trimmedRoot}/`);

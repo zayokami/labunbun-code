@@ -18,7 +18,16 @@
  */
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { type AddressInfo, connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -922,6 +931,31 @@ describe("the Windows AppContainer branch, selected by the resolver", () => {
 		expect(filtered.kind).toBe("appcontainer");
 		if (filtered.kind !== "appcontainer") return;
 		expect(filtered.protectedRoots).toEqual([]);
+	});
+
+	test("a nested protected path survives a workspace reached through a link", () => {
+		// `findProtectedPaths` returns realpath spellings, while the policy root
+		// keeps the spelling the session was started with. A lexical prefix
+		// compared `…/link/` with `…/real/.git` and dropped the entry — leaving
+		// the inheritable workspace ACE on the one directory the grant protects.
+		const root = workspace();
+		try {
+			const real = join(root, "real");
+			mkdirSync(join(real, ".git"), { recursive: true });
+			const link = join(root, "link");
+			symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
+			const protectedPath = canonical(join(real, ".git"));
+
+			const resolution = resolveSandboxExecution({
+				...win32,
+				policy: { ...policy("workspace-write", link), protected: [protectedPath] },
+			});
+			expect(resolution.kind).toBe("appcontainer");
+			if (resolution.kind !== "appcontainer") return;
+			expect(resolution.protectedRoots).toEqual([protectedPath]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	test("a skip-marked root that does not exist is dropped from the grant list", () => {

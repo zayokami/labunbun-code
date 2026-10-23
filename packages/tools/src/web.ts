@@ -6,12 +6,17 @@
 // Long-form design notes: docs/dev/tools.md
 
 import { lookup } from "node:dns/promises";
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { Readable, type Transform } from "node:stream";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { type AnyTool, buildTool, isBlockedAddress, type NetworkAxis } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { DEEPSEEK_API_KEY_ENV, deepSeekFetch, deepSeekSearch } from "./deepseek-web.ts";
 import {
+	FETCH_TIMEOUT_MS,
 	fetchWithTimeout,
 	guardUrlWithoutDns,
 	MAX_RESPONSE_BYTES,
@@ -126,41 +131,203 @@ export const resolveHostWithDns: HostResolver = async (hostname) => {
 	return records.map((record) => record.address);
 };
 
+/** The guard's answer: a refusal, or the checked addresses one hop may dial. */
+type UrlVerdict = { blocked: string } | { addresses: string[] };
+
 // Long-form design notes: docs/dev/tools.md
 /** Guard against SSRF: the non-DNS checks, then resolve the hostname and check every returned address. */
 async function guardPublicUrl(
 	rawUrl: string,
 	network: NetworkAxis | undefined,
 	resolveHost: HostResolver,
-): Promise<string | null> {
+): Promise<UrlVerdict> {
 	const withoutDns = guardUrlWithoutDns(rawUrl, network);
-	if (withoutDns) return withoutDns;
+	if (withoutDns) return { blocked: withoutDns };
 	// The shared guard already parsed this URL and accepted its protocol, so
 	// this second parse cannot throw and covers only the DNS half below.
 	const hostname = new URL(rawUrl).hostname.replace(/^\[|\]$/g, "");
-	if (!isIP(hostname)) {
-		let addresses: string[];
-		try {
-			addresses = await resolveHost(hostname);
-		} catch {
-			return `Could not resolve host: ${hostname}`;
-		}
-		// Zero addresses is a refusal, not a pass. The loop below is vacuously
-		// satisfied by an empty list, so a resolver that answers "I know nothing
-		// about this name" would otherwise turn the guard off for exactly the
-		// names it cannot vouch for — and the failure is silent, because a name
-		// that resolves to nothing private looks identical to a name that was
-		// never checked.
-		if (addresses.length === 0) return `Could not resolve host: ${hostname}`;
-		for (const address of addresses) {
-			if (isBlockedAddress(address)) return "Requests to private/internal addresses are not allowed";
-		}
+	// A literal is its own answer, and the shared guard already judged it.
+	if (isIP(hostname)) return { addresses: [hostname] };
+	let addresses: string[];
+	try {
+		addresses = await resolveHost(hostname);
+	} catch {
+		return { blocked: `Could not resolve host: ${hostname}` };
 	}
-	return null;
+	// Zero addresses is a refusal, not a pass. The loop below is vacuously
+	// satisfied by an empty list, so a resolver that answers "I know nothing
+	// about this name" would otherwise turn the guard off for exactly the
+	// names it cannot vouch for — and the failure is silent, because a name
+	// that resolves to nothing private looks identical to a name that was
+	// never checked.
+	if (addresses.length === 0) return { blocked: `Could not resolve host: ${hostname}` };
+	for (const address of addresses) {
+		if (isBlockedAddress(address)) return { blocked: "Requests to private/internal addresses are not allowed" };
+		// An answer that is not an address cannot be pinned, and
+		// `isBlockedAddress` is false for a name. A resolver that answered
+		// `localhost` would otherwise pass the loop and leave the next lookup
+		// free to decide where the request goes.
+		if (isIP(address) === 0) return { blocked: `Could not resolve host: ${hostname}` };
+	}
+	return { addresses };
+}
+
+/**
+ * One hop to an address the guard has already vetted.
+ *
+ * The shape is `fetch`'s because that is what this replaces for the local
+ * backend — same URL, same init, a `Response` back — with the one difference
+ * that decides where the socket goes. Injectable so a test can watch a hop
+ * without a network, and so the rebinding test can assert that the address
+ * checked is the address handed to the transport.
+ */
+export type WebFetchTransport = (
+	url: string,
+	init: RequestInit,
+	addresses: readonly string[],
+	signal?: AbortSignal,
+) => Promise<Response>;
+
+/**
+ * The response body under its content coding, decoded when every coding is one
+ * this transport advertised.
+ *
+ * The old path was the global `fetch`, which both advertises `gzip, deflate,
+ * br` and decodes them. A pinned hop talks to the origin itself, so the
+ * advertising and the decoding are its job too; skipping both would hand a
+ * compressed page to the HTML stripper. A coding outside the advertised set
+ * stays encoded — the headers then still describe the bytes — rather than
+ * being half-decoded.
+ */
+function decodeResponseBody(res: IncomingMessage): { stream: Readable; decoded: boolean } {
+	const codings = String(res.headers["content-encoding"] ?? "")
+		.split(",")
+		.map((coding) => coding.trim().toLowerCase())
+		.filter((coding) => coding !== "" && coding !== "identity");
+	if (codings.length === 0) return { stream: res, decoded: false };
+	const decoders: Transform[] = [];
+	for (const coding of codings) {
+		if (coding === "gzip" || coding === "x-gzip") decoders.push(createGunzip());
+		else if (coding === "deflate") decoders.push(createInflate());
+		else if (coding === "br") decoders.push(createBrotliDecompress());
+		else return { stream: res, decoded: false };
+	}
+	let stream: Readable = res;
+	// A body is encoded in list order, so it is decoded in reverse.
+	for (const decoder of decoders.reverse()) stream = stream.pipe(decoder);
+	return { stream, decoded: true };
+}
+
+/**
+ * The production hop: HTTP(S) to the first vetted address, with TLS and the
+ * `Host` header still naming the origin.
+ *
+ * `fetch` is not used because it offers no way to say which address to dial:
+ * it resolves the hostname itself, and that second answer is exactly the one
+ * the guard never saw. A literal in the client options leaves no lookup for
+ * the HTTP stack to run.
+ */
+export const defaultWebFetchTransport: WebFetchTransport = async (url, init, addresses, signal) => {
+	const target = new URL(url);
+	const address = addresses[0];
+	if (address === undefined) throw new Error("no vetted address to connect to");
+	const secure = target.protocol === "https:";
+	const hostname = target.hostname.replace(/^\[|\]$/g, "");
+	const headers = new Headers(init.headers);
+	// Without this the HTTP client would send the vetted literal as `Host`, and
+	// a name-based virtual host would answer for the wrong origin or refuse the
+	// request outright. A `Host` the caller set itself is preserved.
+	if (!headers.has("host")) headers.set("host", target.host);
+	// The codings the global `fetch` advertised, so a pinned hop sees the same
+	// pages it used to; `decodeResponseBody` undoes them below.
+	if (!headers.has("accept-encoding")) headers.set("accept-encoding", "gzip, deflate, br");
+	return await new Promise<Response>((resolve, reject) => {
+		const onResponse = (res: IncomingMessage) => {
+			const responseHeaders = new Headers();
+			for (const [name, value] of Object.entries(res.headers)) {
+				if (Array.isArray(value)) for (const item of value) responseHeaders.append(name, item);
+				else if (value !== undefined) responseHeaders.set(name, value);
+			}
+			const status = res.statusCode ?? 502;
+			// A null-body status cannot carry a stream — the `Response` constructor
+			// throws for one — and it has no body by definition.
+			let body: ReadableStream<Uint8Array> | null = null;
+			if (!(init.method === "HEAD" || status === 204 || status === 304)) {
+				const decoded = decodeResponseBody(res);
+				// The body below is decoded, so the headers that describe the
+				// encoded bytes would be lies on the synthesized `Response`.
+				if (decoded.decoded) {
+					responseHeaders.delete("content-encoding");
+					responseHeaders.delete("content-length");
+				}
+				body = Readable.toWeb(decoded.stream) as unknown as ReadableStream<Uint8Array>;
+			}
+			resolve(new Response(body, { status, statusText: res.statusMessage, headers: responseHeaders }));
+		};
+		const requestOptions = {
+			// The vetted literal: the HTTP client must not resolve the name a
+			// second time, because the second answer is the one the guard never saw.
+			host: address,
+			port: target.port || (secure ? 443 : 80),
+			method: init.method ?? "GET",
+			path: `${target.pathname}${target.search}`,
+			headers: Object.fromEntries(headers),
+			// A certificate is verified against the origin's name, not the address
+			// it currently resolves to; SNI has to say the same, or a name-based
+			// virtual host serves the wrong site or no site.
+			...(secure && isIP(hostname) === 0 ? { servername: hostname } : {}),
+			// No pooled connection: every hop is pinned to an address this request
+			// vetted, and a reused socket would be a different request's.
+			agent: false,
+		};
+		const req = secure ? httpsRequest(requestOptions, onResponse) : httpRequest(requestOptions, onResponse);
+		req.on("error", reject);
+		// The run's cancel and this request's deadline both arrive as an abort.
+		// Destroying the request tears down the socket and errors any body stream
+		// the caller may already be reading.
+		const onAbort = () => req.destroy(new Error("The operation was aborted."));
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+		req.once("close", () => signal?.removeEventListener("abort", onAbort));
+		const requestBody = init.body;
+		if (typeof requestBody === "string" || requestBody instanceof Uint8Array) req.write(requestBody);
+		else if (requestBody !== undefined && requestBody !== null) {
+			req.destroy(new Error("unsupported request body for the pinned WebFetch transport"));
+			return;
+		}
+		req.end();
+	});
+};
+
+/** The transport call under the same deadline and run-cancel the other fetch paths use. */
+async function fetchPinned(
+	transport: WebFetchTransport,
+	url: string,
+	init: RequestInit,
+	addresses: readonly string[],
+	signal: AbortSignal | undefined,
+): Promise<Response> {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+	const onAbort = () => controller.abort();
+	// A signal that aborted before this listener was attached never fires
+	// "abort" again, so the already-aborted case is read first — the same shape
+	// as `fetchWithTimeout`, for the same reason.
+	if (signal?.aborted) onAbort();
+	else signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await transport(url, init, addresses, controller.signal);
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
 }
 
 // Long-form design notes: docs/dev/tools.md
-/** Fetch with an SSRF re-check on every hop. */
+/** Fetch with an SSRF re-check on every hop, each hop dialling only an address that check vetted. */
 async function fetchGuarded(
 	url: string,
 	init: RequestInit,
@@ -168,15 +335,19 @@ async function fetchGuarded(
 	signal?: AbortSignal,
 	network?: NetworkAxis,
 	resolveHost: HostResolver = resolveHostWithDns,
+	transport: WebFetchTransport = defaultWebFetchTransport,
 ): Promise<Response | { blocked: string }> {
 	let current = url;
 	for (let hop = 0; hop <= maxRedirects; hop++) {
-		const blockReason = await guardPublicUrl(current, network, resolveHost);
-		if (blockReason) return { blocked: blockReason };
-		const response = await fetchWithTimeout(current, { ...init, redirect: "manual" }, signal);
+		const verdict = await guardPublicUrl(current, network, resolveHost);
+		if ("blocked" in verdict) return { blocked: verdict.blocked };
+		const response = await fetchPinned(transport, current, init, verdict.addresses, signal);
 		const isRedirect = response.status >= 300 && response.status < 400;
 		const location = response.headers.get("location");
 		if (!isRedirect || !location) return response;
+		// The redirect body is not the page and is never read; cancelling it
+		// releases the socket the pinned connection still holds.
+		await response.body?.cancel().catch(() => {});
 		current = new URL(location, current).toString();
 	}
 	return { blocked: "Too many redirects" };
@@ -189,6 +360,12 @@ export interface WebFetchOptions {
 	 * {@link HostResolver} for why a test must not use it.
 	 */
 	resolveHost?: HostResolver;
+	/**
+	 * The single hop to an address the guard vetted. Injectable so a test can
+	 * see which address a request dials, and prove a second resolver answer
+	 * cannot change it; the default dials the checked literal itself.
+	 */
+	transport?: WebFetchTransport;
 	/** `deepseek` routes the fetch through the DeepSeek Fetch API; `local` (the default) fetches here. */
 	backend?: WebFetchBackend;
 }
@@ -232,6 +409,7 @@ export function createWebFetchTool(options: WebFetchOptions = {}): AnyTool {
 					ctx.signal,
 					ctx.network,
 					options.resolveHost ?? resolveHostWithDns,
+					options.transport ?? defaultWebFetchTransport,
 				);
 				if ("blocked" in result) {
 					return { content: [textContent(`Fetch blocked: ${result.blocked}`)], isError: true };
@@ -247,6 +425,9 @@ export function createWebFetchTool(options: WebFetchOptions = {}): AnyTool {
 				};
 			}
 			if (!response.ok) {
+				// The error page is not read; cancelling the body releases the
+				// pinned connection instead of leaving it to the collector.
+				await response.body?.cancel().catch(() => {});
 				return {
 					content: [textContent(`HTTP ${response.status} ${response.statusText} for ${input.url}`)],
 					isError: true,

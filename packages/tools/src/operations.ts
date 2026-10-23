@@ -6,6 +6,7 @@
  * remote/container backend slot in without touching tool logic.
  */
 import { type ChildProcess, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import type { SandboxPolicy } from "@labunbun/agent";
@@ -225,8 +226,14 @@ export class NodeFileSystemOperations implements FileSystemOperations {
 	}
 
 	async writeTextFileAtomic(path: string, content: string): Promise<void> {
-		const tmp = `${path}.lbb-tmp-${Date.now()}`;
-		await writeFile(tmp, content, "utf8");
+		// A predictable name beside a writable target is a redirect target: a
+		// process that can write the directory can pre-create
+		// `${path}.lbb-tmp-<clock>` as a link, and a plain open follows it. `wx`
+		// refuses anything already at the name, the random suffix makes the name
+		// unguessable in the first place, and 0600 keeps the content private while
+		// it waits beside the target.
+		const tmp = `${path}.lbb-tmp-${randomBytes(8).toString("hex")}`;
+		await writeFile(tmp, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
 		try {
 			await rename(tmp, path);
 		} catch {

@@ -1,7 +1,7 @@
 // Long-form design notes: docs/dev/tools.md
 /** What the model was actually shown by a Read, kept per session so an edit tool can refuse a file nobody read. */
 
-import { caseInsensitivePaths, normalizePathSeparators } from "./containment.ts";
+import { filesystemFoldsCase, normalizePathSeparators } from "./containment.ts";
 
 /** One file's record. Frozen — a gate cannot rewrite the evidence it reads. */
 export interface ReadFileStateEntry {
@@ -60,10 +60,10 @@ interface Tracked extends ReadFileStateEntry {
 }
 
 // Long-form design notes: docs/dev/tools.md
-/** The map key for a path: separators normalised, case folded on case-insensitive filesystems. */
+/** The map key for a path: separators normalised, case folded only where the volume folds it. */
 function keyFor(path: string): string {
 	const normalized = normalizePathSeparators(path);
-	return caseInsensitivePaths ? normalized.toLowerCase() : normalized;
+	return filesystemFoldsCase(normalized) ? normalized.toLowerCase() : normalized;
 }
 
 /** One session's reads. Not shared, not global — see the header. */

@@ -111,19 +111,30 @@ async function startEcho() {
  */
 const blockNothing = (): boolean => false;
 
+/** The seams a request-level test may replace; the third `withProxy` argument. */
+type ProxyOverrides = {
+	isBlockedHost?: (host: string) => boolean;
+	resolveHost?: (host: string) => Promise<readonly string[]>;
+};
+
 /** Run `body` against a restricted proxy and two upstreams, then tear all down. */
 async function withProxy(
 	rules: readonly NetworkDomainRule[],
 	body: (ports: { proxy: number; socks: number; upstream: number; echo: number }) => Promise<void>,
 	/**
-	 * Passed straight through to `startNetworkProxy`. Left out means the real
-	 * blocklist runs, which is the default every test should be in.
+	 * Passed straight through to `startNetworkProxy`, either as the blocklist
+	 * stand-in alone or as any of the seams. Left out means the real blocklist
+	 * and the system resolver run, which is the default every test should be in.
 	 */
-	isBlockedHost?: (host: string) => boolean,
+	overrides?: ((host: string) => boolean) | ProxyOverrides,
 ) {
 	const upstream = await startUpstream();
 	const echo = await startEcho();
-	const proxy = await startNetworkProxy({ network: "restricted", rules, isBlockedHost });
+	const proxy = await startNetworkProxy({
+		network: "restricted",
+		rules,
+		...(typeof overrides === "function" ? { isBlockedHost: overrides } : (overrides ?? {})),
+	});
 	if (!proxy) throw new Error("expected the policy to confine something");
 	try {
 		await body({
@@ -205,7 +216,7 @@ function reader(socket: Socket) {
 }
 
 /**
- * One absolute-form request, read back to `Content-Length`.
+ * One absolute-form request, read back to the response's own framing.
  *
  * Not "read until the socket closes": the response says `Connection: close`
  * and the body arrives, but the peer does not necessarily *close* promptly,
@@ -226,13 +237,43 @@ async function exchangePath(path: string, request: string): Promise<{ head: stri
 	return exchangeOver(socket, request);
 }
 
-/** One absolute-form request over an established socket, read back to `Content-Length`. */
+/**
+ * One absolute-form request over an established socket, read back to the
+ * response's own framing: `Content-Length`, or chunked transfer coding.
+ *
+ * **Bun 1.4.4 changed the framing of the test upstream.** A `writeHead(...,
+ * {connection: "close"})` followed by `end(string)` now answers with
+ * `Transfer-Encoding: chunked` and no `Content-Length`, where 1.3.5 sent a
+ * `Content-Length`. The proxy forwards what it is handed, so a reader that
+ * only understands `Content-Length` sees an empty body in a reply that is
+ * right there — which is what turned two forwarding rows red on the upgrade.
+ */
 async function exchangeOver(socket: Socket, request: string): Promise<{ head: string; body: string }> {
 	const io = reader(socket);
 	socket.write(request);
 	const head = await io.until("\r\n\r\n");
-	const length = Number(/content-length:\s*(\d+)/i.exec(head)?.[1] ?? "0");
-	const body = (await io.read(length)).toString("latin1");
+	let body: string;
+	if (/transfer-encoding:\s*chunked/i.test(head)) {
+		const parts: Buffer[] = [];
+		for (;;) {
+			const line = await io.until("\r\n");
+			const size = Number.parseInt(line.split(";")[0] ?? "", 16);
+			if (!Number.isFinite(size) || size < 0) throw new Error(`unreadable chunk-size line: ${line}`);
+			if (size === 0) {
+				// The trailer section: zero or more field lines, then a blank line.
+				for (;;) {
+					if ((await io.until("\r\n")) === "\r\n") break;
+				}
+				break;
+			}
+			parts.push(await io.read(size));
+			await io.read(2); // the CRLF that closes each chunk's data
+		}
+		body = Buffer.concat(parts).toString("latin1");
+	} else {
+		const length = Number(/content-length:\s*(\d+)/i.exec(head)?.[1] ?? "0");
+		body = (await io.read(length)).toString("latin1");
+	}
 	socket.destroy();
 	return { head, body };
 }
@@ -904,5 +945,153 @@ describe("the address blocklist runs before the rules, on the real table", () =>
 			},
 			blockNothing,
 		);
+	});
+});
+
+describe("the address behind a permitted name", () => {
+	// These stand in the resolver so a name can be given an answer the test can
+	// name, and they leave the real blocklist running: the property under test
+	// is that the blocklist sees the *answer*, not only the spelling in the
+	// request. Without this half, `isBlockedNetworkHost` judged `rebind.test` as
+	// a string and the socket's own lookup was free to answer 127.0.0.1.
+
+	test("CONNECT refuses a name that resolves to a blocked address, before a socket exists", async () => {
+		const echo = await startEcho();
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("*"),
+			resolveHost: async () => ["127.0.0.1"],
+		});
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const socket = await open(portOfUrl(proxy.httpUrl));
+			const io = reader(socket);
+			socket.write(`CONNECT rebind.test:${echo.port} HTTP/1.1\r\nHost: rebind.test\r\n\r\n`);
+			const status = await io.until("\r\n\r\n");
+			expect(status).toContain("403 Forbidden");
+			// The reason is the table's, not a rule's: a user cannot act on an
+			// address they never wrote, and the header says so.
+			expect(status).toContain("X-LBB-Denial: blocked_address");
+			// The count is the point of the test: a proxy that connected first and
+			// checked later would still satisfy the status line above.
+			expect(echo.connections()).toBe(0);
+			socket.destroy();
+		} finally {
+			await proxy.close();
+			await echo.close();
+		}
+	});
+
+	test("one blocked answer refuses the whole name, because the next lookup is not this one", async () => {
+		const echo = await startEcho();
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("*"),
+			// The DNS-rebinding shape: the name answers a public address and a
+			// private one. Choosing the clean half would be a guess about the
+			// answer the client's next lookup receives.
+			resolveHost: async () => ["93.184.216.34", "169.254.169.254"],
+		});
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const socket = await open(portOfUrl(proxy.httpUrl));
+			const io = reader(socket);
+			socket.write(`CONNECT rebind.test:${echo.port} HTTP/1.1\r\nHost: rebind.test\r\n\r\n`);
+			expect(await io.until("\r\n\r\n")).toContain("X-LBB-Denial: blocked_address");
+			expect(echo.connections()).toBe(0);
+			socket.destroy();
+		} finally {
+			await proxy.close();
+			await echo.close();
+		}
+	});
+
+	test("an allowed name connects to the address that was checked, not to a second lookup", async () => {
+		const echo = await startEcho();
+		const asked: string[] = [];
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("pin.test"),
+			// The fixture origin is loopback, so the table is stood down for this
+			// one; the resolver answer is what the test is about.
+			isBlockedHost: blockNothing,
+			resolveHost: async (host) => {
+				asked.push(host);
+				return ["127.0.0.1"];
+			},
+		});
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const socket = await open(portOfUrl(proxy.httpUrl));
+			const io = reader(socket);
+			socket.write(`CONNECT pin.test:${echo.port} HTTP/1.1\r\nHost: pin.test\r\n\r\n`);
+			expect(await io.until("\r\n\r\n")).toContain("200 Connection Established");
+			socket.write("ping");
+			expect((await io.read(4)).toString("latin1")).toBe("PING");
+			// The name was resolved once, by this proxy, and the socket dialled
+			// the answer. A connect by name would resolve it a second time, at
+			// the one moment the check no longer covers.
+			expect(asked).toEqual(["pin.test"]);
+			expect(echo.connections()).toBe(1);
+			socket.destroy();
+		} finally {
+			await proxy.close();
+			await echo.close();
+		}
+	});
+
+	test("the absolute-form HTTP path dials the checked address and still sends the origin's Host", async () => {
+		const upstream = await startUpstream();
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("pin.test"),
+			isBlockedHost: blockNothing,
+			resolveHost: async () => ["127.0.0.1"],
+		});
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const { head } = await exchange(
+				portOfUrl(proxy.httpUrl),
+				`GET http://pin.test:${upstream.port}/behind-the-name HTTP/1.1\r\nHost: pin.test:${upstream.port}\r\n\r\n`,
+			);
+			expect(head).toContain("200 OK");
+			// The request line is read at the origin rather than the response
+			// body: `pin.test` is not in DNS, so a request that arrived can only
+			// have arrived at the address the resolver seam answered.
+			expect(upstream.seen()).toEqual(["/behind-the-name"]);
+		} finally {
+			await proxy.close();
+			await upstream.close();
+		}
+	});
+
+	test("SOCKS5 refuses a name whose answer is blocked", async () => {
+		const echo = await startEcho();
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("*"),
+			resolveHost: async () => ["10.0.0.7"],
+		});
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const socket = await open(portOfUrl(proxy.socksUrl));
+			const io = reader(socket);
+			socket.write(Buffer.from([0x05, 0x01, 0x00]));
+			await io.read(2);
+			const name = Buffer.from("metadata.test", "latin1");
+			socket.write(
+				Buffer.concat([
+					Buffer.from([0x05, 0x01, 0x00, 0x03, name.length]),
+					name,
+					Buffer.from([echo.port >> 8, echo.port & 0xff]),
+				]),
+			);
+			expect((await io.read(10))[1]).toBe(0x02);
+			expect(echo.connections()).toBe(0);
+			socket.destroy();
+		} finally {
+			await proxy.close();
+			await echo.close();
+		}
 	});
 });

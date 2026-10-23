@@ -1,5 +1,6 @@
 /**
- * Permission rule engine (pure — no I/O, no UI).
+ * Permission rule engine (no UI; the one filesystem read is the link walk in
+ * `resolveCanonical`, so a rule judges the target the tools will actually open).
  *
  * Rule syntax: "Tool" or "Tool(specifier)" e.g.
  *   Bash · Bash(git *) · Bash(npm run *) · Edit(src/**) · Read(~/.ssh/*)
@@ -58,7 +59,8 @@
  * invariant in `.labunbun/skills/code-review-security/SKILL.md:8`, and the code
  * was the thing that disagreed with it.
  */
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import {
 	classifyDangerousCommand,
 	type DangerousCommandMatch,
@@ -255,29 +257,69 @@ export function inputMatchesSpecifier(toolName: string, specifier: string, input
 	}
 }
 
-/** Resolve a path against cwd, collapsing `..`/`.` segments so traversal
- *  sequences can't defeat the string-prefix containment checks below. */
+/**
+ * Whether rule matching folds case. It is a property of the filesystem, not of
+ * the rule syntax: on Windows and on macOS's default APFS a path and its case
+ * variant are one file, so a rule written in either spelling must name it. On
+ * Linux the two are different files, and folding would let an allow rule cover
+ * a file it does not name.
+ */
+const foldsRulePathCase = process.platform === "win32" || process.platform === "darwin";
+
+/** Resolve the links in the part of `absolutePath` that exists, keeping the rest verbatim. */
+function resolveExistingPrefix(absolutePath: string): string {
+	const missing: string[] = [];
+	let current = absolutePath;
+	for (;;) {
+		try {
+			// A Windows realpath can come back extended-length prefixed; strip it so
+			// the result still compares equal to the paths callers spell.
+			const real = realpathSync(current).replace(/^\\\\\?\\/, "");
+			return missing.length > 0 ? join(real, ...missing.reverse()) : real;
+		} catch {
+			const parent = dirname(current);
+			if (parent === current) return absolutePath;
+			missing.push(basename(current));
+			current = parent;
+		}
+	}
+}
+
+/**
+ * Resolve a path against cwd, collapsing `..`/`.` segments and following links
+ * in the part that exists. The link walk is what keeps a rule naming `secret`
+ * from being laundered by a symlink spelled `alias`: the tool opens the real
+ * target, so the rule has to judge that same target. A path that does not exist
+ * yet keeps its lexical resolution, which is where a Write is allowed to land.
+ */
 function resolveCanonical(filePath: string, cwd: string): string {
-	return normalizePathSpec(resolve(cwd, filePath));
+	return normalizePathSpec(resolveExistingPrefix(resolve(cwd, filePath)));
 }
 
 function pathMatches(filePath: string, specifier: string, cwd: string): boolean {
 	const file = resolveCanonical(filePath, cwd);
 	const spec = normalizePathSpec(specifier);
-	const candidates = new Set([file, file.toLowerCase()]);
+	const candidates = new Set<string>();
+	const addCandidate = (value: string): void => {
+		candidates.add(value);
+		if (foldsRulePathCase) candidates.add(value.toLowerCase());
+	};
+	addCandidate(file);
 
 	// Workspace-relative form.
 	const normalizedCwd = `${resolveCanonical(cwd, cwd).replace(/\/$/, "")}/`;
-	if (file.toLowerCase().startsWith(normalizedCwd.toLowerCase())) {
-		candidates.add(file.slice(normalizedCwd.length));
-	}
+	const underCwd = foldsRulePathCase
+		? file.toLowerCase().startsWith(normalizedCwd.toLowerCase())
+		: file.startsWith(normalizedCwd);
+	if (underCwd) addCandidate(file.slice(normalizedCwd.length));
 	// ~ expansion.
 	const home = normalizePathSpec(process.env.USERPROFILE ?? process.env.HOME ?? "");
-	if (home && file.toLowerCase().startsWith(`${home.toLowerCase()}/`)) {
-		candidates.add(`~${file.slice(home.length)}`);
-	}
+	const underHome = foldsRulePathCase
+		? file.toLowerCase().startsWith(`${home.toLowerCase()}/`)
+		: file.startsWith(`${home}/`);
+	if (home && underHome) addCandidate(`~${file.slice(home.length)}`);
 
-	const regex = specifierToRegExp(spec);
+	const regex = specifierToRegExp(foldsRulePathCase ? spec.toLowerCase() : spec);
 	for (const candidate of candidates) {
 		if (regex.test(candidate)) return true;
 	}

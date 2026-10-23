@@ -1,10 +1,28 @@
 /**
  * The web tools must stop when the run is cancelled: a request that keeps
  * waiting out its own 30s timeout is indistinguishable from an app that
- * ignores Esc. `fetch` is stubbed — no network is contacted.
+ * ignores Esc. WebFetch's transport and WebSearch's `fetch` are stubbed — no
+ * network is contacted.
  */
 import { describe, expect, test } from "bun:test";
-import { createWebFetchTool, createWebSearchTool } from "../src/web.ts";
+import { createWebFetchTool, createWebSearchTool, type WebFetchTransport } from "../src/web.ts";
+
+/** A transport that behaves like a real hop: rejects as soon as its signal aborts. */
+function stallingTransport() {
+	const state = { calls: 0 };
+	const transport: WebFetchTransport = (_url, _init, _addresses, signal) => {
+		state.calls++;
+		return new Promise((_resolve, reject) => {
+			const fail = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+			if (signal?.aborted) {
+				fail();
+				return;
+			}
+			signal?.addEventListener("abort", fail, { once: true });
+		});
+	};
+	return { state, transport };
+}
 
 /** A fetch that behaves like the real one: rejects as soon as its signal aborts. */
 function stallingFetch() {
@@ -43,25 +61,24 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("web tools honour the run's abort signal", () => {
 	test("WebFetch stops on abort instead of waiting out its timeout", async () => {
-		const stub = stallingFetch();
-		try {
-			const controller = new AbortController();
-			const started = Date.now();
-			// Literal public address: the guard resolves hostnames over DNS, and
-			// nothing here is actually dialed — fetch is stubbed.
-			const pending = createWebFetchTool().call({ url: "http://1.1.1.1/" }, ctx(controller.signal));
-			await delay(50);
-			expect(stub.state.calls).toBe(1);
+		// Literal public address: the guard would resolve hostnames over DNS, and
+		// nothing here is actually dialed — the transport is stubbed.
+		const stub = stallingTransport();
+		const controller = new AbortController();
+		const started = Date.now();
+		const pending = createWebFetchTool({ transport: stub.transport }).call(
+			{ url: "http://1.1.1.1/" },
+			ctx(controller.signal),
+		);
+		await delay(50);
+		expect(stub.state.calls).toBe(1);
 
-			controller.abort();
-			const result = await pending;
+		controller.abort();
+		const result = await pending;
 
-			expect(Date.now() - started).toBeLessThan(5_000);
-			expect(result.isError).toBe(true);
-			expect((result.content[0] as { text: string }).text).toBe("Tool execution aborted");
-		} finally {
-			stub.restore();
-		}
+		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as { text: string }).text).toBe("Tool execution aborted");
 	}, 15_000);
 
 	test("WebSearch stops on abort instead of waiting out its timeout", async () => {

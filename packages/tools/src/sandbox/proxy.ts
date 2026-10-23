@@ -2,10 +2,11 @@
 // The decision it enforces is a pure function in `@labunbun/agent`.
 // Long-form design notes: docs/dev/sandbox.md
 
+import { lookup as dnsLookup } from "node:dns/promises";
 import type { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
-import { createServer as createTcpServer, connect as netConnect, type Server, type Socket } from "node:net";
+import { createServer as createTcpServer, isIP, connect as netConnect, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
@@ -15,6 +16,7 @@ import {
 	type NetworkDecision,
 	type NetworkDomainRule,
 	needsNetworkProxy,
+	normalizeHost,
 } from "@labunbun/agent";
 import type { BridgePair, UnixBridge } from "./bridge.ts";
 
@@ -43,6 +45,13 @@ export interface NetworkProxyOptions {
 	// Long-form design notes: docs/dev/sandbox.md
 	/** The address blocklist. Defaults to {@link isBlockedNetworkHost}. Injectable so a test can watch a permitted connection. */
 	isBlockedHost?: (host: string) => boolean;
+	// Long-form design notes: docs/dev/sandbox.md
+	/**
+	 * Resolves a hostname to every address it currently names. Injectable so a
+	 * test can model a name that answers a blocked address without owning DNS;
+	 * defaults to the system resolver.
+	 */
+	resolveHost?: (host: string) => Promise<readonly string[]>;
 	/**
 	 * Also serve this proxy over Unix sockets, one per loopback port, in a
 	 * fresh directory under the system temp. The Linux loopback bridge is the
@@ -60,6 +69,66 @@ function decideUpstream(options: NetworkProxyOptions, host: string): NetworkDeci
 	const blocked = (options.isBlockedHost ?? isBlockedNetworkHost)(host);
 	if (blocked) return { allowed: false, reason: "blocked_address" };
 	return decideNetworkRequest(options.rules, host, options.network);
+}
+
+/** A policy answer with the addresses a permitted request may dial, every one already checked. */
+type VettedUpstream = { allowed: false; reason: string } | { allowed: true; addresses: readonly [string, ...string[]] };
+
+/**
+ * The system resolver, returning every address rather than the one the
+ * platform would dial first.
+ *
+ * `verbatim: false` puts IPv4 ahead of IPv6. The order is an availability
+ * choice and nothing else — every address is vetted before it is tried — but
+ * it is the honest one for a proxy whose CONNECT path can try the next entry
+ * while the HTTP path dials the first: a broken IPv6 route is the older
+ * dual-stack failure, and it should not decide which origin answers.
+ */
+async function resolveAllAddresses(host: string): Promise<readonly string[]> {
+	const answers = await dnsLookup(host, { all: true, verbatim: false });
+	return answers.map((answer) => answer.address);
+}
+
+// Long-form design notes: docs/dev/sandbox.md
+/**
+ * The address this proxy may connect to for `host`, after asking both layers
+ * and, for a name, the resolver.
+ *
+ * The string blocklist and the domain table decide what they always decided.
+ * A name carries one more question they cannot answer: the addresses it
+ * resolves to *now* are not necessarily the ones a later lookup will see, and
+ * `localhost` was only the spelling this build could recognise as itself. All
+ * answers are checked and any blocked one refuses the name — a host that
+ * answers both a public and a private address is the DNS-rebinding shape, and
+ * picking the clean answer would be guessing which half the next lookup gets.
+ * The chosen address is then handed to the connect call as a literal, so the
+ * socket's own resolver never runs and the address checked is the address
+ * dialled.
+ */
+async function vettedUpstream(options: NetworkProxyOptions, host: string): Promise<VettedUpstream> {
+	const decision = decideUpstream(options, host);
+	if (!decision.allowed) return { allowed: false, reason: decision.reason ?? "denied" };
+	// A literal resolves to itself, and the blocklist above already judged it.
+	if (isIP(host) !== 0) return { allowed: true, addresses: [host] };
+	const blocked = options.isBlockedHost ?? isBlockedNetworkHost;
+	let addresses: readonly string[];
+	try {
+		addresses = await (options.resolveHost ?? resolveAllAddresses)(host);
+	} catch {
+		return { allowed: false, reason: "unresolvable_host" };
+	}
+	if (addresses.length === 0) return { allowed: false, reason: "unresolvable_host" };
+	for (const address of addresses) {
+		if (blocked(address)) return { allowed: false, reason: "blocked_address" };
+	}
+	// A resolver is an external boundary like any other: an answer that is not
+	// an address cannot be pinned, so it is refused rather than handed on.
+	if (addresses.some((address) => isIP(address) === 0)) return { allowed: false, reason: "unresolvable_host" };
+	const [first, ...rest] = addresses;
+	// Unreachable after the length check above; the guard is what makes the
+	// non-empty tuple this function promises a fact the compiler can see.
+	if (first === undefined) return { allowed: false, reason: "unresolvable_host" };
+	return { allowed: true, addresses: [first, ...rest] };
 }
 
 export interface NetworkProxy {
@@ -256,19 +325,27 @@ async function handleConnect(
 	track: <T extends Duplex>(socket: T) => T,
 ): Promise<void> {
 	const [host, port] = splitHostPort(req.url ?? "");
-	const decision = decideUpstream(options, host);
-	if (!decision.allowed) {
+	const vetted = await vettedUpstream(options, host);
+	if (!vetted.allowed) {
 		// 403 rather than a reset, and the reason in a header. A client that
 		// cannot read why it was refused says "connection failed", and the one
 		// line here is the difference between a user who knows their allow list
 		// is missing a domain and a user who thinks the network is down.
 		clientSocket.end(
-			`HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nX-LBB-Denial: ${decision.reason ?? "denied"}\r\nConnection: close\r\n\r\n`,
+			`HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nX-LBB-Denial: ${vetted.reason}\r\nConnection: close\r\n\r\n`,
 		);
 		return;
 	}
 
-	const upstream = track(await openUpstream(host, Number(port ?? 443), connectTimeoutMs));
+	const upstream = track(
+		await openUpstream(
+			host,
+			vetted.addresses,
+			Number(port ?? 443),
+			connectTimeoutMs,
+			options.isBlockedHost ?? isBlockedNetworkHost,
+		),
+	);
 	clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
 	if (head.length > 0) upstream.write(head);
 	clientSocket.pipe(upstream);
@@ -279,16 +356,25 @@ async function handleConnect(
 /** Absolute-form `GET http://host/path` — the shape `HTTP_PROXY` clients use. Origin-form fails as a malformed host. */
 async function handleHttp(options: NetworkProxyOptions, req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const target = new URL(req.url ?? "");
-	const decision = decideUpstream(options, target.hostname);
-	if (!decision.allowed) {
-		res.writeHead(403, { "content-type": "text/plain", "x-lbb-denial": decision.reason ?? "denied" });
-		res.end(`refused by network policy: ${decision.reason ?? "denied"}\n`);
+	// `URL.hostname` keeps the brackets around an IPv6 literal; every layer
+	// below — the blocklist, the resolver's literal fast path, the connect —
+	// speaks the unbracketed spelling.
+	const host = normalizeHost(target.hostname);
+	const vetted = await vettedUpstream(options, host);
+	if (!vetted.allowed) {
+		res.writeHead(403, { "content-type": "text/plain", "x-lbb-denial": vetted.reason });
+		res.end(`refused by network policy: ${vetted.reason}\n`);
 		return;
 	}
 
 	const upstream = httpRequest(
 		{
-			host: target.hostname,
+			// The vetted literal, not `host`: `Host` below still names the
+			// origin, so the request is addressed as before, while the socket
+			// connects to the address this proxy checked. An IP literal leaves
+			// no lookup for the HTTP client to run. The request path has no
+			// address-list fallback; the HTTP client dials the first one.
+			host: vetted.addresses[0],
 			port: target.port || 80,
 			method: req.method,
 			path: `${target.pathname}${target.search}`,
@@ -351,8 +437,8 @@ async function handleSocks(
 		const host = await readAddress(reader.read, byte(head, 3));
 		const port = uint16(await reader.read(2));
 
-		const decision = decideUpstream(options, host);
-		if (!decision.allowed) {
+		const vetted = await vettedUpstream(options, host);
+		if (!vetted.allowed) {
 			// No reason reaches the client here, and that is the protocol rather
 			// than an oversight: RFC 1928's reply carries a code and nothing else,
 			// so a blocked address, a denied domain and an unmatched allow rule
@@ -363,7 +449,9 @@ async function handleSocks(
 			return;
 		}
 
-		const upstream = track(await openUpstream(host, port, connectTimeoutMs));
+		const upstream = track(
+			await openUpstream(host, vetted.addresses, port, connectTimeoutMs, options.isBlockedHost ?? isBlockedNetworkHost),
+		);
 		// Hand the socket over: the reader's `data` listener has to go, or the
 		// tunnel bytes get buffered by a handshake that has already finished
 		// while `pipe` is trying to read the same bytes.
@@ -491,21 +579,62 @@ function byteReader(socket: Duplex) {
 	};
 }
 
-/** The upstream socket for an allowed destination, with a connect deadline. */
-function openUpstream(host: string, port: number, timeoutMs: number): Promise<Socket> {
+/** The upstream socket for addresses already vetted for this request, with one connect deadline. */
+function openUpstream(
+	host: string,
+	addresses: readonly string[],
+	port: number,
+	timeoutMs: number,
+	blocked: (host: string) => boolean,
+): Promise<Socket> {
 	return new Promise((resolve, reject) => {
-		const socket = netConnect({ host, port });
-		const giveUp = (error: Error) => {
+		let done = false;
+		let pending: Socket | undefined;
+		const fail = (error: Error) => {
+			if (done) return;
+			done = true;
 			clearTimeout(timer);
-			socket.destroy();
+			pending?.destroy();
 			reject(error);
 		};
-		const timer = setTimeout(() => giveUp(new Error(`connecting to ${host}:${port} timed out`)), timeoutMs);
-		socket.once("connect", () => {
-			clearTimeout(timer);
-			resolve(socket);
-		});
-		socket.once("error", giveUp);
+		const timer = setTimeout(() => fail(new Error(`connecting to ${host}:${port} timed out`)), timeoutMs);
+		const attempt = (index: number): void => {
+			if (done) return;
+			const address = addresses[index];
+			if (address === undefined) {
+				fail(new Error(`could not connect to ${host}:${port}`));
+				return;
+			}
+			// `address`, never `host`: every entry is a literal, so the socket's
+			// connect has nothing left to resolve and the address that was vetted
+			// is the one dialled. Trying the next vetted address on a failed
+			// attempt is what keeps a dual-stack answer usable when only one
+			// family has a route — every address tried has been through the same
+			// check.
+			const socket = netConnect({ host: address, port });
+			pending = socket;
+			socket.once("error", () => {
+				if (done) return;
+				socket.destroy();
+				attempt(index + 1);
+			});
+			socket.once("connect", () => {
+				if (done) return;
+				// Belt and braces after the pin: the peer TCP actually reached is
+				// put through the same blocklist. The property then survives a
+				// future caller that reaches this function with a name.
+				const peer = socket.remoteAddress;
+				if (peer !== undefined && blocked(peer)) {
+					socket.destroy();
+					fail(new Error(`the peer at ${peer} is a blocked address`));
+					return;
+				}
+				done = true;
+				clearTimeout(timer);
+				resolve(socket);
+			});
+		};
+		attempt(0);
 	});
 }
 

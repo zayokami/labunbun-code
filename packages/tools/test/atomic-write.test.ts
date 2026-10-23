@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NodeFileSystemOperations } from "../src/operations.ts";
@@ -32,6 +32,33 @@ describe("writeTextFileAtomic", () => {
 
 		expect(readFileSync(path, "utf8")).toBe("new");
 		expect(readdirSync(dir)).toEqual(["file.txt"]);
+	});
+
+	test("a link planted at the old predictable temp name cannot redirect the write", async () => {
+		const dir = tempDir();
+		const path = join(dir, "file.txt");
+		const victim = join(dir, "victim.txt");
+		writeFileSync(path, "old");
+		writeFileSync(victim, "untouched");
+
+		// The defect: the temp name was `${path}.lbb-tmp-${Date.now()}` and the
+		// open was not exclusive, so a link at the next clock's name made the
+		// write land on `victim` and the rename put that link over the target. A
+		// hard link is the same aliasing without the symlink privilege Windows
+		// asks for. Pinning the clock makes the planted name the one the old
+		// implementation would pick; the random suffix and `wx` ignore it.
+		const originalNow = Date.now;
+		Date.now = () => 1_700_000_000_000;
+		try {
+			linkSync(victim, `${path}.lbb-tmp-${Date.now()}`);
+			await new NodeFileSystemOperations().writeTextFileAtomic(path, "new");
+		} finally {
+			Date.now = originalNow;
+		}
+
+		expect(readFileSync(victim, "utf8")).toBe("untouched");
+		expect(lstatSync(path).isSymbolicLink()).toBe(false);
+		expect(readFileSync(path, "utf8")).toBe("new");
 	});
 
 	test("when rename fails and the fallback fails too, the temp file is still removed", async () => {
