@@ -29,8 +29,10 @@ LaBunbun Code reads files, changes files, and runs commands. It sends your reque
 | `Digest` | Print the SHA-256 hash of the content of each named file. |
 | `InspectSqlite` | Report the structure and sample rows of a SQLite database file. |
 | `InspectArtifact` | Report the entries of a zip-family archive or an Electron ASAR without unpacking it. |
-| `InspectBinary` | Report the format and structure of an executable or object file, and its embedded metadata (Go build info, Rust dependencies, Electron fuses, .NET managed metadata). |
+| `InspectBinary` | Report the format and structure of an executable or object file, and its embedded metadata (Go build info, Rust dependencies, Electron fuses, .NET managed metadata, including method call and field summaries). |
 | `InspectSourceMap` | Report what a source map file holds, and whether its VLQ mappings decode. |
+| `CompareArtifacts` | Compare two files, directories, zip-family archives, or ASAR archives by path and SHA-256 content, and list the differences. |
+| `InspectWebCapture` | Report the records of an offline HAR 1.2 or Fiddler SAZ capture, with metadata and body hashes and no secret values. |
 | `WebFetch` | Get one page from the network. |
 | `WebSearch` | Search the network. |
 | `TaskCreate` | Make a task. A task can name the tasks that block it. |
