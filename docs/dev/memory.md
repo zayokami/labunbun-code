@@ -42,7 +42,7 @@ Memory is a prompt section and not a user message for one reason: the model has 
 - The ledger is keyed by the working directory, not by the repository root. A session in a subdirectory of a Git project gets a notice that the approval covers that subdirectory only (`packages/coding-agent/src/project-trust.ts:17-24`, `:108-126`).
 - The REPL prints the withheld counts at startup when any exist (`packages/coding-agent/src/interactive.ts:2407-2421`). A `-p` run prints the same notice on stderr (`packages/coding-agent/src/headless.ts:583-596`; the wording is in `packages/coding-agent/src/project-trust.ts:108-126`).
 - `/agents approve` adds the `memory` and `styles` kinds to the ledger when those files are withheld (`packages/coding-agent/src/interactive.ts:3533-3541`). The approval loads agents and skills in place. Memory and output styles are read at startup, so the command tells the user to restart (`packages/coding-agent/src/interactive.ts:3556-3585`).
-- `/memory` repeats the same rule after an edit: memory is read at startup, so a restart applies the edit (`packages/coding-agent/src/interactive.ts:4443-4450`).
+- `/memory` repeats the same rule after an edit: memory is read at startup, so a restart applies the edit (`packages/coding-agent/src/interactive.ts:4444-4451`).
 - A project output-style directory uses the same ledger under kind `styles` (`packages/coding-agent/src/output-styles.ts:92-94`, `packages/coding-agent/src/project-trust.ts:42-45`). The withheld files are listed but never read, for the startup notice and the `/agents` listing (`packages/coding-agent/src/output-styles.ts:129-141`, `packages/coding-agent/src/interactive.ts:3614-3623`).
 
 ## Quick notes and /memory
@@ -55,15 +55,15 @@ Memory is a prompt section and not a user message for one reason: the model has 
 - The re-read uses the same gated loader as startup, so a note cannot make an untrusted project memory file enter the prompt (`packages/coding-agent/src/interactive.ts:2267-2273`).
 - The live swap is `sessionRef?.setSystemPrompt(buildPrompt(memoryText))`. The note reaches the next request, not the next process, and a subagent spawned after it reads the same value (`packages/coding-agent/src/interactive.ts:2273-2277`, `:860-864`).
 - The shortcut exists in the REPL only. A `-p` run loads memory once (`packages/coding-agent/src/headless.ts:560`). An ACP session loads it once (`packages/coding-agent/src/acp.ts:1124`).
-- `/memory` accepts `rules`, `project`, or no argument. Any other argument prints the usage line (`packages/coding-agent/src/interactive.ts:4399-4404`).
-- With no argument, `/memory` opens `~/.labunbun/MEMORY.md` and creates it with a `# Memory` header when it is missing (`packages/coding-agent/src/interactive.ts:4436-4440`).
-- `/memory rules` opens `~/.labunbun/rules/` and creates the directory when it is missing (`packages/coding-agent/src/interactive.ts:4414-4418`).
+- `/memory` accepts `rules`, `project`, or no argument. Any other argument prints the usage line (`packages/coding-agent/src/interactive.ts:4400-4405`).
+- With no argument, `/memory` opens `~/.labunbun/MEMORY.md` and creates it with a `# Memory` header when it is missing (`packages/coding-agent/src/interactive.ts:4437-4441`).
+- `/memory rules` opens `~/.labunbun/rules/` and creates the directory when it is missing (`packages/coding-agent/src/interactive.ts:4415-4419`).
 - `/memory project` opens the nearest project file that is in the prompt. `lastProjectMemoryFile` scans the loaded list from the end and skips the user MEMORY.md and the user rules directory (`packages/coding-agent/src/interactive.ts:2932-2940`, `:4419-4420`).
-- When no project file is loaded, `/memory project` gives one of two messages. With withheld files it names the count and says `/agents approve, then restart`. With none it says no file was found and points at `/init` (`packages/coding-agent/src/interactive.ts:4421-4428`).
+- When no project file is loaded, `/memory project` gives one of two messages. With withheld files it names the count and says `/agents approve, then restart`. With none it says no file was found and points at `/init` (`packages/coding-agent/src/interactive.ts:4422-4429`).
 - The editor is `$VISUAL` first, then `$EDITOR`. The command string is split on whitespace, so `EDITOR="code -w"` works (`packages/coding-agent/src/interactive.ts:2891-2894`).
 - A missing target is created only after an editor resolves, so a typo in the editor variable cannot leave files behind (`packages/coding-agent/src/interactive.ts:2891-2893`, `:2897-2904`).
 - The editor starts detached with `stdio: "ignore"`, and the parent does not wait for it. That is what lets the REPL continue while the editor is open (`packages/coding-agent/src/interactive.ts:2910-2915`).
-- Without an editor, `/memory` prints the path it would have opened. For the bare and `rules` forms it also prints the loaded memory files (`packages/coding-agent/src/interactive.ts:4451-4460`).
+- Without an editor, `/memory` prints the path it would have opened. For the bare and `rules` forms it also prints the loaded memory files (`packages/coding-agent/src/interactive.ts:4452-4461`).
 
 ## Subagent context
 

@@ -28,7 +28,7 @@ The tool rejects a `bash.exe` on PATH when it is the WSL launcher of Windows its
 
 A candidate must also be a file. A directory named `bash.exe` is not a shell.
 
-Bash inputs are `command`, `timeout` in milliseconds, `description`, and `run_in_background`. The timeout minimum is one. A foreground wait defaults to 120000 and is clamped to 600000. With `run_in_background` the same field is the shell's lifetime: default 1800000, clamped to 7200000 by the manager. The schema admits the larger ceiling so one field can serve both modes; the foreground branch applies its own clamp. The tool is not read-only and not concurrency safe. Its `overflow` mode is `"spill"`, because command output comes once. A build that fails ends its report with the error. A head-only cut throws that part away.
+Bash inputs are `command`, `timeout` in milliseconds, `description`, `run_in_background`, and the two escalation fields, `escalate` and `justification`. An escalated call runs outside the sandbox after the user approves it (`sandbox.md`, the escalation section). The timeout minimum is one. A foreground wait defaults to 120000 and is clamped to 600000. With `run_in_background` the same field is the shell's lifetime: default 1800000, clamped to 7200000 by the manager. The schema admits the larger ceiling so one field can serve both modes; the foreground branch applies its own clamp. The tool is not read-only and not concurrency safe. Its `overflow` mode is `"spill"`, because command output comes once. A build that fails ends its report with the error. A head-only cut throws that part away.
 
 The live preview pushes at most one update per 100 ms (`BASH_UPDATE_INTERVAL_MS`). The stream is a preview and not a transcript, because the full output arrives with the result either way. Ten updates a second look the same as every chunk. Without the limit, a command that prints thousands of lines a second drives one store update and one React render per line. The preview buffer keeps the last 30000 characters (`MAX_PREVIEW_CHARS`). It is not the result.
 
@@ -295,7 +295,7 @@ The refusal does not depend on the mode, on the allow rules, or on how reasonabl
 
 `decideWrite` then asks the session's policy which roots may take a write. That is the question the guard has no way to know about, and the one that a shell wrapped in seatbelt or bwrap enforces. The check is not only a read-only-root check.
 
-It refuses every path in `policy.protected`. `buildSandboxPolicy` derives `<workspace>/.git` into that list for the workspace itself. Every writable root whose kind is `project` gets a derived `.git` as well (`packages/agent/src/sandbox-policy.ts:180`), whether a scan found it or not. A root whose kind is `data`, such as the temporary directory or a package cache, gets no derived `.git`.
+It refuses every path in `policy.protected`. `buildSandboxPolicy` derives `<workspace>/.git` into that list for the workspace itself. Every writable root whose kind is `project` gets a derived `.git` as well (`packages/agent/src/sandbox-policy.ts:203`), whether a scan found it or not. A root whose kind is `data`, such as the temporary directory or a package cache, gets no derived `.git`.
 
 So this tool refuses `.git/config` for two reasons. `sandbox-simulated.test.ts` asserts the policy half on its own, with no guard in front of it.
 

@@ -114,6 +114,7 @@ export {
 	isWritePermitted,
 	NETWORK_SANDBOX_POLICIES,
 	type NetworkSandboxPolicy,
+	permitsNoWrites,
 	type SandboxPolicy,
 	type WritableRoot,
 	type WritableRootKind,

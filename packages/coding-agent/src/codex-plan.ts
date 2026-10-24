@@ -907,6 +907,7 @@ const CODEX_APPROVAL_POLICIES: Record<string, { mode: PermissionMode; detail: st
 
 /** `sandbox_mode` values this build also has, and the ones it does not. */
 const CODEX_SANDBOX_MODES: Record<string, SandboxMode> = {
+	"read-only": "read-only",
 	"workspace-write": "workspace-write",
 	"danger-full-access": "danger-full-access",
 };
@@ -977,9 +978,7 @@ function planCodexMode(
 			to: "—",
 			action: "skip",
 			detail:
-				sandbox === "read-only"
-					? 'read-only has no counterpart here: the confined mode this build has is "workspace-write", which permits writes inside the workspace, and importing a read-only sandbox as a writable one would widen what the config asked for. Use a deny rule on the paths you meant to protect'
-					: "not a sandbox mode this build has, so no sandbox is picked from it; the session keeps the sandbox it would otherwise start in",
+				"not a sandbox mode this build has, so no sandbox is picked from it; the session keeps the sandbox it would otherwise start in",
 			containsSecret: false,
 		});
 	}

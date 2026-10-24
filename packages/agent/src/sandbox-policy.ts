@@ -116,7 +116,10 @@ export function canRead(access: FileSystemAccessMode): boolean {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** Build the policy for a sandbox axis value. `danger-full-access` produces an empty policy, not a very wide one. */
+/**
+ * Build the policy for a sandbox axis value. `danger-full-access` produces an empty policy, not a very wide one,
+ * and `read-only` produces one that permits no write at all.
+ */
 export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxPolicy {
 	const { sandbox, workspace } = options;
 
@@ -125,6 +128,26 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
 			fileSystem: { kind: "unrestricted", entries: [] },
 			network: options.network ?? "enabled",
 			networkRules: [...(options.networkRules ?? [])],
+			protected: [],
+		};
+	}
+
+	if (sandbox === "read-only") {
+		// Reads are not narrowed: the workspace and the caller's read-only roots stay readable, so a
+		// read-only session can still read the project. The writable roots are not read at all. A root
+		// that is writable under `workspace-write` is a write this mode does not grant, and a policy that
+		// carried one would contradict its own name.
+		const entries: FileSystemSandboxEntry[] = [{ path: canonicalPolicyPath(workspace), access: "read" }];
+		for (const root of options.readOnlyRoots ?? []) {
+			entries.push({ path: canonicalPolicyPath(root), access: "read", missingPathBehavior: "skip" });
+		}
+		return {
+			fileSystem: { kind: "restricted", entries },
+			network: options.network ?? "enabled",
+			networkRules: [...(options.networkRules ?? [])],
+			// Nothing is writable, so there is nothing for a protection to narrow. A `.git` entry here would
+			// name a path the policy already refuses, and on Linux it would make `readOnlyPathArgs` create an
+			// empty read-only mount at a path no repository is going to use.
 			protected: [],
 		};
 	}
@@ -193,6 +216,16 @@ export function isWritePermitted(policy: SandboxPolicy, candidate: string): bool
 	if (policy.protected.some((path) => isWithin(candidate, path))) return false;
 	if (policy.fileSystem.kind === "unrestricted") return true;
 	return policy.fileSystem.entries.some((entry) => canWrite(entry.access) && isWithin(candidate, entry.path));
+}
+
+// Long-form design notes: docs/dev/sandbox.md
+/**
+ * Whether a policy permits no write anywhere. The read-only mode builds this shape. The check reads the
+ * entries rather than the mode name, so a policy assembled by hand is judged by what it allows. An
+ * unrestricted policy is never one of these: it permits everything.
+ */
+export function permitsNoWrites(policy: SandboxPolicy): boolean {
+	return policy.fileSystem.kind === "restricted" && !policy.fileSystem.entries.some((entry) => canWrite(entry.access));
 }
 
 // Long-form design notes: docs/dev/sandbox.md

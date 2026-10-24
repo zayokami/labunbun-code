@@ -50,6 +50,7 @@ import {
 	ensureAppContainerProfile,
 	runConfined,
 } from "../src/sandbox/appcontainer.ts";
+import { describeWritableRoots } from "../src/sandbox/default-writable-roots.ts";
 import {
 	describeSandboxBackend,
 	detectNativeBackend,
@@ -58,7 +59,7 @@ import {
 	type SandboxRuntime,
 	sandboxBackendFor,
 } from "../src/sandbox/index.ts";
-import { decideRead, decideWrite } from "../src/sandbox/simulated.ts";
+import { decideRead, decideWrite, describeSimulatedSandbox } from "../src/sandbox/simulated.ts";
 import { workspacePolicy } from "../src/sandbox/workspace-policy.ts";
 import { createWriteTool } from "../src/write.ts";
 
@@ -2734,5 +2735,153 @@ describeMacExec("a restricted network reaches the proxy's port and nothing else"
 			await exec.close();
 			control.close();
 		}
+	});
+});
+
+const NO_WRAPPER_WINDOWS: SandboxRuntime = { platform: "win32", hasNativeBackend: false, hasAppContainer: false };
+
+function readOnlyPolicy(cwd: string) {
+	return policy("read-only", cwd);
+}
+
+describe("the read-only sandbox is refused where no wrapper can hold it", () => {
+	test("with no bubblewrap on PATH, the resolution is a refusal that names it, and builds no argv", () => {
+		const cwd = workspace();
+		const resolution = resolveSandboxExecution({
+			policy: readOnlyPolicy(cwd),
+			command: ["bash", "-c", "true"],
+			platform: "linux",
+			hasNativeBackend: false,
+		});
+		expect(resolution.kind).toBe("refused");
+		expect(resolution).toMatchObject({ reason: expect.stringContaining("bwrap") });
+	});
+
+	test("on Windows the container cannot hold it either, so it is refused even when the container is selected", () => {
+		const cwd = workspace();
+		const resolution = resolveSandboxExecution({
+			policy: readOnlyPolicy(cwd),
+			command: ["cmd.exe", "/c", "echo hi"],
+			platform: "win32",
+			hasNativeBackend: false,
+			hasAppContainer: true,
+			executableRoots: [],
+		});
+		expect(resolution.kind).toBe("refused");
+	});
+
+	test("with bubblewrap, it runs under the wrapper, and the argv carries no writable bind", () => {
+		const cwd = workspace();
+		const resolution = resolveSandboxExecution({
+			policy: readOnlyPolicy(cwd),
+			command: ["bash", "-c", "true"],
+			platform: "linux",
+			hasNativeBackend: true,
+		});
+		expect(resolution.kind).toBe("native");
+		if (resolution.kind !== "native") return;
+		// Readable everywhere by the read baseline, and no `--bind` anywhere: the only writable path the
+		// wrapper could have named is the workspace, and it is not named.
+		expect(resolution.execution.argv).toContain("--ro-bind");
+		expect(resolution.execution.argv).not.toContain("--bind");
+		expect(resolution.execution.argv).not.toContain(cwd);
+	});
+
+	test("under sandbox-exec, the profile grants a file write to no root", () => {
+		const cwd = workspace();
+		const resolution = resolveSandboxExecution({
+			policy: readOnlyPolicy(cwd),
+			command: ["/bin/sh", "-c", "true"],
+			platform: "darwin",
+			hasNativeBackend: true,
+		});
+		expect(resolution.kind).toBe("native");
+		if (resolution.kind !== "native") return;
+		const argv = resolution.execution.argv;
+		expect(argv.some((arg) => arg.startsWith("-DWRITABLE_ROOT"))).toBe(false);
+		expect(argv[argv.indexOf("-p") + 1]).not.toContain("(allow file-write* (subpath");
+	});
+
+	test("exec answers with the refusal and starts no process, so the write the command attempts never happens", async () => {
+		const cwd = workspace();
+		const marker = join(cwd, "marker.txt");
+		const exec = new ChildProcessExecOperations(NO_WRAPPER_WINDOWS);
+		const result = await exec.exec({ command: `echo hi > ${canonical(marker)}`, cwd, sandbox: readOnlyPolicy(cwd) });
+		expect(result.exitCode).toBe(-1);
+		expect(result.stderr).toContain("read-only");
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	test("a backgrounded command is refused with the same reason, and no shell starts", async () => {
+		const cwd = workspace();
+		const manager = new BackgroundShellManager(NO_WRAPPER_WINDOWS, new ChildProcessExecOperations(NO_WRAPPER_WINDOWS));
+		await expect(manager.start("echo hi", cwd, readOnlyPolicy(cwd))).rejects.toThrow("read-only");
+	});
+
+	test("reads still resolve under the read-only policy, and a write is refused with the reason that says why", () => {
+		const cwd = workspace();
+		const policy = readOnlyPolicy(cwd);
+		expect(decideRead(policy, join(cwd, "notes.md"), cwd).allowed).toBe(true);
+		const write = decideWrite(policy, join(cwd, "notes.md"), cwd);
+		expect(write.allowed).toBe(false);
+		expect(write.reason).toContain("read-only");
+		expect(write.reason).not.toContain("none defined");
+	});
+
+	test("each /permissions sentence says what holds the mode, and never claims a boundary that is not there", () => {
+		const native = describeSandboxBackend("native", "read-only", "linux");
+		expect(native).toContain("enforced by the OS");
+		expect(native).toContain("read-only");
+		const unavailable = describeSandboxBackend("unavailable", "read-only", "linux");
+		expect(unavailable).toContain("not enforced here");
+		expect(unavailable).toContain("bwrap is not installed");
+		expect(unavailable).not.toContain("enforced by the OS");
+		const simulated = describeSandboxBackend("simulated", "read-only", "win32");
+		expect(simulated).toContain("no read-only grant");
+		expect(simulated).toContain("Bash is refused");
+	});
+
+	test("the writable-roots line and the simulated summary both say the sandbox is read-only", () => {
+		expect(describeWritableRoots({ home: "/h/u", sandbox: "read-only" })).toMatch(
+			/^Writable outside the workspace: none/,
+		);
+		expect(describeSimulatedSandbox(readOnlyPolicy(workspace()))).toMatch(/^read-only, simulated:/);
+	});
+});
+
+describe("an escalated command runs outside the sandbox, on the user's approval", () => {
+	test("under read-only it still runs, and the result says it ran outside the sandbox", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(NO_WRAPPER_WINDOWS);
+		const tool = createBashTool(cwd, defaultOperations(exec));
+		const result = await tool.call(
+			{ command: "echo escaped > escaped.txt", escalate: true, justification: "writes a file the policy refuses" },
+			CTX("read-only"),
+		);
+		expect(existsSync(join(cwd, "escaped.txt"))).toBe(true);
+		expect(result.isError).toBe(false);
+		const text = result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toContain("ran outside the sandbox");
+		expect(text).toContain("writes a file the policy refuses");
+	}, 30_000);
+
+	test("without a justification nothing runs, and the answer says what is missing", async () => {
+		const cwd = workspace();
+		const tool = createBashTool(cwd, defaultOperations(new ChildProcessExecOperations(NO_WRAPPER_WINDOWS)));
+		const result = await tool.call({ command: "echo escaped > escaped.txt", escalate: true }, CTX("read-only"));
+		expect(result.isError).toBe(true);
+		expect(existsSync(join(cwd, "escaped.txt"))).toBe(false);
+	});
+
+	test("a backgrounded escalation is refused, and no shell starts", async () => {
+		const cwd = workspace();
+		const manager = new BackgroundShellManager(NO_WRAPPER_WINDOWS, new ChildProcessExecOperations(NO_WRAPPER_WINDOWS));
+		const tool = createBashTool(cwd, defaultOperations(new ChildProcessExecOperations(NO_WRAPPER_WINDOWS)), manager);
+		const result = await tool.call(
+			{ command: "echo escaped > escaped.txt", escalate: true, run_in_background: true, justification: "why" },
+			CTX("read-only"),
+		);
+		expect(result.isError).toBe(true);
+		expect(existsSync(join(cwd, "escaped.txt"))).toBe(false);
 	});
 });

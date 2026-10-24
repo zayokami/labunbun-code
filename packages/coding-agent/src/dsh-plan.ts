@@ -82,13 +82,12 @@ export const DSH_SHIPPED_PRESETS: Record<string, { sandbox: SandboxMode; approva
 /**
  * A harness preset's two halves, as this build's two keys.
  *
- * The sandbox half carries across verbatim for the two names both products share
- * — `workspace-write` and `danger-full-access` — and stops there: the harness also
- * ships `read-only`, which this build has no value for. The approval half does not
- * carry across at all: `APPROVAL_POLICIES` in the harness is exactly `ask` and
- * `never`, and here `never` is `agent` while `ask` is `ask`. Anything outside those
- * — the harness's own `read-only` sandbox, or an approval policy a newer harness
- * adds — makes the whole pair unimportable.
+ * The sandbox half carries across verbatim for the three names both products share
+ * — `read-only`, `workspace-write` and `danger-full-access` — and a name outside them
+ * has no value here. The approval half does not carry across at all: `APPROVAL_POLICIES`
+ * in the harness is exactly `ask` and `never`, and here `never` is `agent` while `ask` is
+ * `ask`. Anything outside those — a sandbox name this build has no value for, or an approval
+ * policy a newer harness adds — makes the whole pair unimportable.
  *
  * Returning null for half a pair is the point. Writing the sandbox and skipping
  * the mode would leave a confined session asking questions it should not, or an
@@ -99,7 +98,8 @@ function dshBundle(
 	sandbox: string,
 	approval: string,
 ): { mode: PermissionMode; sandbox: SandboxMode; detail: (preset: string) => string } | null {
-	const mappedSandbox = sandbox === "workspace-write" || sandbox === "danger-full-access" ? sandbox : undefined;
+	const mappedSandbox =
+		sandbox === "read-only" || sandbox === "workspace-write" || sandbox === "danger-full-access" ? sandbox : undefined;
 	const mappedApproval = approval === "never" ? "agent" : approval === "ask" ? "ask" : undefined;
 	if (mappedSandbox === undefined || mappedApproval === undefined) return null;
 	return {

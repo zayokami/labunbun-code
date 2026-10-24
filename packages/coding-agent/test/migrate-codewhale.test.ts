@@ -567,17 +567,15 @@ test("workspace-write and danger-full-access map 1:1 — the vocabularies are th
 	]);
 });
 
-test("read-only claims NOTHING, because the nearest sandbox here is wider", () => {
-	expect(CODEWHALE_SANDBOX_MODES["read-only"]).toBeUndefined();
+test("read-only maps to this build's read-only sandbox, and is claimed as the sandbox half", () => {
+	expect(CODEWHALE_SANDBOX_MODES["read-only"]).toBe("read-only");
 	const { home, cwd } = codewhaleFixture({
 		files: { "config.toml": configToml('approval_policy = "on-request"\nsandbox_mode = "read-only"\n') },
 	});
 	const plan = runMigration({ home, cwd, from: "codewhale" }).plan;
-	const line = plan.items.find((item) => item.from.includes("sandbox_mode"));
-	expect(line?.action).toBe("skip");
-	expect(line?.detail).toContain("widen");
-	// Nothing may have claimed a sandbox at all.
-	expect(plan.items.some((item) => item.to === "settings.json → sandbox" && item.action === "map")).toBe(false);
+	// Claimed as the sandbox half, the same way workspace-write is. Rounding it up to a writable sandbox
+	// would widen the config, and dropping it would lose a restriction the user asked for.
+	expect(plan.items.some((item) => item.to === "settings.json → sandbox" && item.action === "map")).toBe(true);
 });
 
 test("`never` claims nothing, and the report says it both declines to ask and denies", () => {

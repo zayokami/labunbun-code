@@ -18,10 +18,16 @@
  *      reach past them — a rule the user wrote is a floor, not a preference.
  *   2. `plan`'s read-only tool list, which is a deny and so sits above the ask
  *      and allow rules for the same reason step 1 does.
+ *   2b. the read-only sandbox's refusal of the file-writing tools, `Write` and `Edit`. An edit the sandbox
+ *      would refuse at the tool layer is refused here first, so `ask` does not put a dialog in front of it.
+ *      Shell commands are not on this list: the sandbox decides for them.
  *   3. the dangerous-command classifier, for Bash. Also above every mode, and
  *      also above `danger-full-access`: turning the sandbox off is not a request
  *      to stop classifying. A match is still terminal here — an ask rule below
  *      it cannot soften a `deny` into a question.
+ *   3b. an escalated shell command (`escalate: true`) runs outside the sandbox, so it asks on every call. No
+ *      allow rule and no mode decides it, and the classifier's refusal above still stands. A call with no
+ *      justification, or one that asks to run in the background, is refused with no dialog.
  *   4. ask rules, across every source. A match returns `ask` and nothing below
  *      it (no allow rule, no mode) turns that into a run. This is the step the
  *      third behavior exists for.
@@ -199,6 +205,9 @@ export function extractBashFilePaths(command: string): string[] {
 // Long-form design notes: docs/dev/command-classifier.md
 /** Tools whose file deny rules a Bash command should also be held to. */
 const FILE_TOOL_NAMES = new Set(["Read", "Edit", "Write", "NotebookEdit"]);
+
+/** The built-in tools that write a file directly, which the read-only sandbox refuses before anything else. */
+const FILE_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set(["Edit", "Write", "NotebookEdit"]);
 
 /**
  * Does a Bash command touch a file that a file-tool rule protects? Returns the
@@ -415,6 +424,17 @@ export function evaluatePermissions(
 		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
 	}
 
+	// 2b. `read-only` is the file-tool half of the same promise. An edit the sandbox would refuse at the
+	//     tool layer is refused here first, so `ask` does not put a dialog in front of a write that cannot
+	//     happen. Shell commands are not on this list: the sandbox decides for them, and where it cannot
+	//     hold the mode, the Bash tool refuses the command with the reason.
+	if (config.sandbox === "read-only" && FILE_WRITE_TOOL_NAMES.has(toolName)) {
+		return {
+			behavior: "deny",
+			message: `Read-only sandbox: ${toolName} is not allowed (no path is writable under this sandbox)`,
+		};
+	}
+
 	// 3. The dangerous-command classifier, above every mode still standing and
 	//    above the sandbox setting both ways. A match is terminal: it returns here,
 	//    so no allow rule below can turn it into a pass. A non-match grants nothing
@@ -433,6 +453,29 @@ export function evaluatePermissions(
 		}
 		const match = classifyDangerousCommand(command, config.platform);
 		if (match) return decideDangerous(match, config.mode);
+	}
+
+	// 3b. An escalated shell command runs outside the sandbox, so no rule and no mode decides it: it asks,
+	//     on every call. The deny rules and the classifier have already spoken above, so a dangerous command
+	//     never reaches a person here, and an allow rule or `agent` mode cannot buy the escalation a pass. A
+	//     justification is required, because the dialog is the only place a person can judge whether the
+	//     escalation is needed, and an empty one leaves nothing to judge.
+	if (toolName === "Bash" && isEscalatedBash(input)) {
+		if ((input as { run_in_background?: unknown }).run_in_background === true) {
+			return {
+				behavior: "deny",
+				message: "Escalated command refused: it runs in the foreground, so it cannot also start in the background",
+			};
+		}
+		const justification = escalationJustification(input);
+		if (justification === undefined) {
+			return {
+				behavior: "deny",
+				message:
+					"Escalated command refused: it needs a justification, one sentence on why it cannot run inside the sandbox",
+			};
+		}
+		return { behavior: "ask", message: `Runs outside the sandbox: ${justification}` };
 	}
 
 	// 4. Ask rules, across every source, above every allow and above every mode.
@@ -563,6 +606,19 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
  */
 function isReadOnlyTool(toolName: string, declared?: ReadonlySet<string>): boolean {
 	return declared ? declared.has(toolName) : PLAN_MODE_READ_ONLY_TOOLS.includes(toolName);
+}
+
+/** Whether a Bash call asks to run outside the sandbox. Only a literal `true` counts, so a stray string cannot escalate. */
+function isEscalatedBash(input: unknown): boolean {
+	return typeof input === "object" && input !== null && (input as { escalate?: unknown }).escalate === true;
+}
+
+/** The justification an escalated call carries, or undefined when there is none worth showing a person. */
+function escalationJustification(input: unknown): string | undefined {
+	const raw = (input as { justification?: unknown }).justification;
+	if (typeof raw !== "string") return undefined;
+	const trimmed = raw.trim();
+	return trimmed === "" ? undefined : trimmed;
 }
 
 /**

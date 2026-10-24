@@ -772,3 +772,130 @@ describe("normalizePathSpec", () => {
 		expect(normalizePathSpec("G:\\work\\proj\\src")).toBe("G:/work/proj/src");
 	});
 });
+
+describe("the read-only sandbox refuses the file tools before anything else", () => {
+	const EDIT_TOOLS = ["Write", "Edit"] as const;
+
+	test.each(PERMISSION_MODES.flatMap((mode) => EDIT_TOOLS.map((tool) => [mode, tool] as const)))(
+		"%s refuses %s under the read-only sandbox",
+		(mode, tool) => {
+			const result = evaluatePermissions(
+				tool,
+				{ file_path: join(CWD, "notes.md"), content: "x" },
+				{ mode, sandbox: "read-only", rules: [], cwd: CWD },
+			);
+			// Plan mode answers first with its own sentence, so the matcher takes either reason; the deny is what matters.
+			expect(result).toMatchObject({ behavior: "deny", message: expect.stringMatching(/Read-only sandbox|Plan mode/) });
+		},
+	);
+
+	test("an allow rule does not buy a write under the read-only sandbox", () => {
+		const result = evaluatePermissions(
+			"Write",
+			{ file_path: join(CWD, "notes.md"), content: "x" },
+			{
+				mode: "agent",
+				sandbox: "read-only",
+				rules: [{ toolName: "Write", behavior: "allow", source: "projectSettings" }],
+				cwd: CWD,
+			},
+		);
+		expect(result.behavior).toBe("deny");
+	});
+
+	test("reads are not decided by the read-only sandbox", () => {
+		const result = evaluatePermissions(
+			"Read",
+			{ file_path: join(CWD, "notes.md") },
+			{ mode: "agent", sandbox: "read-only", rules: [], cwd: CWD },
+		);
+		expect(result.behavior).toBe("allow");
+	});
+});
+
+describe("an escalated command is asked about, whatever a rule or mode says", () => {
+	const escalated = (command: string, extra: Record<string, unknown> = {}) => ({
+		command,
+		escalate: true,
+		justification: "the registry is outside the sandbox's network",
+		...extra,
+	});
+
+	test.each(["ask", "agent"] as const)("%s mode asks, even with a Bash allow rule", (mode) => {
+		const result = evaluatePermissions("Bash", escalated("npm install"), {
+			mode,
+			sandbox: "workspace-write",
+			rules: [{ toolName: "Bash", behavior: "allow", source: "projectSettings" }],
+			cwd: CWD,
+		});
+		expect(result).toMatchObject({ behavior: "ask", message: expect.stringContaining("outside the sandbox") });
+	});
+
+	test("plan mode still refuses it, because a shell is not part of the plan", () => {
+		const result = evaluatePermissions("Bash", escalated("npm install"), {
+			mode: "plan",
+			sandbox: "workspace-write",
+			rules: [],
+			cwd: CWD,
+		});
+		expect(result.behavior).toBe("deny");
+	});
+
+	test("a deny rule still refuses it", () => {
+		const result = evaluatePermissions("Bash", escalated("npm install"), {
+			mode: "ask",
+			sandbox: "workspace-write",
+			rules: [{ toolName: "Bash", behavior: "deny", source: "projectSettings" }],
+			cwd: CWD,
+		});
+		expect(result.behavior).toBe("deny");
+	});
+
+	test("the classifier still refuses a dangerous escalated command outright in agent mode", () => {
+		const result = evaluatePermissions("Bash", escalated("rm -rf /"), {
+			mode: "agent",
+			sandbox: "workspace-write",
+			rules: [],
+			cwd: CWD,
+		});
+		expect(result.behavior).toBe("deny");
+	});
+
+	test("an escalation with no justification is refused with no dialog", () => {
+		const result = evaluatePermissions(
+			"Bash",
+			{ command: "npm install", escalate: true, justification: "  " },
+			{
+				mode: "ask",
+				sandbox: "workspace-write",
+				rules: [],
+				cwd: CWD,
+			},
+		);
+		expect(result).toMatchObject({ behavior: "deny", message: expect.stringContaining("justification") });
+	});
+
+	test("a backgrounded escalation is refused with no dialog", () => {
+		const result = evaluatePermissions("Bash", escalated("npm run dev", { run_in_background: true }), {
+			mode: "ask",
+			sandbox: "workspace-write",
+			rules: [],
+			cwd: CWD,
+		});
+		expect(result).toMatchObject({ behavior: "deny", message: expect.stringContaining("foreground") });
+	});
+
+	test("an ordinary Bash call is not asked about on account of escalation", () => {
+		const result = evaluatePermissions(
+			"Bash",
+			{ command: "git status" },
+			{
+				mode: "agent",
+				sandbox: "workspace-write",
+				rules: [],
+				cwd: CWD,
+			},
+		);
+		expect(result.behavior).toBe("allow");
+	});
+});

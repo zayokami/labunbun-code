@@ -200,3 +200,18 @@ describe("normalizing a reply", () => {
 		expect(replyDenyMessage({ allow: false, message: long })).toHaveLength(MAX_DENIAL_MESSAGE_CHARS);
 	});
 });
+
+describe("an escalated command's dialog", () => {
+	test("offers this call and no, and no standing answer at all", () => {
+		const options = permissionOptions("Bash", { command: "npm install", escalate: true, justification: "why" }, CWD);
+		expect(options.map((option) => option.label)).toEqual([
+			"Yes, run outside the sandbox, just this once",
+			"No, and tell the model what to do differently",
+		]);
+		expect(options.some((option) => option.alwaysAllow || option.alwaysAsk)).toBe(false);
+	});
+
+	test("an ordinary Bash call keeps every answer it had", () => {
+		expect(permissionOptions("Bash", { command: "npm install" }, CWD)).toHaveLength(4);
+	});
+});

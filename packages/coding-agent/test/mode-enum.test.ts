@@ -283,7 +283,7 @@ describe("the lists are the ones the rest of the build is written against", () =
 	});
 
 	test("the sandbox list has a confined value and an unconfined one", () => {
-		expect([...SANDBOX_MODES]).toEqual(["workspace-write", "danger-full-access"]);
+		expect([...SANDBOX_MODES]).toEqual(["read-only", "workspace-write", "danger-full-access"]);
 	});
 
 	test("every combination of the two axes is one the engine can be asked for", () => {

@@ -16,9 +16,9 @@ Three promises hold the design together:
 - `#admitMessage` writes to the store first and pushes into the live array second (`packages/agent/src/session.ts:280-283`). A failed append leaves the array untouched; the caller still holds the text.
 - The entry-point drain peeks, admits, then shifts (`packages/agent/src/session.ts:380-388`). A queued message whose write fails stays queued for the next run instead of disappearing with the error. The in-loop drain uses the same order (`:687-692`).
 - Any throw from the body is caught by the loop's `catch`, which sets `reason = "error"` and records the message (`packages/agent/src/session.ts:714-716`).
-- The `finally` clears `#running`, clears the abort controller, computes the host's remedy, and emits `agent_end` (`packages/agent/src/session.ts:721-735`). The event carries `reason`, `messages`, `errorMessage`, and, when they exist, `errorKind`, `errorRemedy`, and the queue an abort dropped (`packages/agent/src/types.ts:533-551`).
+- The `finally` clears `#running`, clears the abort controller, computes the host's remedy, and emits `agent_end` (`packages/agent/src/session.ts:721-735`). The event carries `reason`, `messages`, `errorMessage`, and, when they exist, `errorKind`, `errorRemedy`, and the queue an abort dropped (`packages/agent/src/types.ts:538-556`).
 
-The event pair is a contract, not an artifact of the happy path: `agent_start` is emitted before admission so a failure cannot produce an `agent_end` for a run nobody saw begin (`packages/agent/src/types.ts:533-538`).
+The event pair is a contract, not an artifact of the happy path: `agent_start` is emitted before admission so a failure cannot produce an `agent_end` for a run nobody saw begin (`packages/agent/src/types.ts:538-543`).
 
 `followUp()` calls `prompt()` without awaiting it when no run is live. A `#running` race between the check and the call is caught and dropped, because there is no run to report it against and an unhandled rejection would take the process down (`packages/agent/src/session.ts:242-252`).
 
@@ -70,7 +70,7 @@ These loaders are allow-failure: a missing optional file is normal, and an unrea
 
 ### Retries
 
-A retry is announced as it is scheduled. The agent emits `retry` with the attempt, delay, and message (`packages/agent/src/types.ts:559-566`). The REPL shows it twice: the status line owns the wait (`packages/tui/src/components/StatusLine.tsx:236-247`), and the transcript keeps one persistent line (`packages/coding-agent/src/interactive.ts:1748-1749`). The status line counts down from `untilMs` and keeps the attempt word after the countdown reaches zero, because "retrying" is still true until the stream resumes. A `-p` run writes the same line to stderr (`packages/coding-agent/src/headless.ts:959-965`); ACP has no handler for it and adds no frame.
+A retry is announced as it is scheduled. The agent emits `retry` with the attempt, delay, and message (`packages/agent/src/types.ts:564-571`). The REPL shows it twice: the status line owns the wait (`packages/tui/src/components/StatusLine.tsx:236-247`), and the transcript keeps one persistent line (`packages/coding-agent/src/interactive.ts:1748-1749`). The status line counts down from `untilMs` and keeps the attempt word after the countdown reaches zero, because "retrying" is still true until the stream resumes. A `-p` run writes the same line to stderr (`packages/coding-agent/src/headless.ts:959-965`); ACP has no handler for it and adds no frame.
 
 ### Fallbacks
 
@@ -78,7 +78,7 @@ The fallback walk reports only the descents it actually makes.
 
 - `StreamOptions.onFallback` receives one `FallbackNotice` per step: the model that failed, the model about to be tried, the reason, and the kind when one was classified (`packages/ai/src/types.ts:327-338`).
 - The walk notifies on a pre-content throw (`packages/ai/src/fallback.ts:76`), a stream that ended with no terminal event (`:88`), and a provider error before any content (`:107`). It does not notify when it stays on the first model, on an abort, on `context_overflow`, on a kind the walk does not descend for, or after content has streamed (`:60-75`, `:92-105`).
-- The session loop is what wires the callback into the event stream (`packages/agent/src/session.ts:487`); the `fallback` event carries the same fields (`packages/agent/src/types.ts:568-580`). The compaction manager's summarizer request does not set the callback (`packages/agent/src/compaction.ts:1328-1331`), so a summarizer's descent is not announced.
+- The session loop is what wires the callback into the event stream (`packages/agent/src/session.ts:487`); the `fallback` event carries the same fields (`packages/agent/src/types.ts:573-585`). The compaction manager's summarizer request does not set the callback (`packages/agent/src/compaction.ts:1328-1331`), so a summarizer's descent is not announced.
 - The REPL adds `[model fallback] from → to: reason` as a transcript line (`packages/tui/src/ui-state.ts:519-530`). A `-p` run and ACP write the same line to stderr (`packages/coding-agent/src/headless.ts:966-973`, `packages/coding-agent/src/acp.ts:770-776`). ACP adds no protocol frame: the protocol has none for it, and a client that shows the stream still sees the answer.
 
 ### Classified errors and remedies
@@ -86,7 +86,7 @@ The fallback walk reports only the descents it actually makes.
 `errorKind` names the four failures a caller can act on (`packages/ai/src/types.ts:108-115`). The classification is the agent's; the remedy belongs to the app, because it names `/login`, `/model`, and `/compact` (`packages/coding-agent/src/error-remedy.ts:1-18`).
 
 - `errorRemedy(kind, model)` answers `rate_limit`, `overload`, `auth`, and `context_overflow`, and returns undefined for every other kind (`packages/coding-agent/src/error-remedy.ts:40-53`). The auth sentence reads the model's wire: a subscription wire points at `/login`, an env-keyed wire at its key variable, and a keyless row at `/model` (`:21-33`).
-- A host supplies the function through `AgentDeps.errorRemedy`; the session calls it once when the run ends on a classified error and puts the answer on `agent_end` (`packages/agent/src/types.ts:455-464`, `packages/agent/src/session.ts:724-733`).
+- A host supplies the function through `AgentDeps.errorRemedy`; the session calls it once when the run ends on a classified error and puts the answer on `agent_end` (`packages/agent/src/types.ts:460-469`, `packages/agent/src/session.ts:724-733`).
 - The REPL prints the remedy under `Error: <message>` (`packages/tui/src/ui-state.ts:660-671`). A `-p` run prints it under the session-ended line in text mode (`packages/coding-agent/src/headless.ts:1128-1134`) and carries `error_kind`/`error_remedy` in JSON and stream-JSON (`:178-183`, `:1087-1091`, `:1120-1122`). ACP appends it to the error message, since the protocol has no field for advice (`packages/coding-agent/src/acp.ts:1335-1346`).
 
 ### Partial answers
@@ -109,7 +109,7 @@ A tool call whose arguments are not JSON is not a stream failure. `toolCallEnd` 
 An abort is the user's decision, and the run's report says what it cost.
 
 - `abort()` saves the queued follow-ups and steering messages before clearing them, and does not overwrite the first record with a second, empty one (`packages/agent/src/session.ts:285-303`).
-- `agent_end` carries `interrupted: { followUp, steering }` when anything was dropped (`packages/agent/src/session.ts:726-734`, `packages/agent/src/types.ts:526-531`, `:551`).
+- `agent_end` carries `interrupted: { followUp, steering }` when anything was dropped (`packages/agent/src/session.ts:726-734`, `packages/agent/src/types.ts:531-536`, `:551`).
 - The REPL prints `[interrupted · N queued message(s) dropped · type a new message to continue]` and up to ten one-line previews of 200 characters each (`packages/tui/src/ui-state.ts:675-690`, `:483-504`). With nothing dropped, the line is `[interrupted · type a new message to continue]`.
 - A `-p` run counts the dropped queues on stderr and never quotes the text, because the stream may be piped to a log (`packages/coding-agent/src/headless.ts:941-951`). It prints `Interrupted.` beside the exit code, which stays 130 (`:1140`).
 - ACP reports the stop reason `cancelled` on the prompt response (`packages/coding-agent/src/acp.ts:171-179`, `:740-749`). The protocol has no field for the dropped queue, and ACP does not consume `interrupted`.
@@ -141,7 +141,7 @@ The fourth answer used to deny without collecting the sentence its label promise
 
 - `PermissionReply` is `boolean` or `{ allow, alwaysAllow?, alwaysAsk?, message? }`, so every existing boolean stub keeps working (`packages/tui/src/permission-options.ts:36-38`). `replyAllowed` is the only reader a decision site needs (`:40-43`); `replyMessage` drops whitespace-only text (`:45-50`).
 - A denial's message is trimmed and capped at 2000 characters before it enters the tool result (`packages/tui/src/permission-options.ts:52-63`).
-- The fourth option is marked `collectsFeedback` (`packages/tui/src/permission-options.ts:164-170`). Selecting it opens the field instead of answering (`packages/tui/src/components/PermissionDialog.tsx:105-123`). Enter submits; an empty field is a plain denial; Esc returns to the list rather than denying (`:174-187`). The help line states the empty-field rule (`:268-281`). A game pad cannot type, so the pad's fourth-button press is the plain denial (`:165-167`).
+- The fourth option is marked `collectsFeedback` (`packages/tui/src/permission-options.ts:183-189`). Selecting it opens the field instead of answering (`packages/tui/src/components/PermissionDialog.tsx:105-123`). Enter submits; an empty field is a plain denial; Esc returns to the list rather than denying (`:174-187`). The help line states the empty-field rule (`:268-281`). A game pad cannot type, so the pad's fourth-button press is the plain denial (`:165-167`).
 - The REPL's tool gate passes the message through as the denial text (`packages/coding-agent/src/interactive.ts:1560-1566`). The subagent bridge and plan mode read only the decision (`packages/coding-agent/src/subagents.ts:628-632`, `packages/coding-agent/src/plan-mode.ts:240`).
 
 ### AskUserQuestion `Other…`

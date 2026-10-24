@@ -42,6 +42,10 @@ function withHome(tree: SourceTree, body: (home: string) => void, seed?: (home: 
 	// not a hypothetical, since `APPDATA` put a real Cursor install into a
 	// "ZCode is not installed here" assertion on the machine this was written on.
 	const releaseSourceEnv = borrowSourceEnv();
+	// `HOME` and `USERPROFILE` are not among the borrowed names, and the directory they point at is removed
+	// below. Restoring them is what keeps a later spawn from finding a home that is no longer there.
+	const prevHome = process.env.USERPROFILE;
+	const prevPosixHome = process.env.HOME;
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -54,6 +58,10 @@ function withHome(tree: SourceTree, body: (home: string) => void, seed?: (home: 
 		body(home);
 	} finally {
 		releaseSourceEnv();
+		if (prevHome === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = prevHome;
+		if (prevPosixHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevPosixHome;
 		rmSync(home, { recursive: true, force: true });
 	}
 }
@@ -177,6 +185,8 @@ const ZCODE_MODE_ROWS: ReadonlyArray<readonly [string, PermissionMode, SandboxMo
  * one, and a report that read "confined" on that row would be the whole error.
  */
 const SANDBOX_CONFINEMENT: Record<SandboxMode, string> = {
+	// No ZCode row reaches this one. It is here so the table covers every sandbox the build has.
+	"read-only": "imported read-only",
 	"workspace-write": "imported confined",
 	"danger-full-access": "imported unrestricted",
 };

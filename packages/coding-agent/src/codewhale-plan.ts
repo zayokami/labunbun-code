@@ -63,7 +63,7 @@ export const CODEWHALE_SETTINGS_APPROVAL_POLICIES: Record<string, PermissionMode
 export const CODEWHALE_SANDBOX_MODES: Record<string, SandboxMode | undefined> = {
 	"workspace-write": "workspace-write",
 	"danger-full-access": "danger-full-access",
-	"read-only": undefined,
+	"read-only": "read-only",
 	"external-sandbox": undefined,
 };
 
@@ -110,9 +110,6 @@ const CODEWHALE_APPROVAL_REASONS: Record<string, string> = {
 
 /** Why `sandbox_mode` produced no sandbox, per value. */
 const CODEWHALE_SANDBOX_REASONS: Record<string, string> = {
-	"read-only":
-		'"read-only" is the *tightest* confinement Codewhale has, and this build has no read-only sandbox — its two values are "workspace-write" and "danger-full-access". ' +
-		"Claiming the nearest one would widen a confinement setting on the user's behalf, which is the one direction a migration must not move in on its own judgement, so nothing was claimed",
 	"external-sandbox":
 		'"external-sandbox" routes exec_shell through a separate backend\'s HTTP API at its own `sandbox_url` with a bearer token, and this build has no such backend to point it at. ' +
 		"The nearest sandbox here is not the same decision, so nothing was claimed",

@@ -1,4 +1,4 @@
-import { type AnyTool, buildTool, formatSpillHeader } from "@labunbun/agent";
+import { type AnyTool, buildSandboxPolicy, buildTool, formatSpillHeader } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import type { BackgroundShellManager } from "./background.ts";
@@ -32,7 +32,9 @@ export function createBashTool(
 			"full output is written to a file and the result's first line names its path. " +
 			"Set run_in_background for long-running processes (dev servers, watchers) — you get a " +
 			"shell id immediately, read progress with BashOutput, and are told when it finishes. " +
-			"A foreground command that hits its timeout is moved to the background, not killed.",
+			"A foreground command that hits its timeout is moved to the background, not killed. " +
+			"Set escalate, with a justification, only when the command cannot work inside the sandbox: " +
+			"the user approves each escalated call before it runs outside the sandbox.",
 		inputSchema: z.object({
 			command: z.string().describe("The shell command to run"),
 			timeout: z
@@ -51,11 +53,25 @@ export function createBashTool(
 				),
 			description: z.string().optional().describe("One-line description of what this does"),
 			run_in_background: z.boolean().optional().describe("Start without waiting; poll via BashOutput"),
+			escalate: z
+				.boolean()
+				.optional()
+				.describe(
+					"Run this one command outside the sandbox. The user approves each escalated call before it runs; " +
+						"the deny rules and the dangerous-command classifier still apply. Use only when the command cannot work inside the sandbox.",
+				),
+			justification: z
+				.string()
+				.optional()
+				.describe(
+					"Required with escalate: one sentence on why the command cannot run inside the sandbox. The user reads it in the approval dialog.",
+				),
 		}),
 		prompt:
 			"- Prefer dedicated tools over shell where they exist (Read/Grep/Glob instead of cat/grep/find).\n" +
 			"- Chain dependent steps with && ; avoid interactive commands.\n" +
 			"- Provide a short `description` so the user can follow along.\n" +
+			"- Escalate only when a command cannot work inside the sandbox, and say why in justification; the user is asked on each escalated call.\n" +
 			"- Use run_in_background for servers/watchers — a finished shell notifies you; " +
 			"use BashOutput only for progress in between.\n" +
 			"- A foreground command that exceeds its timeout keeps running in the background — " +
@@ -71,6 +87,27 @@ export function createBashTool(
 			// would keep applying the old one. Built before the branch because the
 			// background path is spawned by the manager, not by `exec`, and leaving
 			// it out would make `run_in_background: true` the way around the sandbox.
+			// An escalated call is checked here as well as in the permission engine, so a call that could not have
+			// been approved (a background run, or no reason given) fails before any process starts.
+			const escalated = input.escalate === true;
+			if (escalated && input.run_in_background) {
+				return {
+					content: [
+						textContent("An escalated command runs in the foreground: it cannot also start in the background."),
+					],
+					isError: true,
+				};
+			}
+			if (escalated && (input.justification ?? "").trim() === "") {
+				return {
+					content: [
+						textContent(
+							"An escalated command needs a justification: say in one sentence why it cannot run inside the sandbox.",
+						),
+					],
+					isError: true,
+				};
+			}
 			const policy = await workspacePolicy(cwd, {
 				sandbox: ctx.sandbox,
 				network: ctx.network,
@@ -130,7 +167,7 @@ export function createBashTool(
 				cwd,
 				timeoutMs,
 				signal: ctx.signal,
-				sandbox: policy,
+				sandbox: escalated ? buildSandboxPolicy({ sandbox: "danger-full-access", workspace: cwd }) : policy,
 				// The executor is the only party that sees every chunk, so it is the
 				// one that keeps the output bounded — a window in memory and the whole
 				// stream on disk. Absent (an embedder's own tool set), accumulation is
@@ -215,7 +252,10 @@ export function createBashTool(
 					? `[sandbox] This may be the sandbox refusing an operation, not the command failing — filesystem axis "${policy.fileSystem.kind}", network axis "${policy.network}". /permissions shows the policy; /mode can turn the sandbox off if this is the refusal.\n`
 					: "";
 			const status = result.killed ? "[command timed out or was killed]\n" : "";
-			const text = `${header}[exit code: ${result.exitCode}]\n${denied}${status}${output}`;
+			const escalation = escalated
+				? `[ran outside the sandbox, on the user's approval: ${input.justification?.trim() ?? ""}]\n`
+				: "";
+			const text = `${header}[exit code: ${result.exitCode}]\n${escalation}${denied}${status}${output}`;
 			return { content: [{ type: "text", text }], isError: result.exitCode !== 0 };
 		},
 	});

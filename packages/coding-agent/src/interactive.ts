@@ -3792,6 +3792,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				describeWritableRoots({
 					home: ctx.home,
 					configured: ctx.settings.permissions.additionalDirectories,
+					sandbox: session.sandbox,
 				}),
 				`Rules (${rules.length}):`,
 				...rules.map(

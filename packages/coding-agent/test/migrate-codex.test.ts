@@ -650,31 +650,20 @@ describe("codex approval_policy and sandbox_mode", () => {
 		expect(settings.permissionMode).toBe("agent");
 	});
 
-	test("a read-only sandbox is named, not rounded up to a writable one", () => {
+	test("a read-only sandbox is imported as read-only, not rounded up to a writable one", () => {
 		const planned = postureConfig(['approval_policy = "on-request"', 'sandbox_mode = "read-only"']);
 		const settings = plannedSettings(planned);
-		// The whole point of the row: `workspace-write` is this build's confined
-		// mode and it permits writes, so importing `read-only` as it would hand
-		// the session more than the config asked for, and the widening would be
-		// invisible in the report.
-		expect(settings.sandbox).toBeUndefined();
-		// The half that *is* known still comes across — the source did say
-		// something, and dropping it too would be a second loss.
+		// This build has a read-only sandbox, so the value has a counterpart and is claimed as it is.
+		// Rounding it up to `workspace-write` would hand the session writes the config did not grant.
+		expect(settings.sandbox).toBe("read-only");
 		expect(settings.permissionMode).toBe("ask");
-		const skipped = item(planned, 'sandbox_mode ("read-only")');
-		expect(skipped?.action).toBe("skip");
-		expect(skipped?.detail).toContain("no counterpart");
-		expect(skipped?.detail).toContain("widen");
-		// The report has to offer the way to get what the user was asking for.
-		expect(skipped?.detail).toContain("deny rule");
 	});
 
-	test("a read-only sandbox with no policy claims neither half", () => {
+	test("a read-only sandbox with no policy claims the sandbox half alone", () => {
 		const settings = plannedSettings(postureConfig(['sandbox_mode = "read-only"']));
-		// A refused half is not a reason to pick the other one: this config said
-		// nothing about approval, and choosing `ask` for it would be a mode the
-		// user never set.
-		expect(settings.sandbox).toBeUndefined();
+		// The same as a lone workspace-write: the sandbox half is a fact the config states. The approval
+		// half stays unset, because choosing one for it would be a mode the user never set.
+		expect(settings.sandbox).toBe("read-only");
 		expect(settings.permissionMode).toBeUndefined();
 	});
 

@@ -8,6 +8,7 @@ import {
 	buildSandboxPolicy,
 	type NetworkAxis,
 	type NetworkConfinement,
+	permitsNoWrites,
 	type SandboxMode,
 	type SandboxPolicy,
 	type WritableRoot,
@@ -71,6 +72,13 @@ export type SandboxResolution =
 			 */
 			network: true;
 	  }
+	/**
+	 * The command does not run. The policy permits no write, and no backend this
+	 * machine has can hold that. The reason is what the model and the user read.
+	 * Only the read-only policy produces it, and only where no wrapper can be
+	 * placed — see `resolveSandboxExecution`.
+	 */
+	| { kind: "refused"; reason: string }
 	| { kind: "simulated"; reason: string }
 	| { kind: "unavailable"; reason: string }
 	| { kind: "unconfined" };
@@ -341,6 +349,14 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	const exists = options.exists ?? ((path: string) => existsSync(path));
 	const present = presentEntries(policy, exists);
 
+	// A policy that permits no write can only be held by a wrapper. The container branch below grants
+	// writes, and an unwrapped spawn writes anywhere the user can, so where no wrapper can be placed the
+	// command is refused rather than run. This reads the declared policy, not `present`, so a missing
+	// skip-marked root cannot change the answer.
+	if (permitsNoWrites(policy) && !(hasNativeSandboxBackend(platform) && (options.hasNativeBackend ?? true))) {
+		return { kind: "refused", reason: readOnlyRefusal(platform) };
+	}
+
 	// The AppContainer branch sits after the unrestricted short-circuit and
 	// before the `hasNativeSandboxBackend` check, which answers false for win32.
 	// The grant list covers every writable root and is read from `present`.
@@ -425,6 +441,18 @@ function presentEntries(policy: SandboxPolicy, exists: (path: string) => boolean
 }
 
 // Long-form design notes: docs/dev/sandbox.md
+/**
+ * Why a read-only command is refused on this platform, in words a user can act on. Each reason names what an
+ * unwrapped run would have done, because a refusal is only acceptable if the reader knows the alternative.
+ */
+function readOnlyRefusal(platform: SandboxPlatform): string {
+	if (platform === "win32") {
+		return "the read-only sandbox has no OS backend on Windows in this build: the container backend can grant write access to a workspace but has no read-only grant, so a command here would run with the session's full write access. Bash is refused under read-only; Read, Grep and Glob are not affected, and Write and Edit are refused by the tool layer. Switch the sandbox to workspace-write to run commands";
+	}
+	return `the read-only sandbox needs ${nativeSandboxProgram(platform)}, which is not on PATH, and a command without it would run with the session's full write access. Install it, or switch the sandbox to workspace-write to run commands`;
+}
+
+// Long-form design notes: docs/dev/sandbox.md
 /** What confines a command on this machine. Four answers: the two Windows kinds are different facts. */
 export type SandboxBackend = "native" | "simulated" | "unavailable" | "appcontainer";
 
@@ -491,6 +519,18 @@ export function describeSandboxBackend(
 	// "native" must not be allowed to imply confinement on its own.
 	if (sandbox === "danger-full-access") {
 		return "Sandbox: off. This mode asks about nothing and confines nothing at the filesystem level — the deny rules and the dangerous-command classifier are the only limits, and they sit above every mode.";
+	}
+	if (sandbox === "read-only") {
+		// Per backend, like the workspace-write sentence. Only a native wrapper holds this mode; everything
+		// else refuses the command, and the sentence says so rather than describing a boundary that is not there.
+		if (backend === "native") {
+			return `Sandbox: read-only, enforced by the OS. Commands run under ${nativeSandboxProgram(platform)} with no writable path on the disk, so the kernel refuses every write to one apart from the device nodes every process uses. Reads are not narrowed. The kernel is what holds this rather than this process, and it is attached to the process rather than the command, so it survives however the process tree is arranged.`;
+		}
+		const why =
+			platform === "win32"
+				? "this build's Windows container backend has no read-only grant"
+				: `${nativeSandboxProgram(platform)} is not installed`;
+		return `Sandbox: read-only, not enforced here, so Bash is refused under this mode: ${why}. Read, Grep and Glob are not affected, and Write and Edit are refused by the tool layer.`;
 	}
 	switch (backend) {
 		case "native":

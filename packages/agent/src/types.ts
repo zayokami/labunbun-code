@@ -48,7 +48,12 @@ import type { NetworkSandboxPolicy } from "./sandbox-policy.ts";
 export const PERMISSION_MODES = ["ask", "plan", "agent"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
-export const SANDBOX_MODES = ["workspace-write", "danger-full-access"] as const;
+/**
+ * The sandbox axis, tightest first, so the list reads as the escalation it is.
+ * `read-only` permits no write anywhere; `workspace-write` permits the workspace
+ * and the roots the user named; `danger-full-access` confines nothing.
+ */
+export const SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"] as const;
 export type SandboxMode = (typeof SANDBOX_MODES)[number];
 
 /**

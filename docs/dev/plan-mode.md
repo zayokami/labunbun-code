@@ -1,12 +1,12 @@
 # Plan mode
 
-Plan mode is two things that share one name. The first is a permission mode: a value on the session's mode axis that the permission engine reads on every call. The second is a cycle: an interactive session can enter the mode, design, present the plan for review, and leave the mode with an answer. The engine enforces the first with no help from the tools (`packages/agent/src/permissions.ts:372-374`). The cycle is built from two tools, a review dialog, and a snapshot in the session file (`packages/coding-agent/src/plan-mode.ts:350-450`).
+Plan mode is two things that share one name. The first is a permission mode: a value on the session's mode axis that the permission engine reads on every call. The second is a cycle: an interactive session can enter the mode, design, present the plan for review, and leave the mode with an answer. The engine enforces the first with no help from the tools (`packages/agent/src/permissions.ts:381-383`). The cycle is built from two tools, a review dialog, and a snapshot in the session file (`packages/coding-agent/src/plan-mode.ts:350-450`).
 
-The distinction matters because only one host has the cycle. A headless run and an editor session can hold the permission mode, and then the mode is only a refusal: every non-read-only call is denied with no tool to present a plan and no dialog to approve one (`packages/agent/src/permissions.ts:372-374`). Nothing in the engine requires a plan to exist.
+The distinction matters because only one host has the cycle. A headless run and an editor session can hold the permission mode, and then the mode is only a refusal: every non-read-only call is denied with no tool to present a plan and no dialog to approve one (`packages/agent/src/permissions.ts:381-383`). Nothing in the engine requires a plan to exist.
 
 ## The mode, and the pair it is entered from
 
-`plan` is one of the three permission modes, and `MODE_CHOICES` pairs it with `workspace-write` (`packages/agent/src/types.ts:72-86`). The mode axis and the sandbox axis are separate. Entering plan mode changes only the mode, so restoring "how you found it" means restoring both axes (`packages/coding-agent/src/plan-mode.ts:120-140`).
+`plan` is one of the three permission modes, and `MODE_CHOICES` pairs it with `workspace-write` (`packages/agent/src/types.ts:77-91`). The mode axis and the sandbox axis are separate. Entering plan mode changes only the mode, so restoring "how you found it" means restoring both axes (`packages/coding-agent/src/plan-mode.ts:120-140`).
 
 The callbacks keep that pair in a `WeakMap` keyed by the session that entered plan mode (`plan-mode.ts:161`). A `WeakMap` rather than a field on the callbacks because an in-app `/resume` can swap the live session while a review dialog is open: the saved pair belongs to the session that asked, not to whichever session is current when the user answers (`:120-127`).
 
@@ -28,7 +28,7 @@ The plan seat is described in "The plan seat" below.
 
 There are two user doors, and neither goes through `enterPlanMode`:
 
-- `/mode plan`, by argument or by picker. The host records the pair *before* moving the session: the pair to restore is the one the session is in now, not `plan` itself (`packages/coding-agent/src/interactive.ts:4476-4483`, `:4512-4523`). Re-selecting `plan` while already in plan mode records nothing (`:4480-4482`, `:4520-4522`).
+- `/mode plan`, by argument or by picker. The host records the pair *before* moving the session: the pair to restore is the one the session is in now, not `plan` itself (`packages/coding-agent/src/interactive.ts:4477-4484`, `:4512-4523`). Re-selecting `plan` while already in plan mode records nothing (`:4480-4482`, `:4520-4522`).
 - Shift+Tab. The REPL owns the key and moves both axes before the app layer hears about it, so the host passes the pair it left as `previous` (`interactive.ts:2173-2184`). `recordPlanEntry(previous)` stores that pair and the model that is live now; it does not move the model, because this callback records rather than enters (`plan-mode.ts:205-219`).
 
 Both doors therefore produce the same state as a model-driven entry, minus the model swap: a saved pair that an approval can restore.

@@ -3,7 +3,7 @@
 // Long-form design notes: docs/dev/sandbox.md
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WritableRoot } from "@labunbun/agent";
+import type { SandboxMode, WritableRoot } from "@labunbun/agent";
 
 export interface WritableRootOptions {
 	/**
@@ -78,7 +78,12 @@ function dedupe(roots: WritableRoot[]): WritableRoot[] {
 
 // Long-form design notes: docs/dev/sandbox.md
 /** The `/permissions` line, built from the same function that builds the roots. */
-export function describeWritableRoots(options: WritableRootOptions): string {
+export function describeWritableRoots(options: WritableRootOptions & { sandbox?: SandboxMode }): string {
+	// Read-only first. Nothing is writable under it, so the roots the rest of this function would name are not
+	// in force, and naming them would describe writes the sandbox refuses.
+	if (options.sandbox === "read-only") {
+		return "Writable outside the workspace: none — this sandbox is read-only, so the temp directory and the package caches are not writable either.";
+	}
 	const roots = resolveWritableRoots(options);
 	// The same predicate `resolveWritableRoots` branches on, not `!== undefined`:
 	// the schema hands every unconfigured user an empty array, and a line that

@@ -157,6 +157,25 @@ export function alwaysAskLabel(toolName: string, input: unknown, cwd?: string): 
 }
 
 export function permissionOptions(toolName: string, input: unknown, cwd?: string): PermissionOption[] {
+	// An escalated command runs outside the sandbox for this one call. A standing answer would promise a rule
+	// the engine never consults for it, so the only answers are this call and no.
+	const escalated =
+		toolName === "Bash" &&
+		typeof input === "object" &&
+		input !== null &&
+		(input as { escalate?: unknown }).escalate === true;
+	if (escalated) {
+		return [
+			{ label: "Yes, run outside the sandbox, just this once", allow: true, alwaysAllow: false, alwaysAsk: false },
+			{
+				label: "No, and tell the model what to do differently",
+				allow: false,
+				alwaysAllow: false,
+				alwaysAsk: false,
+				collectsFeedback: true,
+			},
+		];
+	}
 	return [
 		{ label: "Yes, just this once", allow: true, alwaysAllow: false, alwaysAsk: false },
 		{ label: alwaysAllowLabel(toolName, input, cwd), allow: true, alwaysAllow: true, alwaysAsk: false },

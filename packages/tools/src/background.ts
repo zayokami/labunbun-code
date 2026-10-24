@@ -810,6 +810,11 @@ export class BackgroundShellManager {
 					networkBridge,
 				})
 			: ({ kind: "unconfined" } as const);
+		// Refused the way the container refusal below is: thrown, so the caller reports it as a tool error and
+		// the command never starts. A read-only policy with no wrapper to place has nothing to run under.
+		if (resolution.kind === "refused") {
+			throw new Error(resolution.reason);
+		}
 		// The shell has to be executable inside the container, and that check is
 		// lexical — the resolved path against System32 and the granted roots — so
 		// it refuses here, before any side effect, with the sentence the

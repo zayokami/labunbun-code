@@ -28,7 +28,7 @@
  * with the bug because both used the same non-canonical spelling.
  */
 import { describe, expect, test } from "bun:test";
-import { buildSandboxPolicy, isWritePermitted } from "../src/sandbox-policy.ts";
+import { buildSandboxPolicy, isWritePermitted, permitsNoWrites } from "../src/sandbox-policy.ts";
 
 const WORKSPACE = "/w/repo";
 const CACHE = "/w/.cache/labunbun";
@@ -142,5 +142,44 @@ describe("buildSandboxPolicy derives .git rather than waiting to find it", () =>
 		// with a canonical candidate — the exact pair that used to fail open.
 		expect(isWritePermitted(windowsShaped, "C:/w/repo/.git/config")).toBe(false);
 		expect(isWritePermitted(windowsShaped, "C:/w/repo/src/index.ts")).toBe(true);
+	});
+});
+
+describe("the read-only policy permits no write, and says so", () => {
+	const CANDIDATES = [`${WORKSPACE}/src/index.ts`, `${WORKSPACE}/.git/config`, `${CACHE}/entry`, "/tmp/scratch"];
+
+	test("no candidate write is permitted, the workspace included", () => {
+		const policy = buildSandboxPolicy({ sandbox: "read-only", workspace: WORKSPACE, writableRoots: [CACHE] });
+		expect(permitsNoWrites(policy)).toBe(true);
+		for (const candidate of CANDIDATES) {
+			expect(isWritePermitted(policy, candidate)).toBe(false);
+		}
+	});
+
+	test("the workspace and the caller's read-only roots stay readable", () => {
+		const policy = buildSandboxPolicy({ sandbox: "read-only", workspace: WORKSPACE, readOnlyRoots: ["/spill"] });
+		expect(policy.fileSystem.kind).toBe("restricted");
+		expect(policy.fileSystem.entries).toEqual([
+			{ path: WORKSPACE, access: "read" },
+			{ path: "/spill", access: "read", missingPathBehavior: "skip" },
+		]);
+	});
+
+	test("writable roots the caller names are not carried into the policy", () => {
+		// The same call under workspace-write grants CACHE. Under read-only it must not: the mode grants
+		// no write, and a policy that kept the root would be granting one the mode does not name.
+		const policy = buildSandboxPolicy({ sandbox: "read-only", workspace: WORKSPACE, writableRoots: [CACHE] });
+		expect(policy.fileSystem.entries.map((entry) => entry.path)).not.toContain(CACHE);
+		expect(isWritePermitted(policy, `${CACHE}/entry`)).toBe(false);
+	});
+
+	test("nothing is protected, because nothing is writable", () => {
+		const policy = buildSandboxPolicy({ sandbox: "read-only", workspace: WORKSPACE });
+		expect(policy.protected).toEqual([]);
+	});
+
+	test("permitsNoWrites is false for the modes that permit a write", () => {
+		expect(permitsNoWrites(buildSandboxPolicy({ sandbox: "workspace-write", workspace: WORKSPACE }))).toBe(false);
+		expect(permitsNoWrites(buildSandboxPolicy({ sandbox: "danger-full-access", workspace: WORKSPACE }))).toBe(false);
 	});
 });

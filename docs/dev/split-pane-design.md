@@ -21,7 +21,7 @@ Four candidates were weighed, by what the user is looking at and where that data
 
 The user stories reduce to two shapes, and only one of them needs a pane:
 
-1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:4029-4045`) and then arrives as one static info block in the transcript — the opposite of watching.
+1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:4030-4046`) and then arrives as one static info block in the transcript — the opposite of watching.
 2. "Show me the transcript beside the thing I am watching." This is the one that cannot be built under the current model, and the rest of the document says why.
 
 ## The rendering model a pane has to live in

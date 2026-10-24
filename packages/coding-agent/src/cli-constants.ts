@@ -22,7 +22,7 @@ export const PERMISSION_MODES = ["ask", "plan", "agent"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
 /** `packages/agent/src/types.ts` owns this list. */
-export const SANDBOX_MODES = ["workspace-write", "danger-full-access"] as const;
+export const SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"] as const;
 export type SandboxMode = (typeof SANDBOX_MODES)[number];
 
 /** `packages/agent/src/sandbox-policy.ts` owns this list. */

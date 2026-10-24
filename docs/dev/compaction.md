@@ -84,7 +84,7 @@ A summary is real progress even when it is not enough. After the rebuild, the pa
 
 The rescue is adopted only when it is strictly smaller; a rewrite that frees nothing costs the detail for no room (`packages/agent/src/compaction.ts:1081-1086`). The adopted size becomes the final `postTokens` recorded on the compaction entry and carried on the `done` phase (`packages/agent/src/compaction.ts:1107-1111`, `packages/agent/src/compaction.ts:1149`, `packages/agent/src/compaction.ts:1167`).
 
-If the rebuilt context is still at or over the hard limit, `check` returns `blocked` with the produced context (`packages/agent/src/compaction.ts:1016-1018`). The `CompactionCheck` type carries that context (`packages/agent/src/types.ts:507-519`). `AgentSession` adopts it before it ends the run, so the next run starts from the summary rather than from the history that just failed (`packages/agent/src/session.ts:439-451`, adoption at `:448`).
+If the rebuilt context is still at or over the hard limit, `check` returns `blocked` with the produced context (`packages/agent/src/compaction.ts:1016-1018`). The `CompactionCheck` type carries that context (`packages/agent/src/types.ts:512-524`). `AgentSession` adopts it before it ends the run, so the next run starts from the summary rather than from the history that just failed (`packages/agent/src/session.ts:439-451`, adoption at `:448`).
 
 `blockedMessage(context?)` adds the measured numbers when a context is given: the total against the hard limit, and the fixed-prefix diagnosis when the system prompt and tool schemas alone are over that line (`packages/agent/src/compaction.ts:1200-1218`). The fixed part is the part no summary can shrink (`packages/agent/src/compaction.ts:1206-1213`). A rapid-refill trip is named first, in its own words, because "failed N times" would misreport a working mechanism (`packages/agent/src/compaction.ts:1220-1234`). Every other refusal names the cause and the commands that exist (`packages/agent/src/compaction.ts:1235-1243`).
 
@@ -106,7 +106,7 @@ The host hook doors are wired next to the manager. The REPL wires `PreCompact` a
 
 ## Visibility
 
-`/context` builds rows from the manager's own limits and state (`packages/coding-agent/src/context-report.ts:122-180`, `packages/coding-agent/src/interactive.ts:4700-4728`). `Auto-compact` says `on`, `off (settings)`, or `paused after repeated failures` (`packages/coding-agent/src/context-report.ts:157-163`). `Hard limit` gives the refusal line (`packages/coding-agent/src/context-report.ts:164`). `Fixed (system + tools)` gives the part no summary can touch, and warns when that part alone is over the hard limit (`packages/coding-agent/src/context-report.ts:165-177`).
+`/context` builds rows from the manager's own limits and state (`packages/coding-agent/src/context-report.ts:122-180`, `packages/coding-agent/src/interactive.ts:4701-4729`). `Auto-compact` says `on`, `off (settings)`, or `paused after repeated failures` (`packages/coding-agent/src/context-report.ts:157-163`). `Hard limit` gives the refusal line (`packages/coding-agent/src/context-report.ts:164`). `Fixed (system + tools)` gives the part no summary can touch, and warns when that part alone is over the hard limit (`packages/coding-agent/src/context-report.ts:165-177`).
 
 With automatic compaction off in settings, the wiring says so once when the estimate crosses the threshold (`packages/coding-agent/src/compaction-wiring.ts:32-46`, `packages/coding-agent/src/compaction-wiring.ts:461-476`). The notice is edge-triggered: one per crossing, not one per turn (`packages/coding-agent/src/compaction-wiring.ts:342-348`).
 
@@ -123,14 +123,14 @@ A tripped breaker is announced once per trip through the same path (`packages/co
 | `trimOldToolResults` | False turns off the cheap rung at the threshold and on idle. | `packages/coding-agent/src/settings.ts:188`, `packages/coding-agent/src/compaction-wiring.ts:261-270` |
 | `/compact [focus]` | Runs a manual summary. The focus text is added to the prompt. Prints the receipt and the over-limit warning. Esc cancels it until the record is written. | `packages/coding-agent/src/commands.ts:148-212` |
 | `/trim` | Runs the cheap rung on request. No model call. Clears the read record. | `packages/coding-agent/src/commands.ts:286-314` |
-| `/autocompact [on\|off\|<percent>]` | Reports or changes the automatic passes and the trigger line, in the settings file and in the live manager. | `packages/coding-agent/src/interactive.ts:3956-3979`, `packages/coding-agent/src/autocompact.ts:1-14` |
-| `/context` | Shows the window's parts, the auto-compact and hard limits, the fixed part, and the last compaction. | `packages/coding-agent/src/interactive.ts:4700-4728` |
+| `/autocompact [on\|off\|<percent>]` | Reports or changes the automatic passes and the trigger line, in the settings file and in the live manager. | `packages/coding-agent/src/interactive.ts:3957-3980`, `packages/coding-agent/src/autocompact.ts:1-14` |
+| `/context` | Shows the window's parts, the auto-compact and hard limits, the fixed part, and the last compaction. | `packages/coding-agent/src/interactive.ts:4701-4729` |
 
 ## Why
 
 - **The cancelled pass counts nothing.** Counting an Esc press would let three of them trip the breaker and switch automatic compaction off for the session. A cancel is the user's change of mind, not a verdict about the conversation (`packages/agent/src/compaction.ts:1170-1174`, `packages/agent/src/compaction.ts:1020-1025`).
 - **`slice(-0)` gets its own path.** `slice(-0)` is `slice(0)`, which keeps every result. The hard-limit rescue needs zero to mean the opposite (`packages/agent/src/compaction.ts:1473-1477`).
-- **A blocked check carries its context.** The summary already ran and was already recorded. Dropping its context would make the pass look like it changed nothing, and the next run would replay the history that just failed (`packages/agent/src/compaction.ts:1013-1017`, `packages/agent/src/types.ts:507-515`).
+- **A blocked check carries its context.** The summary already ran and was already recorded. Dropping its context would make the pass look like it changed nothing, and the next run would replay the history that just failed (`packages/agent/src/compaction.ts:1013-1017`, `packages/agent/src/types.ts:512-520`).
 - **`thresholdPercent` is the line, not an input.** A user who names a percent named a percent. Feeding it back into the reserve formula would answer a different question (`packages/agent/src/compaction.ts:53-58`, `packages/agent/src/compaction.ts:206-215`).
 - **The summary request reads the cache first.** It goes out as the session's own request; bytes are given up only after a refusal, because each rung below the raw transcript forfeits the cache (`packages/agent/src/compaction.ts:1259-1277`).
 - **A spill is a convenience, never a failure.** Whatever goes wrong on the way to disk, the pass returns a result rather than an exception (`packages/agent/src/compaction.ts:1454-1459`, `packages/agent/src/compaction.ts:1488-1496`).

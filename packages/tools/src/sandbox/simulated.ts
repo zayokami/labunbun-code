@@ -2,7 +2,7 @@
 // not OS-level enforcement: read its result as "the tool call was refused by
 // this process", never as "the write could not have happened".
 // Long-form design notes: docs/dev/sandbox.md
-import { canRead, canWrite, type FileSystemAccessMode, type SandboxPolicy } from "@labunbun/agent";
+import { canRead, canWrite, type FileSystemAccessMode, permitsNoWrites, type SandboxPolicy } from "@labunbun/agent";
 import { filesystemFoldsCase, normalizePathSeparators, resolveCanonical } from "../containment.ts";
 
 // Long-form design notes: docs/dev/sandbox.md
@@ -76,6 +76,16 @@ export function decideWrite(
 					`version-control metadata, which this policy protects and a hand edit cannot put back`,
 			};
 		}
+	}
+
+	// Read-only is named before the readable-only refusal below. Every root under this policy is readable and
+	// not writable, so that refusal would name a root, and the real reason is the mode.
+	if (permitsNoWrites(policy)) {
+		return {
+			allowed: false,
+			canonicalPath: resolved,
+			reason: `'${candidatePath}' resolves to '${resolved}', but this sandbox is read-only, so no path is writable under it`,
+		};
 	}
 
 	// The two denials are different failures with different fixes, so they are
@@ -179,7 +189,8 @@ export function describeSimulatedSandbox(policy: SandboxPolicy): string {
 		(readable > 0 ? `, ${readable} read-only root${readable === 1 ? "" : "s"}` : "") +
 		(protectedCount > 0 ? `, ${protectedCount} protected path${protectedCount === 1 ? "" : "s"}` : "");
 
-	return `workspace-write, simulated: ${roots} — ${SIMULATED_SANDBOX_DISCLAIMER}`;
+	const mode = permitsNoWrites(policy) ? "read-only" : "workspace-write";
+	return `${mode}, simulated: ${roots} — ${SIMULATED_SANDBOX_DISCLAIMER}`;
 }
 
 // Long-form design notes: docs/dev/sandbox.md

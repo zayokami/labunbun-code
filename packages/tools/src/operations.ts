@@ -663,6 +663,11 @@ export class ChildProcessExecOperations implements ExecOperations {
 					networkBridge: proxy?.bridge,
 				})
 			: ({ kind: "unconfined" } as const);
+		// Refused before anything is spawned: the policy permits no write and no wrapper can be placed here.
+		// The result takes the container refusal's shape, so the model reads it as a command that never started.
+		if (resolution.kind === "refused") {
+			return { stdout: "", stderr: resolution.reason, exitCode: -1, killed: false };
+		}
 		// What this run goes through, for the result to carry: the resolution's
 		// own kind, minus the case where nothing was asked for. Read once, here,
 		// because every exit below — the container branch's three, the spawn

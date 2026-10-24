@@ -683,10 +683,11 @@ describe("migrate: DeepSeek Harness source", () => {
 			},
 			(home) => {
 				const result = runMigration({ home });
-				expect(settingsJson(result).permissionMode).toBeUndefined();
+				// The document's own row is what gets imported, so the shipped name does not promise `agent`:
+				// the pair reads as the row says, ask under the read-only sandbox.
+				expect(settingsJson(result).permissionMode).toBe("ask");
+				expect(settingsJson(result).sandbox).toBe("read-only");
 				expect(settingsText(result)).not.toContain("agent");
-				const skip = result.plan.items.find((i) => i.action === "skip" && /sandbox/i.test(i.detail));
-				expect(skip?.source).toBe("deepseek-harness");
 			},
 		);
 	});
@@ -747,8 +748,8 @@ describe("migrate: DeepSeek Harness source", () => {
 	test.each([
 		[
 			"a sandbox this build has no value for",
-			{ "danger-full-access": { sandbox: "read-only", approval: "never" } },
-			"read-only",
+			{ "danger-full-access": { sandbox: "container-only", approval: "never" } },
+			"container-only",
 			"never",
 		],
 		[
@@ -758,8 +759,8 @@ describe("migrate: DeepSeek Harness source", () => {
 			"unless-trusted",
 		],
 	])("half a pair is skipped rather than half-imported: %s", (_label, presets, sandbox, approval) => {
-		// The first row is the reachable one: `read-only` is a real mode the harness
-		// ships (`SANDBOX_MODES`) and this build has no name for. The second stands
+		// The first row is the reachable one: a sandbox name this build has no value for. (`read-only`
+		// used to be that name; it is a value now.) The second stands
 		// for a policy a newer harness could add — the harness's own `APPROVAL_POLICIES`
 		// is exactly `ask` and `never` today, so there is no shipped value for it yet.
 		//

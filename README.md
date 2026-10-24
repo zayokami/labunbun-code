@@ -74,7 +74,7 @@ LaBunbun Code has three independent axes. Each axis has its own values.
 | Axis | Values |
 |------|--------|
 | Permission mode | `ask`, `plan`, `agent` |
-| Sandbox | `workspace-write`, `danger-full-access` |
+| Sandbox | `read-only`, `workspace-write`, `danger-full-access` |
 | Network | `enabled`, `restricted` |
 
 The mode choices combine the first two axes.
@@ -96,11 +96,13 @@ Press Shift+Tab to go to the next mode.
 
 **Questions.** A single-choice question has an `Other…` row. Select it and type the answer. Press Enter to submit a non-empty answer. Press Esc to return to the options. An empty field does not submit. A multi-choice question has no `Other…` row.
 
-**Sandbox.** The OS enforces the sandbox on macOS with `sandbox-exec`. The OS enforces the sandbox on Linux with `bwrap`.
+**Sandbox.** The OS enforces the sandbox on macOS with `sandbox-exec`. The OS enforces the sandbox on Linux with `bwrap`. `read-only` permits no write anywhere, the workspace included, and reads are not narrowed. It is not a mode choice, so set it with `--sandbox read-only` or the `sandbox` setting. Where no OS backend can hold it, Bash is refused under `read-only` and says why: that is Windows in this build, and Linux without `bubblewrap`. Read, Grep, and Glob still work there, and Write and Edit are refused.
 
 > **WARNING**: A Linux system without `bubblewrap` confines nothing.
 
 > **WARNING**: On Windows, a shell command is confined by the kernel only when the container backend is selected. The tool selects it only after a real test: the session's own shell must start inside a live container. When the shell does not start, every Bash command runs with no kernel boundary, and only the tool-layer rules apply.
+
+**Escalation.** Bash can run one command outside the sandbox. The model sets `escalate` and gives a `justification`, and you approve that one call before it runs. The dialog offers no "don't ask again": a standing answer would promise a rule the engine never consults for an escalated call. The deny rules, the dangerous-command classifier, and plan mode still apply, and an escalated command cannot start in the background.
 
 > **NOTE**: The test is the backend's own question. It grants the workspace and the machine's toolchain roots to a throwaway container profile, then runs the session's shell once. Measured answers: a `cmd.exe` session selects the backend. A Git-for-Windows (msys) shell does not, because its runtime dies inside the container at startup (`0xC0000142`). A toolchain root the user cannot rewrite the ACL of — an elevated `D:\Program Files`, measured — also does not. A `restricted` network axis does not either: the proxy listens on the loopback, and a container child cannot reach it. `/permissions` prints the answer and the reason. To have a Windows session select the backend, point the shell at `cmd.exe` with `LBB_BASH_PATH`.
 
@@ -550,7 +552,7 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 | `-p`, `--print` | Run one prompt, then print the result. |
 | `--model <provider/id>` | Use this model for the run. |
 | `--permission-mode <mode>` | Set the permission mode. The values are `ask`, `plan`, `agent`. |
-| `--sandbox <mode>` | Set the sandbox. The values are `workspace-write`, `danger-full-access`. |
+| `--sandbox <mode>` | Set the sandbox. The values are `read-only`, `workspace-write`, `danger-full-access`. |
 | `--network <policy>` | Set the network access. The values are `restricted`, `enabled`. The flag sets the access only. The domain rules stay in settings. |
 | `--max-turns <n>` | Stop after this many turns. This option works in headless mode only. |
 | `--no-session` | Do not store the session. This option works in headless mode only. It does not work with `--resume` or `-c`. |
@@ -727,7 +729,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `roles` | An object of the five seats `main`, `plan`, `compaction`, `light`, and `local`. Each seat has `provider`, `model`, `fallback`, and `budgetUSD`. | User |
 | `thinkingLevel` | `off`, `minimal`, `low`, `medium`, `high` | User |
 | `permissionMode` | `ask`, `plan`, `agent` | User |
-| `sandbox` | `workspace-write`, `danger-full-access` | User |
+| `sandbox` | `read-only`, `workspace-write`, `danger-full-access` | User |
 | `networkAccess` | `enabled`, `restricted` | User |
 | `networkDomains` | An array of strings and objects | User |
 | `trimOldToolResults` | A boolean. The value `true` is the default. | User |
