@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { cacheCapability } from "../src/cache.ts";
 import {
 	ANTHROPIC_API_VERSION_ENV,
 	type AnthropicClientLike,
@@ -84,14 +83,17 @@ async function collect(events: AsyncIterable<any>) {
 }
 
 describe("buildAnthropicRequest", () => {
-	test("basic shape without a cache breakpoint when the request is too short", () => {
+	test("basic shape carries a breakpoint even when the prompt is below the floor", () => {
 		const params = buildAnthropicRequest(MODEL, ctx());
 		expect(params.model).toBe("claude-sonnet-5");
 		expect(params.stream).toBe(true);
 		expect(params.max_tokens).toBe(64_000);
-		// Sonnet 5 will not cache a prompt under 1024 tokens, and this one is a few
-		// dozen: a breakpoint here would be a marker the provider ignores.
-		expect(params.system).toEqual([{ type: "text", text: "You are helpful." }]);
+		// Sonnet 5 will not cache a prompt under 1024 tokens. The API ignores the
+		// marker without an error, and a length estimate that undershoots a prefix
+		// just over the floor would lose the slot, so the marker is always sent.
+		expect(params.system).toEqual([
+			{ type: "text", text: "You are helpful.", cache_control: { type: "ephemeral", ttl: "1h" } },
+		]);
 	});
 
 	test("tools map to input_schema", () => {
@@ -102,7 +104,12 @@ describe("buildAnthropicRequest", () => {
 			}),
 		);
 		expect(params.tools).toEqual([
-			{ name: "read", description: "Read a file", input_schema: { type: "object", properties: {} } },
+			{
+				name: "read",
+				description: "Read a file",
+				input_schema: { type: "object", properties: {} },
+				cache_control: { type: "ephemeral", ttl: "1h" },
+			},
 		]);
 	});
 
@@ -550,38 +557,38 @@ function cacheControlOf(value: unknown): unknown {
 }
 
 describe("planAnthropicBreakpoints", () => {
-	test("marks the tiers that are long enough and no others", () => {
-		const plan = planAnthropicBreakpoints(longCtx(), 1024);
+	test("marks every non-empty tier", () => {
+		const plan = planAnthropicBreakpoints(longCtx());
 		expect(plan).toEqual({ tools: true, system: true, previous: false, tail: true });
 	});
 
-	test("marks nothing when every tier is under the floor", () => {
+	test("marks a tier below the floor too, because the provider ignores it without an error", () => {
 		const short: Context = { systemPrompt: "tiny", messages: [userMessage("also tiny")] };
-		expect(planAnthropicBreakpoints(short, 1024)).toEqual({
+		expect(planAnthropicBreakpoints(short)).toEqual({
 			tools: false,
-			system: false,
+			system: true,
 			previous: false,
-			tail: false,
+			tail: true,
 		});
 	});
 
-	test("a tier is judged on its own length, not on the prompt's", () => {
-		// A short tool list under a long transcript: the tools tier is too small to
-		// cache, the tail is not, and the system tier sits between the two.
-		const context = longCtx({ tools: SMALL_TOOLS, systemPrompt: "s".repeat(100) });
-		const plan = planAnthropicBreakpoints(context, 1024);
-		expect(plan.tools).toBe(false);
-		expect(plan.system).toBe(false);
-		expect(plan.tail).toBe(true);
+	test("a short tool list still carries a mark; an absent one has nothing to mark", () => {
+		// The mark on a tools tier under the floor costs nothing and is ignored.
+		// Only an empty tier has no block the mark could sit on.
+		expect(planAnthropicBreakpoints(longCtx({ tools: SMALL_TOOLS })).tools).toBe(true);
+		expect(planAnthropicBreakpoints(longCtx({ tools: [] })).tools).toBe(false);
 	});
 
-	test("the floor is the model's own", () => {
-		// Haiku 4.5 takes 4096, so a request that is worth marking on Sonnet is not
-		// worth marking there.
-		const context = longCtx({ messages: [userMessage("u".repeat(1_000))] });
-		const small = { ...MODEL, id: "claude-haiku-4-5" };
-		expect(planAnthropicBreakpoints(context, cacheCapability(MODEL).minPrefixTokens).tail).toBe(true);
-		expect(planAnthropicBreakpoints(context, cacheCapability(small).minPrefixTokens).tail).toBe(false);
+	test("the previous slot appears only when a request has been answered", () => {
+		const context = longCtx({
+			messages: [
+				userMessage("one"),
+				assistantMessage({ usage: usage({ input: 10, cacheRead: 990, promptTotal: 1_000 }) }),
+				userMessage("two"),
+			],
+		});
+		expect(planAnthropicBreakpoints(context).previous).toBe(true);
+		expect(planAnthropicBreakpoints(longCtx()).previous).toBe(false);
 	});
 });
 

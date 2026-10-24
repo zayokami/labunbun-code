@@ -1,14 +1,7 @@
 // Long-form design notes: docs/dev/ai-layer.md
 /** Anthropic Messages API adapter, in three testable pieces. */
 
-import {
-	type CacheNotice,
-	type CachePolicy,
-	type CacheTtl,
-	cacheCapability,
-	prefixTierTokens,
-	resolveCacheTtl,
-} from "../cache.ts";
+import { type CacheNotice, type CachePolicy, type CacheTtl, resolveCacheTtl } from "../cache.ts";
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
 import { apiKeyEnvNames, type DiscoveredModel, resolveApiKey } from "../model.ts";
 import { looksLikeContextOverflow, statusCodeOf } from "../retry.ts";
@@ -298,14 +291,21 @@ export function previousRequestTail(messages: readonly AgentMessage[]): { index:
 	return undefined;
 }
 
-export function planAnthropicBreakpoints(context: Context, minPrefixTokens: number): AnthropicBreakpointPlan {
-	const tiers = prefixTierTokens(context);
+/**
+ * Mark every non-empty tier.
+ *
+ * The API ignores a breakpoint whose prefix is shorter than the model's
+ * minimum: it returns no error and caches nothing. An estimate that undershoots
+ * a prefix just over that minimum loses the slot instead, so the mark is always
+ * cheap and the estimate is not always right. The provider decides.
+ */
+export function planAnthropicBreakpoints(context: Context): AnthropicBreakpointPlan {
 	const previous = previousRequestTail(context.messages);
 	return {
-		tools: tiers.tools >= minPrefixTokens,
-		system: tiers.system >= minPrefixTokens,
-		previous: previous !== undefined && previous.tokens >= minPrefixTokens,
-		tail: tiers.messages >= minPrefixTokens,
+		tools: (context.tools?.length ?? 0) > 0,
+		system: context.systemPrompt.length > 0,
+		previous: previous !== undefined,
+		tail: context.messages.length > 0,
 	};
 }
 
@@ -315,9 +315,7 @@ export function buildAnthropicRequest(
 	options?: StreamOptions,
 	cache: AnthropicCacheRequest = defaultCacheRequest(),
 ): AnthropicRequestParams {
-	const plan = cache.explicit
-		? planAnthropicBreakpoints(context, cacheCapability(model).minPrefixTokens)
-		: NO_BREAKPOINTS;
+	const plan = cache.explicit ? planAnthropicBreakpoints(context) : NO_BREAKPOINTS;
 	const previous = plan.previous ? previousRequestTail(context.messages) : undefined;
 	const marks = new Set<number>();
 	if (previous) marks.add(previous.index);
