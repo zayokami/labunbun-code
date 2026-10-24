@@ -1142,6 +1142,7 @@ class AcpAgent implements acp.Agent {
 			streamFn,
 			trimOldToolResults: settings.trimOldToolResults,
 			tuning: compactionTuning,
+			cachePolicy: settings.cache,
 			report: (text) => process.stderr.write(`${text}\n`),
 			readFile: (path) => {
 				try {

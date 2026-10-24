@@ -926,6 +926,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		streamFn,
 		trimOldToolResults: settings.trimOldToolResults,
 		tuning: compactionTuning,
+		cachePolicy: settings.cache,
 		report: (text) => pushInfo(handle, text),
 		// A summary runs for as long as a turn does and used to say nothing at
 		// all: the screen sat on "Thinking…" while a full-prefix request was

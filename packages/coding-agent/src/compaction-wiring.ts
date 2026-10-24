@@ -21,11 +21,20 @@ import {
 	type CompactionTrigger,
 	type CompactionVerification,
 	estimateContextUsage,
+	IDLE_TRIM_GAP_MS,
 	type SessionStore,
 	type SpillWriter,
 	SUMMARY_SECTIONS,
 } from "@labunbun/agent";
-import { type Model, missingApiKey, resolveModel, type StreamFn } from "@labunbun/ai";
+import {
+	type CachePolicy,
+	cacheCapability,
+	type Model,
+	missingApiKey,
+	resolveModel,
+	resolvePromptCacheRetention,
+	type StreamFn,
+} from "@labunbun/ai";
 import { rewriteCause } from "./cache-report.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE, formatTokens } from "./context-report.ts";
 
@@ -274,6 +283,12 @@ export interface CompactionWiringOptions {
 	 * model is just what answers.
 	 */
 	tuning?: CompactionTuning;
+	/**
+	 * What the app asks providers to do about their cache, when the caller has
+	 * settings. The idle trim reads its retention from here: a session that asked
+	 * for a day-long entry must not rewrite the prefix after an hour.
+	 */
+	cachePolicy?: CachePolicy;
 	readFile?: (path: string) => string | null;
 	/**
 	 * The same writer the tools use. Previews of old results get a pointer to the
@@ -329,6 +344,22 @@ export interface CompactionWiring {
 		trigger: CompactionTrigger,
 		customInstructions?: string,
 	) => Promise<{ blocked: boolean; reason?: string }>;
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * How long the prefix stays cached, as far as the idle trim is concerned.
+ *
+ * The default hour matches the short-lived entries every provider serves. The
+ * one retention that outlives it is OpenAI's `24h`, sent only when the session
+ * asked for it — and while it is in force, a rewrite at one hour would turn a
+ * cheap read into a full-price one. A model that does not take the field keeps
+ * the default, because the request does not carry it either.
+ */
+export function idleTrimGapMsFor(model: Model, policy?: CachePolicy): number {
+	const retention = resolvePromptCacheRetention(policy, cacheCapability(model));
+	return retention === "24h" ? DAY_MS : IDLE_TRIM_GAP_MS;
 }
 
 export function createCompactionWiring(options: CompactionWiringOptions): CompactionWiring {
@@ -388,6 +419,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				reserveTokens: options.tuning?.reserveTokens,
 				thresholdPercent: options.tuning?.thresholdPercent,
 				enabled: options.tuning?.enabled,
+				idleTrimGapMs: idleTrimGapMsFor(forModel, options.cachePolicy),
 			},
 			{
 				streamFn: options.streamFn,

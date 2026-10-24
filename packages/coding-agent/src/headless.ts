@@ -814,6 +814,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		streamFn,
 		trimOldToolResults: settings.trimOldToolResults,
 		tuning: compactionTuning,
+		cachePolicy: settings.cache,
 		report: (text) => console.error(text),
 		readFile: readFileOrNull,
 		// The same writer the tools use: a preview points the model at the file

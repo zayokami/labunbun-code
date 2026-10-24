@@ -1919,6 +1919,15 @@ describe("the idle trim", () => {
 		expect(calls).toEqual([]);
 	});
 
+	test("a caller-supplied gap replaces the hour, because that caller knows the cache is still warm", async () => {
+		// The gap is not a property of the manager: it is how long the provider
+		// keeps an entry, and only the session knows which retention it asked for.
+		const { manager } = idleManager({ idleTrimGapMs: 86_400_000 });
+		expect(await manager.check(idleSession(), { idleMs: IDLE_TRIM_GAP_MS })).toBeNull();
+		const decision = await manager.check(idleSession(), { idleMs: 86_400_000 });
+		expect(decision?.action).toBe("reduced");
+	});
+
 	test("a saving under the floor is not applied at all", async () => {
 		// All-or-nothing: one result past the keep-five line frees a rounding error
 		// of the window, and previews that buy nothing are detail given away for

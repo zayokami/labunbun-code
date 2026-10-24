@@ -35,6 +35,7 @@ export {
 	estimateContextUsage,
 	extractRecentFiles,
 	hardContextLimit,
+	IDLE_TRIM_GAP_MS,
 	isCompactionBoundary,
 	keepSuffix,
 	LENGTH_RECOVERY_MESSAGE,

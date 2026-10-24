@@ -16,6 +16,7 @@ import {
 	COMPACTION_REFILLING_NOTICE,
 	type CompactionPhase,
 	type CompactionTrigger,
+	IDLE_TRIM_GAP_MS,
 	SessionStore,
 	type SpillRequest,
 	type SpillWriter,
@@ -23,6 +24,7 @@ import {
 } from "@labunbun/agent";
 import {
 	type AgentMessage,
+	type CachePolicy,
 	clearCustomModels,
 	FAUX_MODEL,
 	fauxProvider,
@@ -38,6 +40,7 @@ import {
 	type CompactionTuning,
 	compactionPhaseText,
 	createCompactionWiring,
+	idleTrimGapMsFor,
 	resolveCompactionSummarizer,
 } from "../src/compaction-wiring.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE } from "../src/context-report.ts";
@@ -91,6 +94,7 @@ function wiring(
 			customInstructions?: string,
 		) => Promise<{ blocked: boolean; reason?: string }>;
 		tuning?: CompactionTuning;
+		cachePolicy?: CachePolicy;
 		store?: SessionStore;
 		phases?: CompactionPhase[];
 		spillOutput?: SpillWriter;
@@ -116,6 +120,7 @@ function wiring(
 		trimOldToolResults: options.trimOldToolResults,
 		preCompact: options.preCompact,
 		tuning: options.tuning,
+		cachePolicy: options.cachePolicy,
 		spillOutput: options.spillOutput,
 		noteRewrite: (cause) => causes.push(cause),
 		onContextReduced: () => reducedClears++,
@@ -790,6 +795,46 @@ describe("the idle rung's clock", () => {
 			expect(decision?.action).toBe("reduced");
 			expect(harness.summaries()).toBe(0);
 			expect(harness.reports.join("\n")).toContain("Context trimmed");
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	test("the gap follows the retention the session asked for, and only where the field is sent", () => {
+		const openai: Model = { ...BIG_MODEL, provider: "openai", api: "openai-completions" };
+		expect(idleTrimGapMsFor(openai, { promptCacheRetention: "24h" })).toBe(86_400_000);
+		// Unasked is not the same as asked-for-a-day: the default hour stands.
+		expect(idleTrimGapMsFor(openai)).toBe(IDLE_TRIM_GAP_MS);
+		// A provider that does not take the field does not get the longer gap —
+		// the request does not carry the retention either, so the entry expires
+		// when its own TTL says it does.
+		expect(idleTrimGapMsFor(BIG_MODEL, { promptCacheRetention: "24h" })).toBe(IDLE_TRIM_GAP_MS);
+	});
+
+	test("a day-long retention postpones the rewrite past an hour", async () => {
+		const realNow = Date.now;
+		let fake = 1_800_000_000_000;
+		Date.now = () => fake;
+		try {
+			const openai: Model = { ...BIG_MODEL, provider: "openai", api: "openai-completions" };
+			const harness = wiring({
+				model: openai,
+				trimOldToolResults: true,
+				cachePolicy: { promptCacheRetention: "24h" },
+			});
+			const context = { systemPrompt: "", messages: idleContext() };
+			expect(await harness.check(context)).toBeNull();
+
+			// An hour is the default gap. Here the prefix is still a warm cache hit,
+			// and a rewrite would turn the next request into a full-price one.
+			fake += 3_600_000;
+			expect(await harness.check(context)).toBeNull();
+
+			// A full day of quiet since the last check: only now is the rewrite free.
+			fake += 86_400_000;
+			const decision = await harness.check(context);
+			expect(decision?.action).toBe("reduced");
+			expect(harness.summaries()).toBe(0);
 		} finally {
 			Date.now = realNow;
 		}

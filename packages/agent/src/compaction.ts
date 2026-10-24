@@ -69,6 +69,14 @@ export interface CompactionConfig {
 	 * was large enough to cut.
 	 */
 	microcompactFirst?: boolean;
+	/**
+	 * How quiet the session must be before the idle trim may rewrite the prefix.
+	 *
+	 * The premise of that rung is that the provider's cache has already expired.
+	 * A provider holding a live entry makes the rewrite a cost, not a free cut,
+	 * so a session that asked for a longer retention passes its own gap here.
+	 */
+	idleTrimGapMs?: number;
 }
 
 export const SUMMARY_PROMPT = `You are summarizing a coding-agent conversation so work can continue in a fresh context. Produce a structured summary with EXACTLY these sections:
@@ -174,9 +182,12 @@ const TRIM_KEEP_LAST_RESULTS = 3;
 /** What each older tool result is cut down to by the cheap rung. */
 const TRIM_PER_RESULT_BUDGET = 2_000;
 /**
- * Quiet stretch after which a rewrite of the prefix is free: past it the
- * provider's prompt cache has expired, so the next request pays full price for
- * the whole prefix whatever the old tool results still hold.
+ * Default quiet stretch after which a rewrite of the prefix is free: past it
+ * the provider's prompt cache has expired, so the next request pays full price
+ * for the whole prefix whatever the old tool results still hold.
+ *
+ * A default, not the rule: a provider that was asked for a longer retention has
+ * not expired at an hour, and the wiring raises the gap to match it.
  */
 export const IDLE_TRIM_GAP_MS = 3_600_000;
 /**
@@ -955,7 +966,8 @@ export class CompactionManager {
 		// acceptable for this conversation, and this is that same rewrite — the
 		// trigger moving does not move it outside the permission.
 		if (!this.#config.microcompactFirst) return null;
-		if (idleMs === undefined || idleMs < IDLE_TRIM_GAP_MS) return null;
+		const gap = this.#config.idleTrimGapMs ?? IDLE_TRIM_GAP_MS;
+		if (idleMs === undefined || idleMs < gap) return null;
 		const reduced = this.trim(context, IDLE_TRIM_KEEP_RESULTS);
 		if (!reduced) return null;
 		if (Math.ceil(reduced.cleared.chars / CHARS_PER_TOKEN) < IDLE_TRIM_MIN_SAVINGS_TOKENS) return null;
