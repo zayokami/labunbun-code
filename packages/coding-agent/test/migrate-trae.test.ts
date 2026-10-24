@@ -78,7 +78,10 @@ function withHome(
 	env: Record<string, string | undefined> = {},
 ): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-trae-"));
-	const releaseSourceEnv = borrowSourceEnv();
+	// Borrow the home variables too: the fixture sets them to a directory it then
+	// deletes, so without the restore every later file in this process reads a
+	// home that no longer exists.
+	const releaseSourceEnv = borrowSourceEnv(["HOME", "USERPROFILE"]);
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;

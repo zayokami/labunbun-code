@@ -73,7 +73,10 @@ function withHome(grok: SourceTree, labunbun: SourceTree, body: (home: string) =
 	// The machine's own `$GROK_HOME`, if any, must not win over the fixture, and
 	// neither must any other source's relocation variable — this file's fixtures
 	// only count as "just Grok" while the rest cannot be read.
-	const releaseSourceEnv = borrowSourceEnv();
+	// Borrow the home variables too: the fixture sets them to a directory it then
+	// deletes, so without the restore every later file in this process reads a
+	// home that no longer exists.
+	const releaseSourceEnv = borrowSourceEnv(["HOME", "USERPROFILE"]);
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;

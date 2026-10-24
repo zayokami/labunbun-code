@@ -23,6 +23,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	symlinkSync,
@@ -67,7 +68,13 @@ import { createWriteTool } from "../src/write.ts";
 const FAKE_LINUX: SandboxRuntime = { platform: "linux", hasNativeBackend: true };
 
 function workspace(): string {
-	return mkdtempSync(join(tmpdir(), "lbb-sandbox-wire-"));
+	// The canonical spelling, because a policy path is compared against the
+	// filesystem's own after `realpathSync`. On macOS `tmpdir()` lives under
+	// `/var`, which resolves to `/private/var`; a fixture that keeps the `/var`
+	// spelling makes the derived `<root>/.git` look outside its grant and the
+	// resolver drops it. A real session starts from the spelling `getcwd`
+	// returns, which is already canonical.
+	return realpathSync(mkdtempSync(join(tmpdir(), "lbb-sandbox-wire-")));
 }
 
 /**

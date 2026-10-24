@@ -19,7 +19,10 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 	// `$ZCODE_STORAGE_DIR` alone would move the database out from under the three
 	// ZCode history tests, so a test must not inherit either — or any other
 	// source's relocation variable. The shared borrow covers all of them.
-	const releaseSourceEnv = borrowSourceEnv();
+	// Borrow the home variables too: the fixture sets them to a directory it then
+	// deletes, so without the restore every later file in this process reads a
+	// home that no longer exists.
+	const releaseSourceEnv = borrowSourceEnv(["HOME", "USERPROFILE"]);
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
