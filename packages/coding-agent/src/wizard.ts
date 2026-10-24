@@ -420,8 +420,25 @@ function messageOf(error: unknown): string {
 export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 	console.log(`Welcome to labunbun — first-time setup. Press Enter to accept [defaults].\nProject directory: ${cwd}\n`);
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	const openPrompt = () => createInterface({ input: process.stdin, output: process.stdout });
+	let rl = openPrompt();
 	const ask: Ask = (q) => rl.question(q);
+	/**
+	 * Runs a step that may read the terminal itself with the prompt detached, then
+	 * attaches a fresh one. The masked key and a sign-in's pasted-code fallback each
+	 * close a readline interface when they finish, and closing one pauses stdin and
+	 * drops raw mode, so a prompt still attached would never receive another answer.
+	 * An attached prompt also echoes what the step reads, which would print a pasted
+	 * key on screen.
+	 */
+	const withTerminal = async <T>(step: () => Promise<T>): Promise<T> => {
+		rl.close();
+		try {
+			return await step();
+		} finally {
+			rl = openPrompt();
+		}
+	};
 	let wrote = false;
 
 	try {
@@ -472,7 +489,7 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			// loopback. A failed sign-in returns non-zero rather than throwing, and
 			// the flow continues either way — if no credential landed, the REPL
 			// still mounts and the startup notice names the fix.
-			const code = row === "1" ? await runClaudeLoginCli({ home }) : await runChatGptLoginCli({ home });
+			const code = await withTerminal(() => (row === "1" ? runClaudeLoginCli({ home }) : runChatGptLoginCli({ home })));
 			if (code === 0) {
 				provider = row === "1" ? "anthropic" : "chatgpt";
 				if (row === "1") signedIn.claude = true;
@@ -488,7 +505,7 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			if (detected.length > 0) {
 				console.log(`  Detected ${detected.join(" or ")} in the environment — no key needed here.`);
 			} else {
-				const pasted = await readMasked("API key (Enter if ANTHROPIC_API_KEY is already set): ");
+				const pasted = await withTerminal(() => readMasked("API key (Enter if ANTHROPIC_API_KEY is already set): "));
 				apiKey = pasted.trim() === "" ? null : pasted.trim();
 			}
 		} else {
@@ -501,8 +518,8 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			const outAnswer = Number(await ask(`Max output tokens [8192]: `));
 			maxOutputTokens = Number.isFinite(outAnswer) && outAnswer > 0 ? outAnswer : 8_192;
 			reasoning = (await askChoice(ask, "Reasoning-capable model?", ["y", "n"], "n")).startsWith("y");
-			const pasted = await readMasked(
-				`Paste the key value to store now, or Enter to set ${apiKeyEnvName} yourself later: `,
+			const pasted = await withTerminal(() =>
+				readMasked(`Paste the key value to store now, or Enter to set ${apiKeyEnvName} yourself later: `),
 			);
 			apiKey = pasted.trim() === "" ? null : pasted.trim();
 		}
