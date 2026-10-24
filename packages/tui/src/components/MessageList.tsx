@@ -1,11 +1,12 @@
 import { Box, Static, Text } from "ink";
 import { memo, useMemo } from "react";
 import { RESULT_INDENT, RESULT_LEAD, TOOL_DOT } from "../figures.ts";
+import { formatTokens } from "../format.ts";
 import { type CodeToken, highlightCode } from "../highlight.ts";
 import { LIVE_OUTPUT_LINES, LIVE_PREVIEW_MAX, liveOutputLines, livePreviewTargets } from "../live-output.ts";
 import { type Block, type ColumnAlign, type InlineSpan, parseBlocks } from "../markdown.ts";
 import { type Theme, useTheme } from "../theme.ts";
-import { RESULT_TEXT_CAP, type UiEntry } from "../ui-state.ts";
+import { type CacheChannels, RESULT_TEXT_CAP, type UiEntry } from "../ui-state.ts";
 
 // biome-ignore format: keep the regex on one line so the ignore comment below stays attached
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching raw C0/C1 control bytes is the point
@@ -38,7 +39,28 @@ function UserMessageView({ text, steered = false }: { text: string; steered?: bo
 	);
 }
 
-function AssistantMessageView({ text, incomplete }: { text: string; incomplete?: boolean }) {
+/**
+ * One line under the answer: what the provider served from cache for this turn.
+ *
+ * The share is the number that moves — a session "getting faster" is really a
+ * rising read share on a shrinking full-price remainder — and the token counts
+ * beside it are what the share is a share of, so a 100% line on a tiny prompt
+ * cannot be mistaken for a large win.
+ */
+function cacheFooter(cache: CacheChannels): string {
+	const share = Math.round((cache.read / cache.prompt) * 100);
+	return `cache ${share}% of ${formatTokens(cache.prompt)} · ${formatTokens(cache.read)} read · ${formatTokens(cache.write)} written`;
+}
+
+function AssistantMessageView({
+	text,
+	incomplete,
+	cache,
+}: {
+	text: string;
+	incomplete?: boolean;
+	cache?: CacheChannels;
+}) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1} flexDirection="column">
@@ -46,6 +68,7 @@ function AssistantMessageView({ text, incomplete }: { text: string; incomplete?:
 			{/* The text above is what had arrived when the stream stopped; without
 			    this line it reads as a finished answer that happens to be short. */}
 			{incomplete ? <Text color={theme.warning}>(response ended early; output is partial)</Text> : null}
+			{cache ? <Text dimColor>{cacheFooter(cache)}</Text> : null}
 		</Box>
 	);
 }
@@ -519,7 +542,7 @@ export const EntryView = memo(function EntryView({
 		case "user":
 			return <UserMessageView text={entry.text} steered={entry.steered} />;
 		case "assistant":
-			return <AssistantMessageView text={entry.text} incomplete={entry.incomplete} />;
+			return <AssistantMessageView text={entry.text} incomplete={entry.incomplete} cache={entry.cache} />;
 		case "toolUse":
 			return <ToolUseView entry={entry} full={full} liveText={liveText} />;
 		case "error":

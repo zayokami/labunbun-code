@@ -9,12 +9,25 @@ import {
 	isCompactionBoundary,
 	LENGTH_RECOVERY_MESSAGE,
 } from "@labunbun/agent";
-import type { AgentMessage, ImageContent, TextContent } from "@labunbun/ai";
+import type { AgentMessage, ImageContent, TextContent, Usage } from "@labunbun/ai";
 import type { ListPickerState } from "./components/ListPickerDialog.tsx";
 import type { PermissionDiff } from "./permission-diff.ts";
 import type { PermissionOption } from "./permission-options.ts";
 import { DEFAULT_THEME } from "./themes/index.ts";
 import type { Theme } from "./themes/tokens.ts";
+
+/**
+ * What one request's prompt was made of, as the provider billed it.
+ *
+ * The three channels sum to the prompt under the `Usage` contract — a cached
+ * token is never counted twice — so `read / prompt` is the turn's cache share
+ * and is comparable with the conversation-wide rate in `/cache`.
+ */
+export interface CacheChannels {
+	read: number;
+	write: number;
+	prompt: number;
+}
 
 export type UiEntry =
 	/** `steered` marks a message sent into a running turn rather than as a new one. */
@@ -22,8 +35,9 @@ export type UiEntry =
 	/**
 	 * `incomplete` says the turn ended mid-answer — a stream failure or an abort
 	 * kept the partial text, so the row must not read as the model's full reply.
+	 * `cache` is the request behind the row, when the provider used its cache.
 	 */
-	| { kind: "assistant"; text: string; incomplete?: true }
+	| { kind: "assistant"; text: string; incomplete?: true; cache?: CacheChannels }
 	| {
 			kind: "toolUse";
 			callId: string;
@@ -503,6 +517,22 @@ function previewDropped(text: string): string {
 	return oneLine.length > DROPPED_PREVIEW_CHARS ? `${oneLine.slice(0, DROPPED_PREVIEW_CHARS)}…` : oneLine;
 }
 
+/**
+ * The cache channels of one request, or nothing when no cache was involved.
+ *
+ * No cache activity means no footer. A provider without prompt caching reports
+ * zeros for every turn, and a line of zeros under every answer would be noise
+ * that says nothing about the session; the first turn that ever writes or reads
+ * a cached byte is the one worth showing, and every turn after it inherits the
+ * comparison.
+ */
+export function cacheChannels(usage: Usage | undefined): CacheChannels | undefined {
+	if (usage === undefined) return undefined;
+	const prompt = usage.promptTotal ?? usage.cacheRead + usage.cacheWrite + usage.input;
+	if (prompt <= 0 || (usage.cacheRead === 0 && usage.cacheWrite === 0)) return undefined;
+	return { read: usage.cacheRead, write: usage.cacheWrite, prompt };
+}
+
 export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 	switch (event.type) {
 		case "agent_start":
@@ -570,7 +600,11 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 			}
 		}
 
-		case "turn_end":
+		case "turn_end": {
+			// The usage belongs to the message that just finished, so it is read
+			// here and lives with the row it describes — a later turn's numbers
+			// never overwrite an earlier row's.
+			const cache = cacheChannels(event.message.usage);
 			return {
 				...state,
 				entries: [
@@ -581,6 +615,7 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 									kind: "assistant",
 									text: state.streamingText,
 									...(event.message.incomplete ? { incomplete: true as const } : {}),
+									...(cache ? { cache } : {}),
 								} as UiEntry,
 							]
 						: []),
@@ -590,6 +625,7 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				retry: undefined,
 				statusPhase: event.toolResults.length > 0 ? "tools" : "idle",
 			};
+		}
 
 		case "tool_execution_start":
 			return {
@@ -653,10 +689,12 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				// last rather than any member: an earlier turn can be incomplete
 				// too, and inheriting its marker would misdate this one.
 				const last = [...event.messages].reverse().find((message) => message.role === "assistant");
+				const cache = last?.role === "assistant" ? cacheChannels(last.usage) : undefined;
 				entries.push({
 					kind: "assistant",
 					text: state.streamingText,
 					...(last?.role === "assistant" && last.incomplete ? { incomplete: true as const } : {}),
+					...(cache ? { cache } : {}),
 				});
 			}
 			if (event.reason === "error" && event.errorMessage) {
@@ -748,10 +786,17 @@ export function entriesFromMessages(messages: readonly AgentMessage[]): UiEntry[
 			// of text is one row, and a message with nothing but tool calls gets
 			// no assistant row at all.
 			let textRun: string[] = [];
+			let lastTextRow: Extract<UiEntry, { kind: "assistant" }> | undefined;
 			const flushText = (incomplete = false): void => {
 				const text = textRun.join("\n");
 				if (text.trim().length > 0) {
-					entries.push({ kind: "assistant", text, ...(incomplete ? { incomplete: true as const } : {}) });
+					const row: Extract<UiEntry, { kind: "assistant" }> = {
+						kind: "assistant",
+						text,
+						...(incomplete ? { incomplete: true as const } : {}),
+					};
+					entries.push(row);
+					lastTextRow = row;
 				}
 				textRun = [];
 			};
@@ -773,6 +818,12 @@ export function entriesFromMessages(messages: readonly AgentMessage[]): UiEntry[
 			// Only the trailing run can be the one the cut landed on: text
 			// followed by a tool call was finished before the call was made.
 			flushText(message.incomplete === true);
+			// The channels describe the whole message, so they attach to its last
+			// text row — where a reader finishes reading it. A message that is all
+			// tool calls has no row to carry them, and inventing one would put a
+			// cache line under text the user never saw.
+			const cache = cacheChannels(message.usage);
+			if (cache && lastTextRow) lastTextRow.cache = cache;
 			continue;
 		}
 		const row = toolRows.get(message.toolCallId);

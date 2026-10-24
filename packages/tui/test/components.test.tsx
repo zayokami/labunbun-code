@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { AgentMessage, Usage } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import type React from "react";
 import { MessageList } from "../src/components/MessageList.tsx";
@@ -18,6 +19,7 @@ import { shortcutGroups } from "../src/shortcuts.ts";
 import { createStore } from "../src/store.ts";
 import { DARK_THEME, HIGH_CONTRAST_DARK, type Theme, ThemeContext } from "../src/theme.ts";
 import {
+	entriesFromMessages,
 	initialUiState,
 	RESULT_TEXT_CAP,
 	reduceEvent,
@@ -57,6 +59,23 @@ describe("MessageList", () => {
 		expect(frame).toContain(`${RESULT_LEAD}a.txt`);
 		expect(frame).toContain("Here are the files.");
 		expect(frame).toContain("Error: boom");
+	});
+
+	test("an answered row prints the turn's cache share, and a row without cache prints nothing", () => {
+		const { lastFrame } = render(
+			withTheme(
+				<MessageList
+					entries={[
+						{ kind: "assistant", text: "done", cache: { read: 3000, write: 500, prompt: 4000 } },
+						{ kind: "assistant", text: "plain" },
+					]}
+				/>,
+			),
+		);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("cache 75% of 4.0k · 3.0k read · 500 written");
+		// A row the provider charged no cache for is not annotated with zeros.
+		expect(frame.match(/cache /g)).toHaveLength(1);
 	});
 
 	// The parens are the arguments: a call that has no preview to show gets
@@ -873,6 +892,47 @@ describe("ui-state reducer", () => {
 		expect(state.streamingText).toBe("");
 		expect(state.entries).toEqual([{ kind: "assistant", text: "Hello" }]);
 		expect(state.statusPhase).toBe("idle");
+	});
+
+	test("turn_end moves the request's cache channels onto the row it commits", () => {
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			provider: "anthropic",
+			model: "claude-sonnet-5",
+			usage: { input: 120, output: 30, cacheRead: 800, cacheWrite: 60, promptTotal: 980 },
+			stopReason: "stop",
+			timestamp: 0,
+		} as any;
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, { type: "agent_start" });
+		state = reduceEvent(state, {
+			type: "message_update",
+			message,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi", partial: message },
+		});
+		state = reduceEvent(state, { type: "turn_end", message, toolResults: [] });
+		expect(state.entries).toEqual([{ kind: "assistant", text: "hi", cache: { read: 800, write: 60, prompt: 980 } }]);
+	});
+
+	test("a restored transcript keeps each message's cache numbers with its own row", () => {
+		const assistant = (text: string, usage: Usage): AgentMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			provider: "anthropic",
+			model: "claude-sonnet-5",
+			usage,
+			stopReason: "stop",
+			timestamp: 0,
+		});
+		const entries = entriesFromMessages([
+			assistant("first", { input: 100, output: 10, cacheRead: 900, cacheWrite: 0, promptTotal: 1000 }),
+			assistant("second", { input: 0, output: 10, cacheRead: 0, cacheWrite: 1200, promptTotal: 1200 }),
+		]);
+		expect(entries).toEqual([
+			{ kind: "assistant", text: "first", cache: { read: 900, write: 0, prompt: 1000 } },
+			{ kind: "assistant", text: "second", cache: { read: 0, write: 1200, prompt: 1200 } },
+		]);
 	});
 
 	test("tool events track pending tools and results", () => {
