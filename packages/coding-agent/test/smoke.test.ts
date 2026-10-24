@@ -7,7 +7,7 @@ import { main, parseArgs, promptFromStdin } from "../src/main.ts";
 
 describe("@labunbun/coding-agent smoke", () => {
 	test("reports its version", () => {
-		expect(CODING_AGENT_VERSION).toBe("0.1.0");
+		expect(CODING_AGENT_VERSION).toBe("0.1.0.1");
 		expect(CLI_NAME).toBe("labunbun");
 	});
 

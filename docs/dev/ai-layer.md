@@ -632,7 +632,7 @@ The adapter is `gemini-code-assist.ts` — a wire of its own rather than a mode 
 
 ### The package root
 
-- `AI_PACKAGE_VERSION` is `0.1.0` (`packages/ai/src/index.ts:1`).
+- `AI_PACKAGE_VERSION` is `0.1.0.1` (`packages/ai/src/index.ts:1`).
 - `StreamFnOptions.policy` carries the cache settings, and the defaults are the ones this app ships (`packages/ai/src/index.ts:199`).
 - `onCacheNotice` travels with the transport rather than with `StreamOptions`. It describes the connection and not the request, and the answer outlives the call that provoked it (`packages/ai/src/index.ts:201`).
 - `responsesClientFactory` is an injection point, for the same reason each adapter takes one. A test that wants to prove which adapter a model's `api` reaches needs a network call or an injection point. Without one, the only available proof is that the call fails. That result is indistinguishable from a branch that does not exist (`packages/ai/src/index.ts:209`).

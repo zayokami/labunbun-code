@@ -5,7 +5,7 @@
 ; The build script finds ISCC.exe without assuming an install path.
 
 #define AppName "LaBunbun Code"
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.0.1"
 #define AppPublisher "zayokami"
 #define AppURL "https://github.com/zayokami/labunbun-code"
 #define ExeName "labunbun.exe"
@@ -34,7 +34,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#ExeName}
 ChangesEnvironment=yes
 SetupLogging=yes
-VersionInfoVersion={#AppVersion}.0
+VersionInfoVersion={#AppVersion}
 VersionInfoProductName={#AppName}
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppName} installer

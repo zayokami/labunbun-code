@@ -1,4 +1,4 @@
-export const TUI_PACKAGE_VERSION = "0.1.0";
+export const TUI_PACKAGE_VERSION = "0.1.0.1";
 
 export {
 	mountRepl,

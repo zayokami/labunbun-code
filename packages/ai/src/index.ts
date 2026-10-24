@@ -1,4 +1,4 @@
-export const AI_PACKAGE_VERSION = "0.1.0";
+export const AI_PACKAGE_VERSION = "0.1.0.1";
 
 // Prompt caching
 export {

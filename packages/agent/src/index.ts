@@ -1,4 +1,4 @@
-export const AGENT_PACKAGE_VERSION = "0.1.0";
+export const AGENT_PACKAGE_VERSION = "0.1.0.1";
 
 // Activity heatmap and streaks, aggregated from the session files on disk
 export {

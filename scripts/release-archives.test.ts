@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { gunzipSync, inflateRawSync } from "node:zlib";
-import { buildDeb, buildZip } from "./release-archives.ts";
+import { gunzipSync, inflateRawSync, inflateSync } from "node:zlib";
+import { buildAppImage, buildDeb, buildRpm, buildZip } from "./release-archives.ts";
 
 type ArMember = { name: string; data: Buffer };
 
@@ -157,5 +157,201 @@ describe("darwin archives", () => {
 	test("directories are marked as directories", () => {
 		const directory = parseZip(zip).find((entry) => entry.name === "root/");
 		expect(directory?.external).toBe(((0o040755 << 16) | 0x10) >>> 0);
+	});
+});
+
+type RpmHeader = {
+	end: number;
+	entries: Map<number, { type: number; offset: number; count: number; store: Buffer }>;
+};
+
+function parseRpmHeader(data: Buffer, offset: number): RpmHeader {
+	expect(data.subarray(offset, offset + 3).toString("hex")).toBe("8eade8");
+	expect(data[offset + 3]).toBe(1);
+	const count = data.readUInt32BE(offset + 8);
+	const size = data.readUInt32BE(offset + 12);
+	const store = offset + 16 + 16 * count;
+	const entries: RpmHeader["entries"] = new Map();
+	for (let index = 0; index < count; index += 1) {
+		const at = offset + 16 + index * 16;
+		expect(entries.has(data.readUInt32BE(at))).toBe(false);
+		entries.set(data.readUInt32BE(at), {
+			type: data.readUInt32BE(at + 4),
+			offset: data.readUInt32BE(at + 8),
+			count: data.readUInt32BE(at + 12),
+			store: data.subarray(store, store + size),
+		});
+	}
+	return { end: store + size, entries };
+}
+
+function rpmString(header: RpmHeader, tag: number): string {
+	const entry = header.entries.get(tag);
+	expect(entry).toBeDefined();
+	return (entry?.store.subarray(entry.offset).toString("utf8") ?? "").split("\0")[0];
+}
+
+function rpmStrings(header: RpmHeader, tag: number): string[] {
+	const entry = header.entries.get(tag);
+	expect(entry).toBeDefined();
+	return (entry?.store.subarray(entry.offset).toString("utf8") ?? "").split("\0").slice(0, entry?.count ?? 0);
+}
+
+function rpmInts(header: RpmHeader, tag: number): number[] {
+	const entry = header.entries.get(tag);
+	expect(entry).toBeDefined();
+	const values: number[] = [];
+	for (let index = 0; index < (entry?.count ?? 0); index += 1)
+		values.push(entry?.store.readUInt32BE(entry.offset + index * 4) ?? -1);
+	return values;
+}
+
+type CpioEntry = { name: string; mode: number; data: Buffer };
+
+function parseCpio(data: Buffer): CpioEntry[] {
+	const entries: CpioEntry[] = [];
+	let offset = 0;
+	while (offset + 110 <= data.length) {
+		expect(data.subarray(offset, offset + 6).toString("ascii")).toBe("070701");
+		const field = (index: number): number =>
+			Number.parseInt(data.subarray(offset + 6 + index * 8, offset + 14 + index * 8).toString("ascii"), 16);
+		const mode = field(1);
+		const size = field(6);
+		const nameSize = field(11);
+		const nameStart = offset + 110;
+		const name = data.subarray(nameStart, nameStart + nameSize - 1).toString("utf8");
+		const contentStart = nameStart + nameSize + ((4 - ((110 + nameSize) % 4)) % 4);
+		const next = contentStart + size + ((4 - (size % 4)) % 4);
+		if (name === "TRAILER!!!") break;
+		entries.push({ name, mode, data: Buffer.from(data.subarray(contentStart, contentStart + size)) });
+		offset = next;
+	}
+	return entries;
+}
+
+describe("rpm packages", () => {
+	const binary = Buffer.from("binary payload");
+	const readme = Buffer.from("readme text");
+	const rpm = buildRpm({
+		packageName: "labunbun",
+		version: "0.1.0.1",
+		release: "alpha1",
+		architecture: "x86_64",
+		summary: "terminal coding agent",
+		description: ["terminal coding agent", "Second line."],
+		license: "MIT",
+		maintainer: "zayokami <labunbun@zayoka.com>",
+		homepage: "https://example.invalid/labunbun",
+		mtime: 1_700_000_000,
+		files: [
+			{ path: "usr/bin/labunbun", mode: 0o755, data: binary },
+			{ path: "usr/share/doc/labunbun/README.md", mode: 0o644, data: readme },
+		],
+	});
+
+	test("the lead names the package and the signature covers the rest", () => {
+		expect(rpm.subarray(0, 4).toString("hex")).toBe("edabeedb");
+		expect(rpm.subarray(10, 75).toString("ascii").replace(/\0.*$/, "")).toBe("labunbun-0.1.0.1-alpha1.x86_64");
+		const signature = parseRpmHeader(rpm, 96);
+		const mainStart = (signature.end + 7) & ~7;
+		const main = parseRpmHeader(rpm, mainStart);
+		expect(rpmInts(signature, 1000)[0]).toBe(rpm.length - mainStart);
+		const md5 = createHash("md5").update(rpm.subarray(mainStart)).digest("hex");
+		const signatureMd5 = signature.entries.get(1004);
+		expect(signatureMd5?.store.subarray(signatureMd5.offset, signatureMd5.offset + 16).toString("hex")).toBe(md5);
+		const sha256 = createHash("sha256").update(rpm.subarray(mainStart, main.end)).digest("hex");
+		expect(rpmString(signature, 273)).toBe(sha256);
+		expect(rpmInts(signature, 1007)[0]).toBe(gunzipSync(rpm.subarray(main.end)).length);
+	});
+
+	test("the main header names the files and their metadata", () => {
+		const signature = parseRpmHeader(rpm, 96);
+		const main = parseRpmHeader(rpm, (signature.end + 7) & ~7);
+		expect(rpmString(main, 1000)).toBe("labunbun");
+		expect(rpmString(main, 1001)).toBe("0.1.0.1");
+		expect(rpmString(main, 1002)).toBe("alpha1");
+		expect(rpmString(main, 1022)).toBe("x86_64");
+		expect(rpmString(main, 1124)).toBe("cpio");
+		expect(rpmString(main, 1125)).toBe("gzip");
+		expect(rpmStrings(main, 1117)).toEqual(["labunbun", "README.md"]);
+		expect(rpmStrings(main, 1118)).toEqual(["/usr/bin/", "/usr/share/doc/labunbun/"]);
+		expect(rpmInts(main, 1116)).toEqual([0, 1]);
+		expect(rpmInts(main, 1028)).toEqual([binary.length, readme.length]);
+		expect(rpmInts(main, 1048)).toEqual([0x0c]);
+		expect(rpmStrings(main, 1049)).toEqual(["glibc"]);
+		expect(rpmStrings(main, 1035)).toEqual([
+			createHash("sha256").update(binary).digest("hex"),
+			createHash("sha256").update(readme).digest("hex"),
+		]);
+	});
+
+	test("the payload is a cpio archive with the files and their bytes", () => {
+		const signature = parseRpmHeader(rpm, 96);
+		const main = parseRpmHeader(rpm, (signature.end + 7) & ~7);
+		const entries = parseCpio(gunzipSync(rpm.subarray(main.end)));
+		expect(entries.map((entry) => entry.name)).toEqual([
+			"./usr",
+			"./usr/bin",
+			"./usr/share",
+			"./usr/share/doc",
+			"./usr/share/doc/labunbun",
+			"./usr/bin/labunbun",
+			"./usr/share/doc/labunbun/README.md",
+		]);
+		expect(entries[5].mode).toBe(0o100755);
+		expect(entries[5].data.equals(binary)).toBe(true);
+		expect(entries[6].data.equals(readme)).toBe(true);
+	});
+});
+
+describe("appimages", () => {
+	const runtime = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0x41, 0x49, 2, 0]);
+	const image = buildAppImage(
+		runtime,
+		[
+			{ path: "AppRun", mode: 0o755, symlink: "usr/bin/labunbun" },
+			{ path: "labunbun.desktop", mode: 0o644, data: Buffer.from("desktop") },
+			{ path: "usr/bin/labunbun", mode: 0o755, data: Buffer.from("binary payload") },
+			{ path: "usr/share/doc/labunbun/README.md", mode: 0o644, data: Buffer.from("readme") },
+		],
+		1_700_000_000,
+	);
+	const filesystem = image.subarray(runtime.length);
+
+	function metadataBlock(offset: number): Buffer {
+		const header = filesystem.readUInt16LE(offset);
+		const size = header & 0x7fff;
+		const data = filesystem.subarray(offset + 2, offset + 2 + size);
+		return (header & 0x8000) !== 0 ? Buffer.from(data) : inflateSync(data);
+	}
+
+	test("the runtime prefix is untouched and the squashfs follows it", () => {
+		expect(image.subarray(0, runtime.length).equals(runtime)).toBe(true);
+		expect(filesystem.subarray(0, 4).toString("ascii")).toBe("hsqs");
+		expect(filesystem.readUInt16LE(20)).toBe(1);
+		expect(filesystem.readUInt16LE(22)).toBe(17);
+		expect(filesystem.readUInt32LE(4)).toBe(10);
+		expect(Number(filesystem.readBigUInt64LE(40))).toBe(filesystem.length);
+		expect(filesystem.readBigUInt64LE(56)).toBe(0xffffffffffffffffn);
+		expect(filesystem.readBigUInt64LE(88)).toBe(0xffffffffffffffffn);
+	});
+
+	test("the root directory lists the appimage entries", () => {
+		const inodes = metadataBlock(Number(filesystem.readBigUInt64LE(64)));
+		const directories = metadataBlock(Number(filesystem.readBigUInt64LE(72)));
+		const root = Number(filesystem.readBigUInt64LE(32));
+		expect(inodes.readUInt16LE(root)).toBe(1);
+		expect(inodes.readUInt32LE(root + 12)).toBe(10);
+		const start = inodes.readUInt16LE(root + 26);
+		const count = directories.readUInt32LE(start) + 1;
+		const names: string[] = [];
+		let cursor = start + 12;
+		for (let index = 0; index < count; index += 1) {
+			const length = directories.readUInt16LE(cursor + 6) + 1;
+			names.push(directories.subarray(cursor + 8, cursor + 8 + length).toString("utf8"));
+			cursor += 8 + length;
+		}
+		expect(names).toEqual(["AppRun", "labunbun.desktop", "usr"]);
+		expect(directories.readUInt16LE(start + 12 + 4)).toBe(3);
 	});
 });
