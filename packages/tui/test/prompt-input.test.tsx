@@ -104,6 +104,25 @@ describe("prompt input", () => {
 		unmount();
 	});
 
+	test("Shift+Enter inserts a newline instead of submitting", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} />));
+		await delay(30);
+		stdin.write("a");
+		// What a kitty-protocol terminal sends for Shift+Enter: codepoint 13 with
+		// the shift modifier. The legacy `\r` carries no modifier, which is why the
+		// app negotiates the protocol before this key can be told from Enter.
+		stdin.write("\x1b[13;2u");
+		stdin.write("b");
+		await delay(30);
+		expect(submitted).toEqual([]);
+		expect(flat(lastFrame())).toContain("│ a │");
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["a\nb"]);
+		unmount();
+	});
+
 	test("up arrow on an empty history leaves the buffer alone", async () => {
 		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} placeholder="ph" />));
 		await delay(30);

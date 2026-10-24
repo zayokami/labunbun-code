@@ -658,6 +658,17 @@ export function PromptInput({
 				onQueue(text);
 				return;
 			}
+			// Shift+Enter writes a line break instead of sending. It arrives with
+			// `key.return` set and `shift` true only under the kitty keyboard
+			// protocol (the app negotiates it in `render`); a terminal without it
+			// sends plain `\r` and the key is indistinguishable from Enter, so this
+			// branch simply never fires there. Above the submit branch because both
+			// keys carry `return` and the same `\r` input — order is the only thing
+			// that can tell them apart.
+			if (key.return && key.shift) {
+				actions.newline();
+				return;
+			}
 			if (key.return && (input === "" || input === "\r")) {
 				// The list's footer says "Enter run", and while an entry is
 				// highlighted that entry is the thing to run: the prefix that opened

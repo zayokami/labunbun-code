@@ -473,6 +473,14 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	// running turn first and requires a second press when idle. Ink's default
 	// (true) unmounts the whole app on the first \x03 before any handler runs,
 	// discarding in-flight work with no chance to interrupt cleanly.
+	//
+	// kittyKeyboard is what makes Shift+Enter tellable from Enter at all. A
+	// terminal in its legacy mode reports both as `\r`, so the footer's promise
+	// would be a key nobody can press. Ink negotiates the protocol with the
+	// terminal (`CSI ? u`) and only enables it when the answer comes back; a
+	// terminal without support keeps the old bytes, where the promise cannot be
+	// kept. Ink re-enables the protocol after a child process has held the
+	// terminal and pops it on unmount, so the shell is left as it was found.
 	const instance = render(
 		<ThemedTree store={store}>
 			<REPL
@@ -493,7 +501,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				pad={options.pad}
 			/>
 		</ThemedTree>,
-		{ exitOnCtrlC: false },
+		{ exitOnCtrlC: false, kittyKeyboard: { mode: "auto" } },
 	);
 
 	const permissionQueue = createPermissionQueue({
