@@ -219,6 +219,55 @@ describe("a conversation's cache hit rate", () => {
 		expect(server.requests.slice(1).filter((request) => request.usage.input > 0)).toEqual([]);
 	}, 120_000);
 
+	test("a tool list that only changed order is still the same prefix", async () => {
+		// The tool block is bytes in every request. A reconnect or a
+		// `tools/list_changed` that publishes the same set in another order must
+		// not rewrite a prefix whose contents did not change — the cache entry is
+		// still valid, and the request after the reorder should read it, not pay
+		// for it again.
+		const stubServer = stub({
+			steps: [{ text: "one" }, { text: "two" }],
+			modelId: "claude-opus-5",
+			minPrefixTokens: 512,
+		});
+		const tracked = createTrackedStreamFn();
+		const named = (name: string) =>
+			buildTool({
+				name,
+				description: `Tool ${name}. Reads nothing, writes nothing.`,
+				inputSchema: z.object({}),
+				isReadOnly: () => true,
+				call: async () => ({ content: [{ type: "text" as const, text: name }] }),
+			});
+		const alpha = named("Alpha");
+		const beta = named("Beta");
+		// Born in one order, then handed the same set in the other.
+		const session = new AgentSession({
+			model: stubModel("anthropic-messages", "anthropic", stubServer.baseUrl, "claude-opus-5"),
+			systemPrompt: SYSTEM,
+			tools: [beta, alpha],
+			deps: { streamFn: tracked.streamFn },
+		});
+		await session.prompt("first turn");
+		session.setTools([alpha, beta]);
+		await session.prompt("second turn");
+
+		const names = stubServer.requests.map((request) =>
+			((request.body.tools as Array<{ name: string }> | undefined) ?? []).map((tool) => tool.name),
+		);
+		expect(names).toEqual([
+			["Alpha", "Beta"],
+			["Alpha", "Beta"],
+		]);
+
+		// The second request extended the first: nothing was rewritten, and the
+		// whole earlier prefix came from the cache.
+		const records = tracked.tracker.records();
+		expect(records.map((record) => record.kind)).toEqual(["first", "extension"]);
+		expect(records.filter((record) => record.kind === "rewind")).toEqual([]);
+		expect(stubServer.requests[1]?.usage.input).toBe(0);
+	}, 60_000);
+
 	test("reads a Kimi-shaped usage field, which used to be read as a miss", async () => {
 		// The automatic route: no breakpoints to place, and the count arrives at the
 		// top level of `usage` rather than nested under `prompt_tokens_details`.

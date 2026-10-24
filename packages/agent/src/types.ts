@@ -604,9 +604,20 @@ export function formatRetryNotice(retry: { attempt: number; delayMs: number; mes
 
 /** Build the wire tool list for the model from a Tool registry. */
 export function toWireTools(tools: AnyTool[]): WireTool[] {
-	return tools.map((tool) => ({
-		name: tool.name,
-		description: tool.description,
-		parameters: z.toJSONSchema(tool.inputSchema) as JsonSchemaObject,
-	}));
+	// Canonical order, not registration order.
+	//
+	// The tool block is bytes at the front of every request's prompt. Servers
+	// connect in whatever order they answer, and a `tools/list_changed` may
+	// republish the same set in a new order; either would rewrite the prefix and
+	// throw away a cache entry whose contents did not change. Sorting by name
+	// makes the block a function of the set, so the same tools always produce the
+	// same bytes. The sort is codepoint-wise rather than locale-aware, because a
+	// locale rule is another thing that can differ between two runs.
+	return [...tools]
+		.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+		.map((tool) => ({
+			name: tool.name,
+			description: tool.description,
+			parameters: z.toJSONSchema(tool.inputSchema) as JsonSchemaObject,
+		}));
 }
