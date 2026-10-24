@@ -48,21 +48,23 @@ export function rewriteCause(action: "compact" | "reduced"): string {
 	return action === "compact" ? "compaction" : "trim";
 }
 
-/** The family the user means by "this conversation": the busiest one. */
-function mainFamily(records: readonly CacheRequestRecord[]): string | undefined {
-	const counts = new Map<string, number>();
-	for (const record of records) counts.set(record.family, (counts.get(record.family) ?? 0) + 1);
-	let best: string | undefined;
-	let bestCount = -1;
-	// `>` rather than `>=`: ties go to whichever family was seen last, which is
-	// the one in front of the user.
-	for (const [family, count] of counts) {
-		if (count >= bestCount) {
-			best = family;
-			bestCount = count;
-		}
+/**
+ * The family the user means by "this conversation".
+ *
+ * The current model's latest family, not the busiest one: after `/model` or a
+ * fallback, the old model can own most of the session's records while none of
+ * them describes what is on screen now. Before the current model has made a
+ * request, the latest record is still the most recent thing the user saw.
+ */
+function mainFamily(records: readonly CacheRequestRecord[], model?: Model): string | undefined {
+	const wanted = model === undefined ? undefined : `${model.provider}/${model.id}`;
+	let newest: CacheRequestRecord | undefined;
+	for (const record of records) {
+		if (wanted !== undefined && record.familyLabel !== wanted) continue;
+		// Records are appended in request order, so the last match is the newest.
+		newest = record;
 	}
-	return best;
+	return (newest ?? records.at(-1))?.family;
 }
 
 /**
@@ -85,7 +87,7 @@ function capabilityLine(model: Model): string {
 
 /** The one line `/status` puts on the card. */
 export function cacheStatusLine(records: readonly CacheRequestRecord[], model?: Model): string {
-	const family = mainFamily(records);
+	const family = mainFamily(records, model);
 	if (family === undefined) return "no requests yet";
 	const mine = records.filter((record) => record.family === family);
 	const totals = sumTokens(mine);
@@ -172,7 +174,7 @@ function noticeLines(notices: readonly CacheNotice[]): string[] {
  */
 export function formatCacheReport(input: CacheReportInput): string {
 	const { records, model, notices = [] } = input;
-	const family = mainFamily(records);
+	const family = mainFamily(records, model);
 	if (family === undefined) {
 		return [
 			"Prompt cache: no request has been made yet.",

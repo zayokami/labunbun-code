@@ -124,9 +124,21 @@ describe("formatCacheReport", () => {
 		// numbers here disagree with the bill.
 		const text = formatCacheReport({
 			records: [...WRITE_THEN_READ, record({ family: "fam-2", familyLabel: "anthropic/claude-haiku-4-5", turn: 1 })],
+			model: MODEL,
 		});
 		expect(text).toContain("2 requests");
 		expect(text).toContain("other families  anthropic/claude-haiku-4-5 1");
+	});
+
+	test("the current model's family wins over a busier old one", () => {
+		// After /model the old family can own most of the session. The headline
+		// follows the model on screen; the old family is listed underneath.
+		const old = [1, 2, 3].map((at) => record({ family: "old", familyLabel: "anthropic/claude-haiku-4-5", at }));
+		const current = record({ family: "new", turn: 1, kind: "first", at: 4 });
+		const text = formatCacheReport({ records: [...old, current], model: MODEL });
+		expect(text).toContain("Prompt cache — anthropic/claude-sonnet-5");
+		expect(text).toContain("1 request");
+		expect(text).toContain("other families  anthropic/claude-haiku-4-5 3");
 	});
 
 	test("one request has no ceiling yet, because there was nothing to read", () => {
