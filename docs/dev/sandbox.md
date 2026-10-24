@@ -349,6 +349,27 @@ The builder requests `--unshare-user`, `--unshare-pid`, and `--unshare-ipc` expl
 
 `fullFilesystemArgs` is the small helper that spells the full-filesystem bind (`packages/tools/src/sandbox/bwrap.ts:111`).
 
+### The Linux syscall filter
+
+`seccomp.ts` builds the raw cBPF program bwrap loads through `--seccomp FD` (`packages/tools/src/sandbox/seccomp.ts:1`). bubblewrap reads the descriptor as `struct sock_filter` records, eight bytes each, with no header (`packages/tools/src/sandbox/seccomp.ts:71`). It applies the filter after the namespaces and mounts exist and before the command starts, and every process the command starts inherits it.
+
+The architecture guard is first and kills on a mismatch (`packages/tools/src/sandbox/seccomp.ts:119`). Every syscall number after it comes from one architecture's table, so a filter loaded on another ABI would answer for the wrong calls (`packages/tools/src/sandbox/seccomp.ts:84`). On x86-64 the x32 bit is killed for the same reason: those calls miss every number the filter names (`packages/tools/src/sandbox/seccomp.ts:126`). Only x86-64 and arm64 have tables, and another architecture gets no filter rather than a guessed one (`packages/tools/src/sandbox/seccomp.ts:55`).
+
+The program refuses two families:
+
+- `io_uring_setup`, `io_uring_enter`, and `io_uring_register` (`packages/tools/src/sandbox/seccomp.ts:133`). io_uring is a second I/O entry path with its own kernel attack surface, and no command in a coding session needs it.
+- `socket` with `AF_VSOCK` (`packages/tools/src/sandbox/seccomp.ts:139`). A network namespace owns the IP stack, not the hypervisor socket family, so a vsock connection would leave the machine while `--unshare-net` stayed closed.
+
+Both refusals return `ENOSYS`, not `EPERM` (`packages/tools/src/sandbox/seccomp.ts:24`). A runtime that probes io_uring at start-up reads that as "this kernel does not implement it" and takes its existing fallback; `EPERM` would surface a policy error for a call the user never asked about.
+
+`AF_UNIX` is deliberately allowed (`packages/tools/src/sandbox/seccomp.ts:104`). The Linux loopback bridge is a Unix socket, and the bridge process inherits this same filter. The residual is real: with `/` bound read-only, a command can open host Unix sockets by path or name. The network axis is not a complete socket wall until the bridge has a transport that does not need `AF_UNIX`.
+
+The descriptor is a pipe the executor owns, not a file the command could touch (`packages/tools/src/operations.ts:810`). The argv names fd 3 through `ResolveSandboxOptions.seccompFd` (`packages/tools/src/sandbox/index.ts:133`), `buildBwrapArgs` writes `--seccomp 3` as the last option before `--` (`packages/tools/src/sandbox/bwrap.ts:81`), and the spawn adds a fourth pipe and writes the program into it (`packages/tools/src/operations.ts:818`). bwrap blocks reading the descriptor to EOF while it parses arguments, so the write is what lets the spawn continue. A spawn that did not create the descriptor is killed: running without the filter is the one outcome the flag exists to prevent (`packages/tools/src/operations.ts:838`). The background shell takes the same path (`packages/tools/src/background.ts:907`).
+
+`confineSpawn` does not carry the filter (`packages/tools/src/operations.ts:568`). It hands an argv to a caller that owns its own spawn, and that caller has no descriptor to offer; a `--seccomp` it could not honour would make bwrap fail to start (`packages/tools/src/operations.ts:643`). MCP stdio servers and hook commands therefore run without it, and the filter covers Bash calls and background shells only.
+
+The unit tests read the bytes back as a program and run them against sample `seccomp_data`, so an opcode or jump that refuses the wrong call fails (`packages/tools/test/sandbox-seccomp.test.ts:1`). The argv tests pin the flag as the last option before `--` in both Linux shapes (`packages/tools/test/sandbox-native.test.ts:672`). The smoke test loads the filter through a real bwrap and compares a Python probe with and without it: `AF_INET` connects and `AF_VSOCK` returns `ENOSYS 38` under the filter, and the control without the filter does not return `ENOSYS 38` (`packages/tools/test/sandbox-bwrap-smoke.test.ts:814`). A second smoke row writes the program through the executor's own pipe instead of a file and reads the kernel's answer, `Seccomp: 2`, from `/proc/self/status`; its control without the filter reads `Seccomp: 0` (`packages/tools/test/sandbox-bwrap-smoke.test.ts:864`). A manual run in WSL against bubblewrap 0.9.0 on 2026-10-24 was green for both shapes.
+
 ### Windows: the AppContainer backend
 
 `appcontainer.ts` is the Windows back end (`packages/tools/src/sandbox/appcontainer.ts:1`). The module wires both halves: the profile and spawn half, and the ACL grant half (`packages/tools/src/sandbox/appcontainer.ts:1`). The grant half holds `acquireWorkspaceGrant` and `releaseWorkspaceGrant`, refcounted per profile, and it covers every writable root the policy names, not only the workspace (`packages/tools/src/sandbox/appcontainer.ts:1`). `resolveSandboxExecution` has an `appcontainer` branch, and `exec` uses it (`packages/tools/src/sandbox/appcontainer.ts:1`). The grant comes before the spawn, and the release runs in a `finally` (`packages/tools/src/sandbox/appcontainer.ts:1`). An abort or a failed spawn cannot leak an ACE (`packages/tools/src/sandbox/appcontainer.ts:1`). Selection is not this module's question: whether production runs any of this is decided in `appcontainer-probe.ts` alone (`packages/tools/src/sandbox/appcontainer-probe.ts:1`).
@@ -961,6 +982,7 @@ The 2026-10-16 CI record is the bridge row's first real-machine run, and the fai
 | `packages/tools/src/sandbox/index.ts` | `resolveSandboxExecution`: the six outcomes, the branch order, and `networkConfinement`. |
 | `packages/tools/src/sandbox/seatbelt.ts` | The macOS profile generator and the `sandbox-exec` argv. |
 | `packages/tools/src/sandbox/bwrap.ts` | The Linux argv builder and its mount list. |
+| `packages/tools/src/sandbox/seccomp.ts` | The raw cBPF syscall filter and its descriptor plumbing. |
 | `packages/tools/src/sandbox/bridge.ts` | The Linux loopback bridge: the socket pairs, the two argv shapes, and the never-settling server. |
 | `packages/tools/src/sandbox/bridge-main.ts` | The source-checkout entry the wrapper starts; a compiled build reaches the same code through `__bridge`. |
 | `packages/tools/src/sandbox/appcontainer.ts` | The Windows AppContainer backend: the profile, the confined spawn, and the refcounted ACL grant. |

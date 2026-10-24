@@ -12,6 +12,7 @@ export function buildBwrapArgs(
 	command: string[],
 	exists: (path: string) => boolean = () => true,
 	bridge?: UnixBridge,
+	seccompFd?: number,
 ): string[] {
 	// The bridge only ever wraps a command the namespace is about to cut off.
 	// On an open axis there is no namespace and nothing to bridge; with no
@@ -25,7 +26,9 @@ export function buildBwrapArgs(
 	const effective = bridged ?? command;
 
 	if (policy.fileSystem.kind === "unrestricted") {
-		return policy.network === "enabled" ? [...command] : [...fullFilesystemArgs(bridged), "--", ...effective];
+		return policy.network === "enabled"
+			? [...command]
+			: [...fullFilesystemArgs(bridged, seccompFd), "--", ...effective];
 	}
 
 	const writable = policy.fileSystem.entries.filter((entry) => canWrite(entry.access));
@@ -73,6 +76,9 @@ export function buildBwrapArgs(
 		// interfaces and nothing the host owns — and it is granted only when
 		// a bridge is actually in the argv. Without one the drop stays total.
 		...(bridged === undefined ? [] : ["--cap-add", "CAP_NET_ADMIN"]),
+		// Last option before the command: bubblewrap applies the filter after
+		// every mount and namespace is in place and immediately before exec.
+		...(seccompFd === undefined ? [] : ["--seccomp", String(seccompFd)]),
 		"--",
 		...effective,
 	];
@@ -113,7 +119,7 @@ function namespaceArgs(network: SandboxPolicy["network"]): string[] {
  * flags. Reached only by the branch documented on `buildBwrapArgs`; the fully
  * unconfined case returns the command instead of building this.
  */
-function fullFilesystemArgs(bridged: string[] | undefined): string[] {
+function fullFilesystemArgs(bridged: string[] | undefined, seccompFd: number | undefined): string[] {
 	return [
 		"--new-session",
 		"--die-with-parent",
@@ -129,5 +135,9 @@ function fullFilesystemArgs(bridged: string[] | undefined): string[] {
 		// `buildBwrapArgs`: only a bridged command needs to configure its own
 		// namespace's loopback.
 		...(bridged === undefined ? [] : ["--cap-add", "CAP_NET_ADMIN"]),
+		// The filesystem is open here, but the network axis is still the
+		// namespace's. The syscall filter is part of that boundary, not the
+		// filesystem's, so it rides along.
+		...(seccompFd === undefined ? [] : ["--seccomp", String(seccompFd)]),
 	];
 }

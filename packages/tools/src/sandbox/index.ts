@@ -123,6 +123,14 @@ export interface ResolveSandboxOptions {
 	 * consumes it.
 	 */
 	networkBridge?: UnixBridge;
+	/**
+	 * The descriptor number the bwrap argv should load its syscall filter from,
+	 * when the caller can hand one over. The two spawn sites that keep the
+	 * descriptor open pass the fixed number from `seccomp.ts`; a caller that only borrows the
+	 * argv — the MCP and hook transports — leaves this unset, and the command
+	 * runs without the filter rather than with an argv its spawn cannot honour.
+	 */
+	seccompFd?: number;
 	platform?: SandboxPlatform;
 	/** Whether the platform's native backend is installed. Injected so this is testable. */
 	hasNativeBackend?: boolean;
@@ -423,7 +431,7 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	const args =
 		platform === "darwin"
 			? buildSeatbeltArgs(present, options.command, options.networkPorts)
-			: buildBwrapArgs(present, options.command, exists, options.networkBridge);
+			: buildBwrapArgs(present, options.command, exists, options.networkBridge, options.seccompFd);
 
 	return { kind: "native", execution: { argv: [program, ...args], simulated: false }, program };
 }

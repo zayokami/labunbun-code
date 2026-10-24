@@ -669,6 +669,22 @@ describe("buildBwrapArgs", () => {
 		]);
 	});
 
+	test("a syscall descriptor is the last option before the command", () => {
+		const argv = buildBwrapArgs(POLICY, COMMAND, undefined, undefined, 3);
+		expect(wrapperOf(argv, COMMAND).slice(-4)).toEqual(["--cap-drop", "ALL", "--seccomp", "3"]);
+		// The flag is an option, not an operand: it has to sit before the
+		// separator, or bwrap hands it to the command as an argument.
+		const separator = argv.indexOf("--");
+		expect(argv.slice(separator - 2, separator)).toEqual(["--seccomp", "3"]);
+	});
+
+	test("the unrestricted-filesystem branch carries the filter too", () => {
+		const argv = buildBwrapArgs({ ...UNRESTRICTED, network: "restricted" }, COMMAND, undefined, undefined, 7);
+		const separator = argv.indexOf("--");
+		expect(argv.slice(separator - 2, separator)).toEqual(["--seccomp", "7"]);
+		expect(wrapperOf(argv, COMMAND).slice(-2)).toEqual(["--seccomp", "7"]);
+	});
+
 	test("a .git path is never in a writable position", () => {
 		const mounts = mountsOf(buildBwrapArgs(POLICY, COMMAND)).filter(
 			(mount) => mount.source === GIT || mount.target === GIT,

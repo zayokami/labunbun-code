@@ -31,6 +31,7 @@ import {
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
 import { type NetworkProxy, portsOf, startNetworkProxy } from "./sandbox/proxy.ts";
+import { feedSeccompFilter, SECCOMP_FD, seccompFilter } from "./sandbox/seccomp.ts";
 import { isFileSync, pathCandidates } from "./sandbox/toolchain-roots.ts";
 
 export type { SandboxExecution } from "./sandbox/index.ts";
@@ -639,6 +640,13 @@ export class ChildProcessExecOperations implements ExecOperations {
 		// (`needsNetworkProxy`), so the wrapper and the listener cannot disagree
 		// about which mode this command is in.
 		const proxy = sandbox ? await this.#proxyFor(sandbox) : undefined;
+		// The syscall filter rides on a pipe this executor owns, so it is built
+		// here rather than in the resolver: `confineSpawn` hands the argv to a
+		// caller that owns its own spawn and has no descriptor to offer, and a
+		// `--seccomp` it could not honour would make bwrap fail to start. An
+		// architecture with no table gets no filter, never a guessed one.
+		const seccomp =
+			sandbox !== undefined && this.#runtime.platform === "linux" ? seccompFilter(process.arch) : undefined;
 
 		// The shell is named here and nowhere else, so this is the only place the
 		// argv tail a wrapper has to enclose can be built. `resolveSandboxExecution`
@@ -661,6 +669,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 					// actually up.
 					networkPorts: proxy === undefined ? undefined : portsOf(proxy),
 					networkBridge: proxy?.bridge,
+					seccompFd: seccomp === undefined ? undefined : SECCOMP_FD,
 				})
 			: ({ kind: "unconfined" } as const);
 		// Refused before anything is spawned: the policy permits no write and no wrapper can be placed here.
@@ -677,6 +686,10 @@ export class ChildProcessExecOperations implements ExecOperations {
 			resolution.kind === "native"
 				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
 				: [shellCommand, ...args(command)];
+		// Only the native branch has an argv that names the descriptor. The
+		// filter was offered to the resolver above, so the two agree on whether
+		// fd 3 exists.
+		const seccompProgram = resolution.kind === "native" ? seccomp : undefined;
 
 		// The proxy's variables go **after** the caller's, not before: a caller
 		// that names `HTTP_PROXY` is stating where its traffic goes, and the
@@ -794,12 +807,40 @@ export class ChildProcessExecOperations implements ExecOperations {
 
 		return new Promise((resolve) => {
 			const startedAt = Date.now();
+			// fd 3 carries the filter when the argv above names it. It is a pipe
+			// rather than a file so the program never touches the filesystem on
+			// its way to bwrap, and the child reads it to EOF while parsing
+			// arguments.
 			const child = spawn(program, programArgs, {
 				cwd,
 				windowsHide: true,
 				env: childEnv,
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: seccompProgram === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"],
 			});
+			// The type definitions spell out overloads only for three-slot stdio
+			// arrays, so the four-slot form falls back to the ChildProcess whose
+			// streams may be null. Slots 1 and 2 name pipes in both arrays above,
+			// and they are read once through this guard so no handler carries a
+			// null check for a shape the literal rules out.
+			const childOut = child.stdout;
+			const childErr = child.stderr;
+			if (childOut === null || childErr === null) {
+				child.kill("SIGKILL");
+				resolve({
+					stdout: "",
+					stderr: "spawn did not create the piped stdout/stderr it asked for",
+					exitCode: 127,
+					killed: true,
+					sandboxBackend: runBackend,
+				});
+				return;
+			}
+			if (seccompProgram !== undefined && !feedSeccompFilter(child, seccompProgram)) {
+				// The argv promised a descriptor this spawn did not create. Running
+				// without the filter is the one outcome the flag exists to prevent,
+				// so the child is ended instead; the close path reports the signal.
+				child.kill("SIGKILL");
+			}
 
 			// The unbounded strings, kept only when there is no capture; the capture
 			// is what a spilled call accumulates into instead, and the two never
@@ -888,9 +929,9 @@ export class ChildProcessExecOperations implements ExecOperations {
 				}, timeoutMs);
 			}
 
-			child.stdout.setEncoding("utf8");
-			child.stderr.setEncoding("utf8");
-			child.stdout.on("data", (chunk: string) => {
+			childOut.setEncoding("utf8");
+			childErr.setEncoding("utf8");
+			childOut.on("data", (chunk: string) => {
 				// Once handed off, this call's windows on the streams belong to the
 				// adopter's log: chunks still forward through `onOutput`, but
 				// accumulating them here would grow without bound for the life of a
@@ -902,7 +943,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 				}
 				onOutput?.(chunk);
 			});
-			child.stderr.on("data", (chunk: string) => {
+			childErr.on("data", (chunk: string) => {
 				if (!settled) {
 					if (capture) capture.pushErr(chunk);
 					else stderr += chunk;

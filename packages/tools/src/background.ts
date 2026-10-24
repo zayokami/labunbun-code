@@ -20,6 +20,7 @@ import {
 	spawnConfined,
 } from "./sandbox/appcontainer.ts";
 import { detectRuntime, resolveSandboxExecution, type SandboxRuntime } from "./sandbox/index.ts";
+import { feedSeccompFilter, SECCOMP_FD, seccompFilter } from "./sandbox/seccomp.ts";
 
 /** How much of a shell's log one read may bring back. */
 const MAX_SHELL_OUTPUT_CHARS = 30_000;
@@ -797,6 +798,11 @@ export class BackgroundShellManager {
 		// nothing and gets the dead-network shape.
 		const networkPorts = sandbox ? await this.#operations.networkPortsFor?.(sandbox) : undefined;
 		const networkBridge = sandbox ? await this.#operations.networkBridgeFor?.(sandbox) : undefined;
+		// Same filter, same descriptor, same pipe as the foreground path: a
+		// background shell outlives the call but not the policy, so it carries
+		// the syscall boundary too.
+		const seccomp =
+			sandbox !== undefined && this.#runtime.platform === "linux" ? seccompFilter(process.arch) : undefined;
 		const resolution = sandbox
 			? resolveSandboxExecution({
 					policy: sandbox,
@@ -808,6 +814,7 @@ export class BackgroundShellManager {
 					executableRoots: this.#runtime.executableRoots,
 					networkPorts,
 					networkBridge,
+					seccompFd: seccomp === undefined ? undefined : SECCOMP_FD,
 				})
 			: ({ kind: "unconfined" } as const);
 		// Refused the way the container refusal below is: thrown, so the caller reports it as a tool error and
@@ -888,12 +895,20 @@ export class BackgroundShellManager {
 				resolution.kind === "native"
 					? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
 					: [shellCommand, ...args(command)];
+			// Only the native branch's argv names fd 3, for the reason the
+			// foreground spawn gives.
+			const seccompProgram = resolution.kind === "native" ? seccomp : undefined;
 			proc = spawn(program, programArgs, {
 				cwd,
 				windowsHide: true,
 				env: proxyEnv ? { ...process.env, ...proxyEnv } : process.env,
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: seccompProgram === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"],
 			});
+			if (seccompProgram !== undefined && !feedSeccompFilter(proc, seccompProgram)) {
+				// A shell that could not receive the promised filter is ended, not
+				// left running behind an argv that describes a boundary it lacks.
+				proc.kill("SIGKILL");
+			}
 		}
 
 		const info: BackgroundShell = {

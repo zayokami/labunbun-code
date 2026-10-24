@@ -61,13 +61,14 @@
 
 import { afterAll, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
 import { buildBwrapArgs } from "../src/sandbox/bwrap.ts";
 import { detectNativeBackend } from "../src/sandbox/index.ts";
+import { feedSeccompFilter, SECCOMP_FD, seccompFilter } from "../src/sandbox/seccomp.ts";
 import { workspacePolicy } from "../src/sandbox/workspace-policy.ts";
 
 /**
@@ -784,6 +785,124 @@ smoke("CONTROL: without the bridge the same connect has nowhere to go", async ()
 	const run = spawnSync("bwrap", argv, { encoding: "utf8", timeout: 15000 });
 	expect(run.stdout).not.toBe("PING");
 	expect(run.status, `connect was supposed to fail without a bridge: ${run.stderr.slice(0, 300)}`).not.toBe(0);
+});
+
+/** Run the probe script under bwrap, optionally with the filter on fd 3. */
+function runSocketProbe(
+	policy: SandboxPolicy,
+	probePath: string,
+	filterPath: string | undefined,
+): { status: number | null; stdout: string; stderr: string } {
+	const argv = buildBwrapArgs(
+		policy,
+		["/bin/sh", "-c", 'python3 "$1"', "probe", probePath],
+		(path) => existsSync(path),
+		undefined,
+		filterPath === undefined ? undefined : SECCOMP_FD,
+	);
+	const stdio: Array<"ignore" | "pipe" | number> = ["ignore", "pipe", "pipe"];
+	const fd = filterPath === undefined ? undefined : openSync(filterPath, "r");
+	if (fd !== undefined) stdio.push(fd);
+	try {
+		const result = spawnSync("bwrap", argv, { encoding: "utf8", timeout: 15000, stdio });
+		return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+smoke("the syscall filter reaches the command through fd 3", () => {
+	const filter = seccompFilter(process.arch);
+	if (filter === undefined) {
+		console.warn(`[bwrap-smoke] no seccomp table for ${process.arch}, so the filter row has nothing to load`);
+		return;
+	}
+	if (spawnSync("python3", ["--version"]).status !== 0) {
+		console.warn(`[bwrap-smoke] python3 is not installed, so the socket probe cannot run`);
+		return;
+	}
+
+	const { workspace, git, outside } = workspaceFixture();
+	const probePath = join(workspace, "socket-probe.py");
+	const filterPath = join(outside, "seccomp.bpf");
+	writeFileSync(
+		probePath,
+		[
+			"import socket",
+			"s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+			"s.close()",
+			'print("INET_OK")',
+			"try:",
+			"    socket.socket(40, socket.SOCK_STREAM)",
+			"except OSError as error:",
+			'    print("VSOCK_ERR", error.errno)',
+			"else:",
+			'    print("VSOCK_OK")',
+			"",
+		].join("\n"),
+		"utf8",
+	);
+	writeFileSync(filterPath, filter);
+	const policy = policyFor(workspace, [git]);
+
+	const filtered = runSocketProbe(policy, probePath, filterPath);
+	expect(filtered.status, `filtered probe failed: ${filtered.stderr.slice(0, 300)}`).toBe(0);
+	expect(filtered.stdout).toContain("INET_OK");
+	// 38 is ENOSYS. The filter refuses the family before the kernel sees it, so
+	// the answer is the same one a kernel without AF_VSOCK would give.
+	expect(filtered.stdout).toContain("VSOCK_ERR 38");
+
+	// The control: the same probe without the descriptor. A kernel that does not
+	// have AF_VSOCK answers with EAFNOSUPPORT rather than ENOSYS, so this row
+	// separates "the filter spoke" from "the platform did".
+	const open = runSocketProbe(policy, probePath, undefined);
+	expect(open.status, `control probe failed: ${open.stderr.slice(0, 300)}`).toBe(0);
+	expect(open.stdout).toContain("INET_OK");
+	expect(open.stdout).not.toContain("VSOCK_ERR 38");
+});
+
+smoke("the executor's pipe carries the filter to bwrap", async () => {
+	const filter = seccompFilter(process.arch);
+	if (filter === undefined) {
+		console.warn(`[bwrap-smoke] no seccomp table for ${process.arch}, so the pipe row has nothing to load`);
+		return;
+	}
+
+	const { workspace, git } = workspaceFixture();
+	const policy = policyFor(workspace, [git]);
+	const run = async (withFilter: boolean) => {
+		const argv = buildBwrapArgs(
+			policy,
+			["/bin/sh", "-c", "grep Seccomp /proc/self/status"],
+			(path) => existsSync(path),
+			undefined,
+			withFilter ? SECCOMP_FD : undefined,
+		);
+		const child = withFilter
+			? spawn("bwrap", argv, { stdio: ["ignore", "pipe", "pipe", "pipe"] })
+			: spawn("bwrap", argv, { stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.on("data", (chunk) => (stdout += chunk));
+		child.stderr?.on("data", (chunk) => (stderr += chunk));
+		if (withFilter) expect(feedSeccompFilter(child, filter)).toBe(true);
+		const status = await new Promise<number | null>((resolve) => {
+			child.on("close", (code) => resolve(code));
+		});
+		return { status, stdout, stderr };
+	};
+
+	// The parent writes the program into a pipe, the way `exec` and the
+	// background shell do. `/proc/self/status` reports filter mode 2 once the
+	// kernel has one, so this reads the kernel's own answer rather than bwrap's
+	// exit code: an argv that merely names `--seccomp 3` cannot produce it.
+	const filtered = await run(true);
+	expect(filtered.status, `filtered probe failed: ${filtered.stderr.slice(0, 300)}`).toBe(0);
+	expect(filtered.stdout).toContain("Seccomp:\t2");
+
+	const control = await run(false);
+	expect(control.status, `control probe failed: ${control.stderr.slice(0, 300)}`).toBe(0);
+	expect(control.stdout).toContain("Seccomp:\t0");
 });
 
 test("where bwrap is installed, this file does not skip", () => {
