@@ -103,6 +103,8 @@ const BUILT_IN_REFS = [
 	"anthropic/claude-haiku-4-5",
 	"deepseek/deepseek-flash",
 	"deepseek/deepseek-v4-pro",
+	"kimi/kimi-k3.1-pro",
+	"kimi/kimi-k3.1-pro-highspeed",
 	"kimi/kimi-k3",
 	"kimi/kimi-k2.7-code",
 	"kimi/kimi-k2.7-code-highspeed",
@@ -175,7 +177,7 @@ const BUILT_IN_REFS = [
 	"ollama-cloud/mistral-large-3:675b",
 	"ollama-cloud/nemotron-3-ultra",
 	"ollama-cloud/gpt-oss:20b",
-	// The gateway: 85 Zen rows and 33 Go rows, each on both wires — 236 references,
+	// The gateway: 85 Zen rows and 34 Go rows, each on both wires — 238 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
 	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
@@ -190,7 +192,10 @@ const BUILT_IN_REFS = [
 	// `ling-3.1-flash-free` and `muse-spark-1.2-contributor-free`, Go's `grok-4.5`,
 	// `kimi-k2.6`, `qwen3.6-plus` and `qwen3.7-max`. The re-check also took two ids
 	// off the unpriced list — `deepseek-v4-flash-free` and `mimo-v2.5-free` were
-	// named there and Zen's listing no longer serves either.
+	// named there and Zen's listing no longer serves either. `kimi-k3.1-pro` joined
+	// on 2026-10-24, the day it shipped: Go's listing serves it and models.dev
+	// prices it at the vendor's figures; Zen's listing does not, so the Zen tables
+	// stay silent, and the highspeed twin is first-party only.
 	"opencode-zen/big-pickle",
 	"opencode-zen/claude-fable-5",
 	"opencode-zen/claude-fable-5-1",
@@ -293,6 +298,7 @@ const BUILT_IN_REFS = [
 	"opencode-go/kimi-k2.6",
 	"opencode-go/kimi-k2.7-code",
 	"opencode-go/kimi-k3",
+	"opencode-go/kimi-k3.1-pro",
 	"opencode-go/longcat-2.0",
 	"opencode-go/longcat-2.5-preview-free",
 	"opencode-go/mimo-v2.5",
@@ -411,6 +417,7 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/kimi-k2.6",
 	"opencode-go-oai/kimi-k2.7-code",
 	"opencode-go-oai/kimi-k3",
+	"opencode-go-oai/kimi-k3.1-pro",
 	"opencode-go-oai/longcat-2.0",
 	"opencode-go-oai/longcat-2.5-preview-free",
 	"opencode-go-oai/mimo-v2.5",
@@ -427,12 +434,13 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/qwen3.8-flash",
 	"opencode-go-oai/qwen3.8-max",
 	"opencode-go-oai/space-bunny",
-	// OpenRouter's six, in the table's own order: the sweep described beside the
+	// OpenRouter's seven, in the table's own order: the sweep described beside the
 	// rows in `model.ts`.
 	"openrouter/anthropic/claude-fable-5.1",
 	"openrouter/deepseek/deepseek-v4.1-flash",
 	"openrouter/google/gemini-3.8-flash",
 	"openrouter/moonshotai/kimi-k3",
+	"openrouter/moonshotai/kimi-k3.1-pro",
 	"openrouter/openai/gpt-6.1-sol",
 	"openrouter/x-ai/grok-4.7",
 ];
@@ -775,6 +783,8 @@ describe("the built-in catalog", () => {
 		).toEqual([
 			["deepseek/deepseek-flash", 0.3, 1.2, 0.006, 0],
 			["deepseek/deepseek-v4-pro", 1.32, 3.96, 0.044, 0],
+			["kimi/kimi-k3.1-pro", 2, 10, 0.2, 2],
+			["kimi/kimi-k3.1-pro-highspeed", 4, 20, 0.2, 4],
 			["kimi/kimi-k3", 3, 15, 0.3, 3],
 			["kimi/kimi-k2.7-code", 0.95, 4, 0.19, 0],
 			["kimi/kimi-k2.7-code-highspeed", 1.9, 8, 0.38, 0],
@@ -989,6 +999,7 @@ describe("the built-in catalog", () => {
 			["opencode-go/kimi-k2.6", 0.95, 4, 0.16, 0],
 			["opencode-go/kimi-k2.7-code", 0.95, 4, 0.19, 0],
 			["opencode-go/kimi-k3", 3, 15, 0.3, 0],
+			["opencode-go/kimi-k3.1-pro", 2, 10, 0.2, 2],
 			["opencode-go/longcat-2.0", 0.3, 1.2, 0.006, 0],
 			["opencode-go/longcat-2.5-preview-free", 0, 0, 0, 0],
 			["opencode-go/mimo-v2.5", 0.14, 0.28, 0.0028, 0],
@@ -1107,6 +1118,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/kimi-k2.6", 0.95, 4, 0.16, 0],
 			["opencode-go-oai/kimi-k2.7-code", 0.95, 4, 0.19, 0],
 			["opencode-go-oai/kimi-k3", 3, 15, 0.3, 0],
+			["opencode-go-oai/kimi-k3.1-pro", 2, 10, 0.2, 2],
 			["opencode-go-oai/longcat-2.0", 0.3, 1.2, 0.006, 0],
 			["opencode-go-oai/longcat-2.5-preview-free", 0, 0, 0, 0],
 			["opencode-go-oai/mimo-v2.5", 0.14, 0.28, 0.0028, 0],
@@ -1127,6 +1139,7 @@ describe("the built-in catalog", () => {
 			["openrouter/deepseek/deepseek-v4.1-flash", 0.3, 1.2, 0.006, 0],
 			["openrouter/google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0.0417],
 			["openrouter/moonshotai/kimi-k3", 0.73, 10, 0.55, 0],
+			["openrouter/moonshotai/kimi-k3.1-pro", 2, 10, 0.2, 0],
 			["openrouter/openai/gpt-6.1-sol", 2, 10, 0.1, 2.5],
 			["openrouter/x-ai/grok-4.7", 2, 6, 0.5, 0],
 		]);
@@ -1158,7 +1171,9 @@ describe("the built-in catalog", () => {
 			["anthropic/claude-haiku-4-5", 200_000, 64_000],
 			["deepseek/deepseek-flash", 1_000_000, 384_000],
 			["deepseek/deepseek-v4-pro", 1_000_000, 384_000],
-			// K3's published default, not its 1M settable maximum.
+			// K3.1's and K3's published default, not their 1M settable maximum.
+			["kimi/kimi-k3.1-pro", 1_048_576, 131_072],
+			["kimi/kimi-k3.1-pro-highspeed", 1_048_576, 131_072],
 			["kimi/kimi-k3", 1_048_576, 131_072],
 			["kimi/kimi-k2.7-code", 262_144, 32_768],
 			["kimi/kimi-k2.7-code-highspeed", 262_144, 32_768],
@@ -1360,6 +1375,7 @@ describe("the built-in catalog", () => {
 			["opencode-go/kimi-k2.6", 262_144, 65_536],
 			["opencode-go/kimi-k2.7-code", 262_144, 262_144],
 			["opencode-go/kimi-k3", 1_048_576, 131_072],
+			["opencode-go/kimi-k3.1-pro", 1_048_576, 131_072],
 			["opencode-go/longcat-2.0", 1_000_000, 131_072],
 			["opencode-go/longcat-2.5-preview-free", 1_000_000, 131_072],
 			["opencode-go/mimo-v2.5", 1_000_000, 128_000],
@@ -1478,6 +1494,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/kimi-k2.6", 262_144, 65_536],
 			["opencode-go-oai/kimi-k2.7-code", 262_144, 262_144],
 			["opencode-go-oai/kimi-k3", 1_048_576, 131_072],
+			["opencode-go-oai/kimi-k3.1-pro", 1_048_576, 131_072],
 			["opencode-go-oai/longcat-2.0", 1_000_000, 131_072],
 			["opencode-go-oai/longcat-2.5-preview-free", 1_000_000, 131_072],
 			["opencode-go-oai/mimo-v2.5", 1_000_000, 128_000],
@@ -1498,6 +1515,7 @@ describe("the built-in catalog", () => {
 			["openrouter/deepseek/deepseek-v4.1-flash", 1_048_576, 393_216],
 			["openrouter/google/gemini-3.8-flash", 1_048_576, 65_536],
 			["openrouter/moonshotai/kimi-k3", 1_048_576, 943_718],
+			["openrouter/moonshotai/kimi-k3.1-pro", 1_048_576, 943_718],
 			["openrouter/openai/gpt-6.1-sol", 1_050_000, 128_000],
 			["openrouter/x-ai/grok-4.7", 500_000, 450_000],
 		]);
@@ -1524,12 +1542,14 @@ describe("the built-in catalog", () => {
 		// all (MiniMax), or six depths with only the ends described (Mistral) —
 		// and the resellers are the ones whose vendor published nothing about
 		// thinking at all. Both are right to say "not medium", for reasons that
-		// have nothing to do with each other, and the second group is 236 rows
+		// have nothing to do with each other, and the second group is 238 rows
 		// long — a third of the catalog — which would bury the first. The gateway
 		// rows are held by the assertion directly below, which is exhaustive over
 		// the same set.
 		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning && !isReseller(ref));
 		expect(alwaysThinking).toEqual([
+			"kimi/kimi-k3.1-pro",
+			"kimi/kimi-k3.1-pro-highspeed",
 			"kimi/kimi-k3",
 			"kimi/kimi-k2.7-code",
 			"kimi/kimi-k2.7-code-highspeed",
@@ -1582,7 +1602,7 @@ describe("the built-in catalog", () => {
 			"ollama-cloud/gemma4:31b",
 			"ollama-cloud/glm-5.3",
 			"ollama-cloud/mistral-large-3:675b",
-			// OpenRouter's six, and the reason is one layer up from the plans': the
+			// OpenRouter's seven, and the reason is one layer up from the plans': the
 			// host's listing names `reasoning_effort` among every one of these ids'
 			// accepted parameters, but nothing states what an effort maps to behind
 			// the route, so no row claims "medium" and the default sends nothing.
@@ -1590,6 +1610,7 @@ describe("the built-in catalog", () => {
 			"openrouter/deepseek/deepseek-v4.1-flash",
 			"openrouter/google/gemini-3.8-flash",
 			"openrouter/moonshotai/kimi-k3",
+			"openrouter/moonshotai/kimi-k3.1-pro",
 			"openrouter/openai/gpt-6.1-sol",
 			"openrouter/x-ai/grok-4.7",
 		]);
@@ -1608,7 +1629,7 @@ describe("the built-in catalog", () => {
 		// without the flag set is a 400 on its first request, and nothing else in
 		// the suite would notice.
 		const gateway = BUILT_IN_REFS.filter(isReseller);
-		expect(gateway).toHaveLength(236);
+		expect(gateway).toHaveLength(238);
 		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
 		// And none of them claims a thinking shape either, for the same reason:
 		// the shape is what the 400 is about.
@@ -1973,7 +1994,7 @@ describe("ids that were retired", () => {
 		expect(resolveModel("gpt-6.1-sol")?.provider).toBe("openai");
 		expect(resolveModel("gpt-6.1-sol")?.pricing?.cacheRead).toBe(0.1);
 		// Exhaustive, and about the right thing: no bare id may *land on* a gateway
-		// row. Most of the 236 do resolve bare — to the vendor that makes the model
+		// row. Most of the 238 do resolve bare — to the vendor that makes the model
 		// — which is the rule working, not the rule failing, so the check is on
 		// where the resolution goes rather than on whether one happens. A fifth
 		// gateway added to the table without a decision here fails this.

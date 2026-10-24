@@ -704,6 +704,8 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }],
 	["kimi-k2.7-code", "Kimi K2.7 Code", 262_144, 262_144, { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 }],
 	["kimi-k3", "Kimi K3", 1_048_576, 131_072, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }],
+	// Added 2026-10-24, the day it shipped: Go's listing serves it and models.dev prices it at the vendor's figures ($2/$10 with a $0.20 read and a $2 write), on the same 1M window and 131k default output as the first-party row.
+	["kimi-k3.1-pro", "Kimi K3.1 Pro", 1_048_576, 131_072, { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2 }],
 	["longcat-2.0", "LongCat-2.0", 1_000_000, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 }],
 	[
 		"longcat-2.5-preview-free",
@@ -899,8 +901,23 @@ const BUILT_IN_MODELS: Model[] = [
 		reasoning: true,
 		pricing: { input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
 	}),
-	// Kimi (Moonshot), international host; another host needs `KIMI_BASE_URL`; K2.x and K3 publish no output cap, only the "window minus prompt" rule.
+	// Kimi (Moonshot), international host; another host needs `KIMI_BASE_URL`; K2.x, K3 and K3.1 publish no output cap, only the "window minus prompt" rule.
+	// K3.1 Pro entered on 2026-10-24, the day it shipped: the vendor's price table states 2/10 with 0.2 reads and a 2 write at the default five-minute tier,
+	// the highspeed twin 4/20 with the same read and a 4 write, and both carry the family's 1M window and 131k default output. It always thinks (low/high/max,
+	// default max), so `reasoning` stays false: "medium" is not a value this vendor takes.
 	// Long-form design notes: docs/dev/ai-layer.md
+	openAICompatModel("kimi", KIMI_BASE, "KIMI_API_KEY", "kimi-k3.1-pro", "Kimi K3.1 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		apiKeyEnvFallbacks: ["MOONSHOT_API_KEY"],
+		pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2 },
+	}),
+	openAICompatModel("kimi", KIMI_BASE, "KIMI_API_KEY", "kimi-k3.1-pro-highspeed", "Kimi K3.1 Pro Highspeed", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		apiKeyEnvFallbacks: ["MOONSHOT_API_KEY"],
+		pricing: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 4 },
+	}),
 	openAICompatModel("kimi", KIMI_BASE, "KIMI_API_KEY", "kimi-k3", "Kimi K3", {
 		contextWindow: 1_048_576,
 		maxOutputTokens: 131_072,
@@ -1326,10 +1343,11 @@ const BUILT_IN_MODELS: Model[] = [
 		}),
 	),
 	// OpenRouter, last: one host on OpenAI's wire, selling other vendors' models
-	// under ids that spell the vendor first. Six flagships, not a catalog — the
+	// under ids that spell the vendor first. Seven flagships, not a catalog — the
 	// host lists hundreds, and the startup probe reads the rest out of its own
 	// listing, which answers without a key while the calls these rows carry do
-	// not. Swept 2026-10-12 from `https://openrouter.ai/api/v1/models`. Cache
+	// not. Swept 2026-10-12 from `https://openrouter.ai/api/v1/models`; the K3.1
+	// Pro row joined on 2026-10-24, the day it shipped. Cache
 	// columns are the host's own numbers, and where a row differs from the
 	// vendor's own card the comment on the row says so. `reasoning: false`
 	// everywhere: the listing names `reasoning_effort` among each id's accepted
@@ -1389,6 +1407,14 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 943_718,
 		reasoning: false,
 		pricing: { input: 0.73, output: 10, cacheRead: 0.55, cacheWrite: 0 },
+	}),
+	// The host's listing states the vendor's own figures here (2/10 with a 0.2 read) and no write rate, so the write channel is a real zero; the output cap is the host's 943,718.
+	// Checked 2026-10-24, the day it shipped.
+	openAICompatModel("openrouter", OPENROUTER_BASE, "OPENROUTER_API_KEY", "moonshotai/kimi-k3.1-pro", "Kimi K3.1 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 943_718,
+		reasoning: false,
+		pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 },
 	}),
 	// Base band; above a 272k-token prompt the host charges 4/15/0.2/5. The
 	// first-party row is Responses-only — here the host's listing accepts `tools`
