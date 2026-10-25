@@ -1251,19 +1251,25 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// confined runner owns a raw process handle, so there is no
 		// `ChildProcess` to hand `onTimeout` and a timeout kills.
 		//
-		// The command is a `powershell Start-Sleep`, and that shape is
-		// measured rather than assumed. The two obvious sleepers are both dead
-		// on arrival inside the container: `timeout /t N` refuses to run at all
-		// when its stdin is redirected — the confined child's stdin is a pipe at
-		// EOF — and exits 1 in ~130ms; `ping -n N 127.0.0.1` needs a network the
-		// container does not have (no IP driver) and exits in 40–100ms. A
-		// sleeper that dies before the deadline cannot test a kill. Powershell
-		// lives in System32, reads no stdin, and touches no socket.
+		// The command is a cmd `FOR /L` busy-wait, and that shape is measured
+		// rather than assumed. Every external sleeper this container was offered
+		// dies before the deadline: `timeout /t N` refuses to run at all when its
+		// stdin is redirected — the confined child's stdin is a pipe at EOF — and
+		// exits 1 in ~130ms; `ping -n N 127.0.0.1` needs a network the container
+		// does not have (no IP driver) and exits in 40–100ms; `waitfor /t N` needs
+		// BaseNamedObjects, which the container denies, and exits at once; and a
+		// nested `powershell Start-Sleep` reads System32 and no stdin, but
+		// initialises unreliably under the container token when its cwd is spelled
+		// with an 8.3 short name — which is how the runner's TEMP reads — and has
+		// been seen dying before its first statement. A sleeper that dies before
+		// the deadline cannot test a kill. The loop is a cmd builtin: no child
+		// process, no pipe, no file, no socket, and with `@rem` no output. The
+		// bound is finite only so a kill that stops working cannot spin forever.
 		const cwd = workspace();
 		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
 			const result = await exec.exec({
-				command: "powershell -NoProfile -Command Start-Sleep -Seconds 30",
+				command: "for /l %i in (1,1,100000000) do @rem",
 				cwd,
 				sandbox: containerPolicy(cwd),
 				timeoutMs: 600,
