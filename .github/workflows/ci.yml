@@ -4,7 +4,9 @@ name: CI
 # request, plus a compile on all three platforms. `pnpm lint` is
 # `biome check --error-on-warnings .`, `pnpm typecheck` is `tsc -p
 # tsconfig.check.json`, `pnpm test` is `bun test` — the same three commands a
-# developer runs, not a paraphrase of them.
+# developer runs, not a paraphrase of them. A separate ubuntu `coverage` leg
+# runs that same suite under Bun's instrumentation and uploads lcov; it is not
+# one of the three gates and does not change them.
 #
 # No secrets, deliberately. The suite claims in README that it needs no network
 # and no key, and a repository secret would turn that from a property into an
@@ -12,7 +14,7 @@ name: CI
 # than quietly depend on something the workflow supplies.
 #
 # What this will not check, stated here rather than left to be discovered by
-# assuming coverage:
+# assuming test coverage:
 #   - `packages/tui/test/vim-differential/` is `.mjs` and outside `bun test`. It
 #     needs a real `vim` on the machine, and its exit code 77 means "did not
 #     compare" — a run that could not compare has not earned a pass.
@@ -120,6 +122,78 @@ jobs:
           bun-version: 1.4.4
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+
+  # One coverage leg, on the platform that already runs the suite. Coverage
+  # measures the code, not the host, so a second platform would upload a second
+  # lcov for the same intent. This job deliberately does not change `pnpm test`:
+  # the three `test` legs stay a plain suite, and instrumentation lives here.
+  #
+  # **No coverage threshold.** The repository has no measured full-suite
+  # baseline, and deriving one from a scoped run would be an invented number.
+  # The first run of this job publishes the real per-file table in the step
+  # summary and uploads lcov; a threshold can be added afterwards with headroom
+  # measured from those numbers. Two measured facts about the knobs:
+  #   - the text reporter's `All files` row is the mean of per-file
+  #     percentages, not a line-weighted total, so compare runs via lcov;
+  #   - bunfig's `coverageThreshold` is checked against every file, not that
+  #     row (verified on 1.4.4), so a future gate needs a per-file policy or an
+  #     lcov-total check.
+  # The job does gate on the report being produced: a run that cannot emit lcov
+  # has not earned a pass, the same rule the bwrap and vim differential legs use.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: pnpm install --frozen-lockfile
+      # Bun 1.4.4 writes the text table to stderr and lcov to
+      # `coverage/lcov.info` (verified against this version's `--help`, which
+      # documents `--coverage-reporter=text|lcov`; `--coverage` is explicit for
+      # readability even though the reporter flag implies it). `tee` keeps the
+      # table for the summary step, and `pipefail` (also the Actions default)
+      # preserves Bun's exit status, so a red suite reds this step.
+      - name: test with coverage
+        run: |
+          set -o pipefail
+          pnpm test:coverage 2>&1 | tee coverage-output.txt
+      # `always()` because a failing suite still produces a coverage table and
+      # an lcov file, and both are most useful on the run that went red.
+      - name: write coverage summary
+        if: always()
+        run: |
+          {
+            echo "## Coverage (ubuntu-latest, Bun 1.4.4)"
+            echo
+            if grep -q '^File[[:space:]]*[|][[:space:]]*% Funcs' coverage-output.txt 2>/dev/null; then
+              echo '```'
+              awk '/^File[[:space:]]+[|][[:space:]]*% Funcs/ { in_table = 1; print; next } in_table { if ($0 ~ /^-+[|]/) { print; if (seen_separator) exit; seen_separator = 1; next } print }' coverage-output.txt
+              echo '```'
+            else
+              echo "No coverage table was produced; see the test step log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Presence, not a percentage: Bun 1.4.4 exposes no coverage threshold
+      # flag, and an empty lcov file would otherwise upload as a green artifact.
+      - name: coverage report is real
+        run: |
+          test -s coverage/lcov.info
+          grep -q '^SF:' coverage/lcov.info
+          echo "source files in lcov: $(grep -c '^SF:' coverage/lcov.info)"
+      # Kept on failure too: the lcov from a red run is what explains it.
+      - name: upload lcov
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: coverage/
+          if-no-files-found: warn
 
   # A Linux leg with bubblewrap actually on it.
   #

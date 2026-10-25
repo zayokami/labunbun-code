@@ -4,6 +4,8 @@ dist/
 .DS_Store
 .claude
 
+# `pnpm test:coverage` writes the lcov report here.
+/coverage/
 
 # `bun build --compile` writes a hidden scratch file next to its output and
 # renames it into place; a run that is interrupted leaves a 120 MB one behind.
