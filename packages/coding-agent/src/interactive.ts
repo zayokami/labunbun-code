@@ -1996,6 +1996,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	function setThinkingLevel(level: ThinkingLevel): void {
 		thinkingLevel = level;
+		// Shown as well as told, before the write is attempted: the level is in
+		// force either way, and a failed save must not leave the status line
+		// naming the level the session just left.
+		handle?.setThinkingLevel?.(level);
 		try {
 			writeUserSettingsPatch({ thinkingLevel: level }, home);
 		} catch (error) {
@@ -2106,6 +2110,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	handle = mountRepl({
 		session,
 		modelName: `${model.provider}/${model.id}`,
+		thinkingLevel,
 		theme: resolvedTheme.theme,
 		vimMode: settings.vimMode,
 		emacsMode: settings.emacsMode,

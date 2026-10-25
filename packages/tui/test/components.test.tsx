@@ -275,6 +275,38 @@ describe("StatusLine", () => {
 		expect(lastFrame() ?? "").not.toContain("5s");
 	});
 
+	test("the idle row carries the thinking level when one is set, and only then", () => {
+		const set = render(
+			withTheme(<StatusLine phase="idle" modelName="test-model" elapsedMs={0} thinkingLevel="high" />),
+		);
+		const frame = flatFrame(set.lastFrame() ?? "");
+		expect(frame).toContain("test-model");
+		expect(frame).toContain("think:high");
+		set.unmount();
+
+		// `off` is a decision too — the badge names it rather than hiding it, and
+		// only an unset level means the model's own default is what will run.
+		const off = render(withTheme(<StatusLine phase="idle" modelName="test-model" elapsedMs={0} thinkingLevel="off" />));
+		expect(flatFrame(off.lastFrame() ?? "")).toContain("think:off");
+		off.unmount();
+
+		// Unset is not a level, and a badge for one nobody chose would cost the
+		// idle row the empty frame it draws when it has nothing to report.
+		const unset = render(withTheme(<StatusLine phase="idle" modelName="test-model" elapsedMs={0} />));
+		expect((unset.lastFrame() ?? "").trim()).toBe("");
+		unset.unmount();
+	});
+
+	test("a turn in flight carries the badge beside the model", () => {
+		const { lastFrame, unmount } = render(
+			withTheme(<StatusLine phase="tools" modelName="test-model" thinkingLevel="medium" elapsedMs={3_000} />),
+		);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("think:medium");
+		expect(frame).toContain("test-model");
+		unmount();
+	});
+
 	test("the idle row's context figure reads the same with the percentage split out", () => {
 		// The percentage left the dim so a low one can wear `warning`; what reaches
 		// the screen is the same sentence it was, parentheses and all. The color

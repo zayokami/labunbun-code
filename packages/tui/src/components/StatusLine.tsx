@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@labunbun/ai";
 import { DS4_BATTERY_FULL, type Ds4Battery, type PadServiceStatus, padBatteryLow } from "@labunbun/gamepad";
 import { Text } from "ink";
 import { useEffect, useState } from "react";
@@ -108,6 +109,7 @@ export function backgroundShellRow(shells: UiBackgroundShell[]): string | null {
 export function StatusLine({
 	phase,
 	modelName,
+	thinkingLevel,
 	elapsedMs,
 	contextInfo,
 	outputEstimate,
@@ -120,6 +122,14 @@ export function StatusLine({
 }: {
 	phase: StatusPhase;
 	modelName: string;
+	/**
+	 * The level `/think` put in force. It rides beside the model because the two
+	 * together name what the next request will be, and it is absent whenever the
+	 * model's own default runs: a badge for a level nobody chose would say
+	 * something the session never decided, and would cost the idle row its
+	 * nothing-to-report collapse.
+	 */
+	thinkingLevel?: ThinkingLevel;
 	elapsedMs: number;
 	contextInfo?: { usedTokens: number; threshold: number };
 	/** Live output-token estimate for the in-flight response. */
@@ -180,6 +190,9 @@ export function StatusLine({
 	const contextHead = contextInfo ? ` · ctx ${formatTokens(contextInfo.usedTokens)}` : "";
 	const contextFree = freePercent === undefined ? "" : ` (${freePercent}% free)`;
 	const contextPart = `${contextHead}${contextFree}`;
+	// A setting, not a reading: it belongs in the dim run beside the model name
+	// rather than among the runs that leave the dim to say something live.
+	const thinkingPart = thinkingLevel === undefined ? "" : ` · think:${thinkingLevel}`;
 
 	// The activity's own seconds ride in its label — the turn's elapsed time is
 	// already on the row, and a wait inside it that runs for most of the turn
@@ -194,11 +207,12 @@ export function StatusLine({
 
 	if (phase === "idle" && !activity) {
 		const battery = <BatterySegment pad={pad} />;
-		if (!contextPart && !pad?.battery) return null;
+		if (!contextPart && !pad?.battery && !thinkingPart) return null;
 		return (
 			<Text>
 				<Text dimColor>
 					{modelName}
+					{thinkingPart}
 					{contextHead}
 				</Text>
 				{/* Siblings in an undimmed wrapper rather than one dim Text with a
@@ -222,6 +236,7 @@ export function StatusLine({
 				{FRAMES[frame]} {activityLabel}{" "}
 				<Text dimColor>
 					({modelName}
+					{thinkingPart}
 					{contextPart}
 					{activityCancellable ? " · esc to cancel" : ""})
 				</Text>
@@ -243,6 +258,7 @@ export function StatusLine({
 			{FRAMES[frame]} {label}{" "}
 			<Text dimColor>
 				({formatElapsed(elapsedMs)} · {modelName}
+				{thinkingPart}
 				{outputPart}
 				{contextPart} · esc to interrupt)
 			</Text>

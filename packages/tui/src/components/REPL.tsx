@@ -281,6 +281,7 @@ export function REPL({
 		onModeChange?.(next, previous);
 	}, [getSession, store, onModeChange]);
 	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
+	const thinkingLevel = useStore(store, (s) => s.thinkingLevel);
 	const sessionTitle = useStore(store, (s) => s.sessionTitle);
 	// Ink's own writer, not `process.stdout`: it knows where the frame it drew is,
 	// so it can take it down and put it back around whatever we write.
@@ -928,6 +929,7 @@ export function REPL({
 					<StatusLine
 						phase={statusPhase}
 						modelName={modelName}
+						thinkingLevel={thinkingLevel}
 						elapsedMs={elapsedMs}
 						contextInfo={contextInfo}
 						activity={contextActivity}

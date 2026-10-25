@@ -5,6 +5,7 @@
 
 import type { ActivityRange, AgentSession, ModeChoice, PermissionMode, SandboxMode } from "@labunbun/agent";
 import { describeModeChoice } from "@labunbun/agent";
+import type { ThinkingLevel } from "@labunbun/ai";
 import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
 import type { PickerPreview } from "./components/ListPickerDialog.tsx";
@@ -37,6 +38,8 @@ import {
 export interface ReplAppOptions {
 	session: AgentSession;
 	modelName: string;
+	/** The thinking level in force at mount; `/think` republishes it on the handle. */
+	thinkingLevel?: ThinkingLevel;
 	/**
 	 * Theme to start with. Resolved by the caller — the TUI has no filesystem
 	 * access, so third-party themes are loaded and named upstream of here.
@@ -285,6 +288,11 @@ export interface ReplAppHandle {
 	setSessionTitle(title?: string): void;
 	/** Rename the model shown in the status line (/model switch). */
 	setModelName(name: string): void;
+	/**
+	 * Republish the thinking level the status line badges (`/think`). Undefined
+	 * clears it, which is the unset state the idle row collapses on.
+	 */
+	setThinkingLevel(level: ThinkingLevel | undefined): void;
 }
 
 /**
@@ -453,6 +461,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		// starts on the same palette — nothing to reprint until a choice moves it.
 		themeCommit: options.theme ?? DEFAULT_THEME,
 		modelName: options.modelName,
+		thinkingLevel: options.thinkingLevel,
 		sessionTitle: options.sessionTitle,
 	});
 
@@ -611,6 +620,12 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		},
 		setModelName: (name) => {
 			store.set((s) => ({ ...s, modelName: name }));
+		},
+		setThinkingLevel: (level) => {
+			// Identity guard: `/think` publishes on every call, and the same level
+			// must not rerender a transcript. Undefined is a real value here — it
+			// clears the badge — so the comparison is `===`, not truthiness.
+			store.set((s) => (s.thinkingLevel === level ? s : { ...s, thinkingLevel: level }));
 		},
 		askUser: questionSlot.ask,
 		requestPlanReview: planReviewSlot.request,

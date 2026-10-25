@@ -9,7 +9,7 @@ import {
 	isCompactionBoundary,
 	LENGTH_RECOVERY_MESSAGE,
 } from "@labunbun/agent";
-import type { AgentMessage, ImageContent, TextContent, Usage } from "@labunbun/ai";
+import type { AgentMessage, ImageContent, TextContent, ThinkingLevel, Usage } from "@labunbun/ai";
 import type { ListPickerState } from "./components/ListPickerDialog.tsx";
 import type { PermissionDiff } from "./permission-diff.ts";
 import type { PermissionOption } from "./permission-options.ts";
@@ -273,6 +273,14 @@ export interface UiState {
 	themeCommit: Theme;
 	/** Display name of the active model. In the store so /model switching updates the status line live. */
 	modelName: string;
+	/**
+	 * The level `/think` put in force, or absent when each model's own default
+	 * runs. In the store because the command runs in the app layer and the session
+	 * has no event for the change, and because the status row must follow it
+	 * without a remount. Absent is also what keeps an idle row collapsed: a badge
+	 * for a level nobody chose would cost a line of transcript per screen.
+	 */
+	thinkingLevel?: ThinkingLevel;
 	/**
 	 * The user's name for this session, when `/rename` gave it one. In the store
 	 * because the terminal title reads it every frame after the app layer writes
