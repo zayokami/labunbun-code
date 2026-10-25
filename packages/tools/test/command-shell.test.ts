@@ -13,7 +13,7 @@
  * exercised through its real executable.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundShellManager } from "../src/background.ts";
@@ -145,7 +145,11 @@ describe("PowerShell is the Windows default", () => {
 				timeoutMs: 20_000,
 			});
 			expect(result.exitCode).toBe(0);
-			expect(result.stdout).toContain(spaced);
+			// The long spelling of the same directory: a runner whose TMP is reached
+			// through an 8.3 name (RUNNER~1) has the cwd expanded by PowerShell, and
+			// only the native call expands with it — the plain one returns the short
+			// name it was handed.
+			expect(result.stdout).toContain(realpathSync.native(spaced));
 			expect(result.stdout).toContain("hi there");
 			expect(result.stdout).not.toContain('\\"');
 			expect(result.stderr).toBe("");
