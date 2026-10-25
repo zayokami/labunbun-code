@@ -1,0 +1,5 @@
+[test]
+# The suite writes POSIX shell command text; on Windows a Git Bash is pinned
+# unless the developer named a shell. See test-preload.ts for the search and
+# why the tests that assert shell selection opt out of it themselves.
+preload = ["./test-preload.ts"]

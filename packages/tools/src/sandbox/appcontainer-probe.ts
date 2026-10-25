@@ -24,6 +24,7 @@
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type ShellKind, shellKindOf } from "../shell-kind.ts";
 import {
 	acquireWorkspaceGrant,
 	appContainerAvailable,
@@ -40,6 +41,8 @@ import { detectExecutableRoots, resolveToolchainPrograms } from "./toolchain-roo
 export interface ProbeShell {
 	command: string;
 	args: (cmd: string) => string[];
+	/** Absent on hand-made shells; inferred from the command's name then. */
+	kind?: ShellKind;
 }
 
 export interface AppContainerProbeResult {
@@ -63,12 +66,27 @@ function okMarker(index: number): string {
 /**
  * The one command the probe runs inside the container: the shell's own start
  * as the first marker, every toolchain program with its success marker after
- * it, and the done marker last. `&&` chaining makes the output say how far it
- * got; the double-quoting around each program survives both cmd's and POSIX
- * shells' parsing, and a program path in these positions is the machine's
- * own (resolved from `PATH`), never text a user typed.
+ * it, and the done marker last. The chaining makes the output say how far it
+ * got; the quoting around each program survives the shell's parsing, and a
+ * program path in these positions is the machine's own (resolved from `PATH`),
+ * never text a user typed.
+ *
+ * PowerShell has its own grammar: a quoted path at the start of a statement is
+ * a string rather than a command, so the call operator is required, and `&&`
+ * exists only in PowerShell 7. Semicolons run every step; `$?` stops the chain
+ * where a program failed, which is what the marker pair reads.
  */
-export function probeCommandLine(programs: readonly string[]): string {
+export function probeCommandLine(programs: readonly string[], kind: ShellKind = "cmd"): string {
+	if (kind === "powershell") {
+		const steps = [`Write-Output ${SHELL_MARKER}`];
+		programs.forEach((program, index) => {
+			steps.push(`& "${program}" --version`);
+			steps.push("if (-not $?) { exit 1 }");
+			steps.push(`Write-Output ${okMarker(index)}`);
+		});
+		steps.push(`Write-Output ${DONE_MARKER}`);
+		return steps.join("; ");
+	}
 	const steps = [`echo ${SHELL_MARKER}`];
 	programs.forEach((program, index) => {
 		steps.push(`"${program}" --version`);
@@ -132,7 +150,7 @@ export function classifyProbeRun(run: ProbeRun, programs: readonly string[]): Pr
 			reason:
 				"the session's shell dies inside the container at startup (0xC0000142, STATUS_DLL_INIT_FAILED): " +
 				"the msys-based shells need BaseNamedObjects, which the container denies and no grant restores. " +
-				"Point the session's shell at one the container can run — LBB_BASH_PATH=C:\\Windows\\System32\\cmd.exe — " +
+				"Point the session's shell at one the container can run — LBB_SHELL_PATH to cmd.exe under System32 — " +
 				"and the container is selected; until then the session's commands run outside it",
 		};
 	}
@@ -226,7 +244,10 @@ export function probeAppContainerSelection(
 	try {
 		const confined = run(
 			grant.profile,
-			confinedCommandLine([shellProgram, ...shell.args(probeCommandLine(programs))]),
+			confinedCommandLine([
+				shellProgram,
+				...shell.args(probeCommandLine(programs, shell.kind ?? shellKindOf(shell.command))),
+			]),
 			{
 				cwd: canonicalPathForChild(workspace),
 				env: envBlock,

@@ -308,6 +308,7 @@ function probeOnce(shell: ProbeShell | null): ReturnType<typeof probeAppContaine
 		env.SystemRoot ?? "",
 		env.windir ?? "",
 		env.LBB_BASH_PATH ?? "",
+		env.LBB_SHELL_PATH ?? "",
 	].join("\u0000");
 	if (win32ProbeCache !== null && win32ProbeCache.key === key) return win32ProbeCache.probe;
 	const probe = probeAppContainerSelection(shell);

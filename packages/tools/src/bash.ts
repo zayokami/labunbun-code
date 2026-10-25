@@ -7,6 +7,7 @@ import { createTailBuffer } from "./output-capture.ts";
 import { resolveWritableRoots } from "./sandbox/default-writable-roots.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 import { likelySandboxDenied } from "./sandbox-denial.ts";
+import { type ShellKind, shellKindOf } from "./shell-kind.ts";
 
 /** How much output the live preview keeps — the tail of it, and not the result. */
 const MAX_PREVIEW_CHARS = 30_000;
@@ -15,18 +16,62 @@ const MAX_PREVIEW_CHARS = 30_000;
 /** How often a running command may push its output to the UI. */
 export const BASH_UPDATE_INTERVAL_MS = 100;
 
+/**
+ * What the model is told the shell is, in the syntax that shell actually
+ * parses. The tool keeps the name `Bash` on the wire, so the description is
+ * the only place that can correct a model's assumption about the grammar.
+ */
+function shellGuidance(shell: { command: string; kind?: ShellKind } | undefined): {
+	clause: string;
+	lines: string;
+} {
+	const kind =
+		shell === undefined
+			? process.platform === "win32"
+				? "powershell"
+				: "bash"
+			: (shell.kind ?? shellKindOf(shell.command));
+	if (kind === "powershell") {
+		const flavor = (shell?.command ?? "").toLowerCase().endsWith("pwsh.exe") ? "PowerShell 7" : "Windows PowerShell";
+		return {
+			clause: `Commands run through ${flavor}; write PowerShell syntax. `,
+			lines:
+				"- Commands run in PowerShell. Separate statements with ';'. On Windows PowerShell 5.1 '&&' and '||' do not exist; use ';' and test $?, or point LBB_SHELL_PATH at pwsh.exe for PowerShell 7.\n" +
+				"- Quote paths that contain spaces. A native program's own exit code is returned as the tool's exit code.\n",
+		};
+	}
+	if (kind === "cmd") {
+		return {
+			clause: "Commands run through cmd.exe; write cmd syntax. ",
+			lines: "- Chain dependent steps with && ; avoid interactive commands.\n",
+		};
+	}
+	return {
+		clause: "Commands run through a POSIX-compatible shell (Git Bash on Windows); write POSIX shell syntax. ",
+		lines: "- Chain dependent steps with && ; avoid interactive commands.\n",
+	};
+}
+
 export function createBashTool(
 	cwd: string,
 	ops: Operations,
 	background?: BackgroundShellManager,
-	options?: { home?: string; tempDir?: string; writableRoots?: readonly string[]; spillDir?: string },
+	options?: {
+		home?: string;
+		tempDir?: string;
+		writableRoots?: readonly string[];
+		spillDir?: string;
+		/** The shell `ops` runs; its grammar shapes the description and prompt. */
+		shell?: { command: string; kind?: ShellKind };
+	},
 ): AnyTool {
+	const guidance = shellGuidance(options?.shell);
 	return buildTool({
 		name: "Bash",
 		description:
 			"Executes a shell command and returns stdout/stderr with the exit code. " +
-			"Output streams live while the command runs. Commands run through a POSIX-compatible " +
-			"shell when available (Git Bash on Windows), otherwise cmd.exe. " +
+			"Output streams live while the command runs. " +
+			guidance.clause +
 			"Use for git, builds, test runners, and other CLI work. " +
 			"Very long output is cut to a head and a tail with a count of what is missing; the " +
 			"full output is written to a file and the result's first line names its path. " +
@@ -69,7 +114,7 @@ export function createBashTool(
 		}),
 		prompt:
 			"- Prefer dedicated tools over shell where they exist (Read/Grep/Glob instead of cat/grep/find).\n" +
-			"- Chain dependent steps with && ; avoid interactive commands.\n" +
+			guidance.lines +
 			"- Provide a short `description` so the user can follow along.\n" +
 			"- Escalate only when a command cannot work inside the sandbox, and say why in justification; the user is asked on each escalated call.\n" +
 			"- Use run_in_background for servers/watchers — a finished shell notifies you; " +

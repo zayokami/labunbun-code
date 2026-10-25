@@ -27,21 +27,30 @@ function wbuf(text: string): Uint8Array {
 	return out;
 }
 
+/** The Windows directory as this machine spells it; the literal is only the no-environment fallback. */
+function systemRoot(): string {
+	const root = process.env.SystemRoot ?? process.env.windir;
+	return (root === undefined || root === "" ? "C:\\Windows" : root).replace(/[\\/]+$/, "");
+}
+
+/** `C:\Windows\System32` on this machine — the one directory every container child executes without a grant. */
+function system32(): string {
+	return `${systemRoot()}\\System32`;
+}
+
 // Long-form design notes: docs/dev/sandbox.md
 /** The program name to put first in a confined command line: a bare name resolves under System32. */
 export function confinedProgramName(program: string): string {
 	if (program.includes("\\") || program.includes("/")) return program;
-	return `C:\\Windows\\System32\\${program}`;
+	return `${system32()}\\${program}`;
 }
-
-/** `c:\windows\system32\` — the one directory every container child executes without a grant. */
-const SYSTEM32_PREFIX = "c:\\windows\\system32\\";
 
 // Long-form design notes: docs/dev/sandbox.md
 /** Whether a container child can execute the named program, under System32 or a granted root. */
 export function containerCanExecute(program: string, grantedRoots: readonly string[]): boolean {
 	const programPath = program.toLowerCase().replace(/\//g, "\\");
-	if (programPath.startsWith(SYSTEM32_PREFIX)) return true;
+	const prefix = `${system32().toLowerCase()}\\`;
+	if (programPath.startsWith(prefix)) return true;
 	return grantedRoots.some((root) => isContainedInPath(programPath, root));
 }
 
@@ -55,7 +64,7 @@ function isContainedInPath(programPath: string, root: string): boolean {
 // Long-form design notes: docs/dev/sandbox.md
 /** The refusal for a session's shell the container cannot execute — one sentence, every caller. */
 export function containerShellRefusal(shellProgram: string): string {
-	return `the Windows container sandbox cannot run this session's shell: ${shellProgram} is not in C:\\Windows\\System32 and not inside a granted root, so the confined child could not execute it. Turn the sandbox off for this session, or point the shell (LBB_BASH_PATH) at a path inside a granted root.`;
+	return `the Windows container sandbox cannot run this session's shell: ${shellProgram} is not in ${system32()} and not inside a granted root, so the confined child could not execute it. Turn the sandbox off for this session, or point the shell (LBB_SHELL_PATH) at a path inside a granted root.`;
 }
 
 // Long-form design notes: docs/dev/sandbox.md

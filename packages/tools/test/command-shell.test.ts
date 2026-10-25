@@ -1,27 +1,28 @@
 /**
  * What the Windows command shell receives.
  *
- * Two failures met in the same report. Git installed away from the
+ * Three failures met in the same report. Git installed away from the
  * conventional `C:\Program Files` was not found, because only `git.exe`'s own
  * directory sits on PATH and `bash.exe` lives one level over; every command
- * then ran under cmd.exe. And the way cmd.exe was spawned mangled its quotes:
- * node escaped the inner pair as `\"`, which cmd does not undo, so
- * `cd /d "G:\dir"` died with a syntax error of its own making.
+ * then ran under cmd.exe. cmd.exe's quotes were mangled when it was handed the
+ * command as an argv item. And the default shell was a POSIX one on a machine
+ * whose commands are now written for PowerShell. The order is configured
+ * shell, Windows PowerShell, Git Bash, cmd.exe.
  *
- * The install search is pinned without this machine's PATH, and the fallback
- * shell is exercised through a real cmd.exe even where a POSIX shell is
- * installed.
+ * The install search is pinned without this machine's PATH, and each shell is
+ * exercised through its real executable.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundShellManager } from "../src/background.ts";
+import { createBashTool, defaultOperations } from "../src/index.ts";
 import { bashFromGitOnPath, ChildProcessExecOperations, detectShell } from "../src/operations.ts";
 
 const win32 = process.platform === "win32";
 
-/** The shell this tool falls back to when it finds no POSIX one. */
+/** A cmd.exe resolution, written by hand so the test does not depend on selection. */
 const cmdShell = {
 	command: process.env.ComSpec ?? "cmd.exe",
 	args: (cmd: string) => ["/d", "/s", "/c", cmd],
@@ -33,7 +34,7 @@ function tempDir(prefix: string): string {
 }
 
 /** Run `body` with those environment variables, and put them all back after. */
-function withEnv(values: Record<string, string | undefined>, body: () => void): void {
+async function withEnv<T>(values: Record<string, string | undefined>, body: () => T | Promise<T>): Promise<T> {
 	const saved = new Map<string, string | undefined>();
 	for (const [key, value] of Object.entries(values)) {
 		saved.set(key, process.env[key]);
@@ -41,7 +42,7 @@ function withEnv(values: Record<string, string | undefined>, body: () => void): 
 		else process.env[key] = value;
 	}
 	try {
-		body();
+		return await body();
 	} finally {
 		for (const [key, value] of saved) {
 			if (value === undefined) delete process.env[key];
@@ -82,31 +83,151 @@ describe("a Git install found through its own git.exe", () => {
 		expect(bashFromGitOnPath("/usr/local/bin", () => true)).toBeUndefined();
 	});
 
-	test("detectShell reaches the install, not just the helper", () => {
-		const conventional = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe"];
-		// The two absolute probes outrank anything staged on PATH, by design.
-		if (!win32 || conventional.some((path) => existsSync(path))) return;
+	test("detectShell falls back to the Git install when there is no PowerShell", async () => {
+		if (!win32) return;
 		const root = tempDir("lbb-cmd-shell-");
 		mkdirSync(join(root, "cmd"), { recursive: true });
 		writeFileSync(join(root, "cmd", "git.exe"), "");
 		mkdirSync(join(root, "bin"), { recursive: true });
 		const bash = join(root, "bin", "bash.exe");
 		writeFileSync(bash, "");
+		const noPowerShell = tempDir("lbb-no-ps-");
 
-		withEnv(
+		await withEnv(
 			{
 				PATH: join(root, "cmd"),
-				LBB_BASH_PATH: undefined,
+				SystemRoot: noPowerShell,
+				windir: noPowerShell,
+				ProgramFiles: tempDir("lbb-no-git-"),
+				"ProgramFiles(x86)": tempDir("lbb-no-git-"),
+				LOCALAPPDATA: tempDir("lbb-no-git-"),
 				USERPROFILE: tempDir("lbb-cmd-home-"),
+				LBB_SHELL_PATH: undefined,
+				LBB_BASH_PATH: undefined,
 			},
-			() => {
+			async () => {
 				const shell = detectShell();
 				expect(shell.command).toBe(bash);
+				expect(shell.kind).toBe("bash");
 				// Still a login shell, and no longer the cmd.exe fallback.
 				expect(shell.args("echo hi")).toEqual(["-lc", "echo hi"]);
 				expect(shell.cmdExe).toBeUndefined();
 			},
 		);
+	});
+});
+
+describe("PowerShell is the Windows default", () => {
+	test("detectShell answers with a PowerShell -Command script", async () => {
+		if (!win32) return;
+		await withEnv({ LBB_SHELL_PATH: undefined, LBB_BASH_PATH: undefined }, async () => {
+			const shell = detectShell();
+			expect(shell.kind).toBe("powershell");
+			expect(shell.command.toLowerCase()).toContain("powershell");
+			const args = shell.args("Write-Output hi");
+			expect(args).toContain("-Command");
+			// The exit-code suffix is what makes a native program's failure the
+			// tool's failure; without it PowerShell answers 1 for every nonzero.
+			expect(args[args.length - 1]).toContain("$LASTEXITCODE");
+			expect(shell.cmdExe).toBeUndefined();
+		});
+	});
+
+	test("the foreground path runs a quoted command with a spaced path", async () => {
+		if (!win32) return;
+		const dir = tempDir("lbb-ps-quote-");
+		const spaced = join(dir, "a dir with spaces");
+		mkdirSync(spaced, { recursive: true });
+		await withEnv({ LBB_SHELL_PATH: undefined, LBB_BASH_PATH: undefined }, async () => {
+			const result = await new ChildProcessExecOperations().exec({
+				command: `Set-Location "${spaced}"; (Get-Location).Path; Write-Output "hi there"`,
+				cwd: dir,
+				timeoutMs: 20_000,
+			});
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toContain(spaced);
+			expect(result.stdout).toContain("hi there");
+			expect(result.stdout).not.toContain('\\"');
+			expect(result.stderr).toBe("");
+		});
+	});
+
+	test("a native program's own exit code comes back", async () => {
+		if (!win32) return;
+		await withEnv({ LBB_SHELL_PATH: undefined, LBB_BASH_PATH: undefined }, async () => {
+			const result = await new ChildProcessExecOperations().exec({
+				command: "cmd /c exit 3",
+				cwd: tempDir("lbb-ps-exit-"),
+				timeoutMs: 20_000,
+			});
+			expect(result.exitCode).toBe(3);
+		});
+	});
+
+	test("the background path runs one too", async () => {
+		if (!win32) return;
+		await withEnv({ LBB_SHELL_PATH: undefined, LBB_BASH_PATH: undefined }, async () => {
+			const manager = new BackgroundShellManager();
+			const shell = await manager.start('Write-Output "hi there"', tempDir("lbb-ps-bg-"));
+			expect(await until(() => manager.get(shell.id)?.status === "completed", 10_000)).toBe(true);
+			const log = readFileSync(shell.outputFile, "utf8");
+			expect(log).toContain("hi there");
+			expect(log).not.toContain('\\"');
+			expect(log).toContain("[exit code: 0]");
+		});
+	});
+
+	test("LBB_SHELL_PATH names the shell, and LBB_BASH_PATH remains an alias", async () => {
+		if (!win32) return;
+		const bash = join(tempDir("lbb-shell-config-"), "bash.exe");
+		writeFileSync(bash, "");
+		await withEnv({ LBB_SHELL_PATH: bash, LBB_BASH_PATH: undefined }, async () => {
+			const shell = detectShell();
+			expect(shell.command).toBe(bash);
+			expect(shell.kind).toBe("bash");
+		});
+		await withEnv({ LBB_SHELL_PATH: undefined, LBB_BASH_PATH: bash }, async () => {
+			expect(detectShell().command).toBe(bash);
+		});
+	});
+
+	test("a bare name in LBB_SHELL_PATH is looked up on PATH", async () => {
+		if (!win32) return;
+		const dir = tempDir("lbb-shell-name-");
+		writeFileSync(join(dir, "pwsh.exe"), "");
+		await withEnv({ PATH: dir, LBB_SHELL_PATH: "pwsh", LBB_BASH_PATH: undefined }, async () => {
+			const shell = detectShell();
+			expect(shell.command).toBe(join(dir, "pwsh.exe"));
+			expect(shell.kind).toBe("powershell");
+		});
+	});
+});
+
+describe("the Bash tool describes the shell it runs", () => {
+	const toolFor = (command: string, kind: "powershell" | "bash" | "cmd") =>
+		createBashTool(process.cwd(), defaultOperations(), undefined, { shell: { command, kind } });
+
+	test("a PowerShell shell gets PowerShell syntax, and the 5.1 limit is named", () => {
+		const tool = toolFor("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "powershell");
+		expect(tool.description).toContain("Windows PowerShell");
+		expect(tool.description).toContain("write PowerShell syntax");
+		expect(tool.prompt).toContain("$?");
+		expect(tool.prompt).toContain("LBB_SHELL_PATH");
+		// The POSIX assumption is what the description exists to correct.
+		expect(tool.prompt).not.toContain("Chain dependent steps with &&");
+	});
+
+	test("pwsh is named PowerShell 7", () => {
+		const tool = toolFor("C:\\Program Files\\PowerShell\\7\\pwsh.exe", "powershell");
+		expect(tool.description).toContain("PowerShell 7");
+		expect(tool.description).not.toContain("Windows PowerShell");
+	});
+
+	test("a POSIX shell keeps the POSIX prompt", () => {
+		const tool = toolFor("/bin/bash", "bash");
+		expect(tool.description).toContain("POSIX-compatible shell");
+		expect(tool.prompt).toContain("Chain dependent steps with &&");
+		expect(tool.prompt).not.toContain("$LASTEXITCODE");
 	});
 });
 

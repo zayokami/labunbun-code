@@ -6,7 +6,13 @@ import { appendFileSync, closeSync, existsSync, openSync, readSync, rmSync, stat
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
-import { defaultOperations, detectShell, EXIT_DRAIN_GRACE_MS, type ExecOperations } from "./operations.ts";
+import {
+	defaultOperations,
+	detectShell,
+	EXIT_DRAIN_GRACE_MS,
+	type ExecOperations,
+	type ShellResolution,
+} from "./operations.ts";
 import {
 	acquireWorkspaceGrant,
 	type ConfinedProcess,
@@ -308,7 +314,7 @@ export class BackgroundShellManager {
 	readonly #spawnHandlers = new Set<(shell: BackgroundShell) => void>();
 	/** Who to tell at every end, kill included; see `onSettled`. */
 	readonly #settleHandlers = new Set<(shell: BackgroundShell) => void>();
-	readonly #shell: ReturnType<typeof detectShell>;
+	readonly #shell: ShellResolution;
 	/** Injected for the same reason as `ChildProcessExecOperations`'s: so a test on
 	 * one platform can exercise the wrapping branch for another. */
 	readonly #runtime: SandboxRuntime;
@@ -332,7 +338,7 @@ export class BackgroundShellManager {
 		operations: ExecOperations = defaultOperations(),
 		// Injected like the runtime: so a test can pin the shell the container
 		// branch wraps without depending on what this machine has installed.
-		shell: ReturnType<typeof detectShell> = detectShell(),
+		shell: ShellResolution = detectShell(),
 		// Fourth and optional, so every three-argument construction keeps its
 		// meaning. Read once here: a bound that changed under a running timer
 		// would make one shell's life depend on when the caller edited settings.

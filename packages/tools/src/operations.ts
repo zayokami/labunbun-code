@@ -33,6 +33,7 @@ import {
 import { type NetworkProxy, portsOf, startNetworkProxy } from "./sandbox/proxy.ts";
 import { feedSeccompFilter, SECCOMP_FD, seccompFilter } from "./sandbox/seccomp.ts";
 import { installRootOf, isFileSync, pathCandidates } from "./sandbox/toolchain-roots.ts";
+import { type ShellKind, shellKindOf } from "./shell-kind.ts";
 
 export type { SandboxExecution } from "./sandbox/index.ts";
 
@@ -321,34 +322,176 @@ export function bashFromGitOnPath(
 }
 
 // Long-form design notes: docs/dev/tools.md
+/** A shell and the arguments that make it run one command line. */
+export interface ShellResolution {
+	command: string;
+	args: (cmd: string) => string[];
+	/**
+	 * The grammar of `args`, filled by `detectShell`. Hand-made resolutions in
+	 * tests may omit it; nothing on the spawn path reads it.
+	 */
+	kind?: ShellKind;
+	/** Set for cmd.exe only: it parses its own command line, so the spawn uses shell mode. */
+	cmdExe?: true;
+}
+
+/** `detectShell`'s answer: the kind is always there, because the tool text reads it. */
+export interface ResolvedShell extends ShellResolution {
+	kind: ShellKind;
+}
+
+/** `root\rest`, with a trailing separator on the root normalised away. */
+function underRoot(root: string, rest: string): string {
+	return `${root.replace(/[\\/]+$/, "")}\\${rest}`;
+}
+
 /**
- * Shell resolution: a POSIX-compatible shell on Windows when one exists, else
- * `cmd.exe`; `/bin/bash` elsewhere.
+ * The script PowerShell runs for one tool call.
  *
- * The `cmdExe` mark is what the spawn path reads: cmd parses its own command
- * line, and handing it the command as one argv item makes node escape the
- * inner quotes the way C runtimes expect (`\"`), which cmd does not undo.
+ * `-Command` takes the whole command as one argv item; PowerShell's parser
+ * leaves backslashes and quotes alone there, unlike cmd's (measured on Windows
+ * PowerShell 5.1 and PowerShell 7.4). The prefix fixes what the shell would
+ * otherwise decide from the machine: output is UTF-8 whatever the console code
+ * page is, a cmdlet error fails the call instead of exiting 0 after printing an
+ * error, and progress records stay off stderr. The suffix returns a native
+ * program's own exit code — `powershell -Command "cmd /c exit 3"` alone answers
+ * 1, and a test runner's code is information the model needs.
  */
-export function detectShell(): { command: string; args: (cmd: string) => string[]; cmdExe?: true } {
+function powershellScript(command: string): string {
+	return [
+		"$ProgressPreference = 'SilentlyContinue'",
+		"$ErrorActionPreference = 'Stop'",
+		"try { $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}",
+		command,
+		"if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }",
+	].join("\n");
+}
+
+/** A resolution whose argument shape follows the program's own name. */
+export function resolveShell(program: string, platform: NodeJS.Platform = process.platform): ResolvedShell {
+	const kind = shellKindOf(program);
+	if (kind === "powershell") {
+		return {
+			command: program,
+			kind,
+			args: (cmd) => ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powershellScript(cmd)],
+		};
+	}
+	if (kind === "cmd") {
+		return { command: program, kind, args: (cmd) => ["/d", "/s", "/c", cmd], cmdExe: true };
+	}
+	return { command: program, kind, args: (cmd) => [platform === "win32" ? "-lc" : "-c", cmd] };
+}
+
+/**
+ * A value the user named, resolved to an existing executable. The name may be
+ * absolute or a bare program name; a bare one is looked up on PATH the way the
+ * platform spells it. `LBB_SHELL_PATH` is the name to document; the older
+ * `LBB_BASH_PATH` stays an alias so existing setups keep working.
+ */
+function configuredShell(env: NodeJS.ProcessEnv): string | undefined {
+	const value = env.LBB_SHELL_PATH ?? env.LBB_BASH_PATH;
+	if (value === undefined || value === "") return undefined;
+	if (value.includes("\\") || value.includes("/")) return isFileSync(value) ? value : undefined;
+	const pathValue = env.PATH ?? env.Path ?? "";
 	if (process.platform === "win32") {
-		const conventional = [
-			process.env.LBB_BASH_PATH,
-			"C:\\Program Files\\Git\\bin\\bash.exe",
-			"C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-			`${process.env.USERPROFILE ?? ""}\\.bun\\bin\\bash.exe`,
-		].filter(Boolean) as string[];
-		for (const candidate of conventional) {
-			if (isFileSync(candidate)) return { command: candidate, args: (cmd) => ["-lc", cmd] };
+		// PATHEXT is the reason a user may name `pwsh` and mean `pwsh.exe`.
+		const names = value.includes(".") ? [value] : [value, `${value}.exe`];
+		for (const name of names) {
+			for (const candidate of pathCandidates(name, pathValue)) {
+				if (isFileSync(candidate)) return candidate;
+			}
+		}
+		return undefined;
+	}
+	for (const entry of pathValue.split(":")) {
+		const dir = entry.trim().replace(/\/+$/, "");
+		if (dir === "") continue;
+		const candidate = `${dir}/${value}`;
+		if (isFileSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/**
+ * The PowerShell this machine will run by default: Windows PowerShell first,
+ * then PowerShell 7 when that is the only one PATH carries.
+ *
+ * Windows PowerShell lives under System32, which every container child can
+ * execute without a grant. PowerShell 7 lives under Program Files, where the
+ * Windows container needs a grant that may not be possible on the machine. A
+ * default that keeps the sandbox selectable is worth more than the newer
+ * grammar, and `LBB_SHELL_PATH` is how a user asks for 7.
+ */
+function windowsPowerShell(env: NodeJS.ProcessEnv): string | undefined {
+	const pathValue = env.PATH ?? env.Path ?? "";
+	for (const candidate of pathCandidates("powershell.exe", pathValue)) {
+		if (isFileSync(candidate)) return candidate;
+	}
+	const systemRoot = env.SystemRoot ?? env.windir;
+	if (systemRoot !== undefined && systemRoot !== "") {
+		const conventional = underRoot(systemRoot, "System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+		if (isFileSync(conventional)) return conventional;
+	}
+	for (const candidate of pathCandidates("pwsh.exe", pathValue)) {
+		if (isFileSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/**
+ * Git installs at the conventional Windows locations, spelled from the
+ * environment rather than a drive letter: Git may live on D:, and the
+ * installer puts only `Git\cmd` on PATH.
+ */
+function conventionalGitBash(env: NodeJS.ProcessEnv): string[] {
+	const candidates: string[] = [];
+	for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"]]) {
+		if (root === undefined || root === "") continue;
+		candidates.push(underRoot(root, "Git\\bin\\bash.exe"), underRoot(root, "Git\\usr\\bin\\bash.exe"));
+	}
+	if (env.LOCALAPPDATA !== undefined && env.LOCALAPPDATA !== "") {
+		candidates.push(
+			underRoot(env.LOCALAPPDATA, "Programs\\Git\\bin\\bash.exe"),
+			underRoot(env.LOCALAPPDATA, "Programs\\Git\\usr\\bin\\bash.exe"),
+		);
+	}
+	if (env.USERPROFILE !== undefined && env.USERPROFILE !== "") {
+		candidates.push(underRoot(env.USERPROFILE, ".bun\\bin\\bash.exe"));
+	}
+	return candidates;
+}
+
+// Long-form design notes: docs/dev/tools.md
+/**
+ * Shell resolution: Windows PowerShell on Windows, `/bin/bash` elsewhere.
+ *
+ * `LBB_SHELL_PATH` (or the older `LBB_BASH_PATH`) outranks the default and is
+ * taken exactly as named. A machine with no PowerShell falls back to Git Bash,
+ * found through the environment or through its own `git.exe`, and then to
+ * cmd.exe. The `cmdExe` mark is what the spawn path reads: cmd parses its own
+ * command line, and handing it the command as one argv item makes node escape
+ * the inner quotes the way C runtimes expect (`\"`), which cmd does not undo.
+ */
+export function detectShell(): ResolvedShell {
+	const configured = configuredShell(process.env);
+	if (configured !== undefined) return resolveShell(configured);
+
+	if (process.platform === "win32") {
+		const powerShell = windowsPowerShell(process.env);
+		if (powerShell !== undefined) return resolveShell(powerShell);
+		for (const candidate of conventionalGitBash(process.env)) {
+			if (isFileSync(candidate)) return resolveShell(candidate);
 		}
 		for (const candidate of pathCandidates("bash.exe")) {
 			if (isWindowsBash(candidate)) continue;
-			if (isFileSync(candidate)) return { command: candidate, args: (cmd) => ["-lc", cmd] };
+			if (isFileSync(candidate)) return resolveShell(candidate);
 		}
 		const besideGit = bashFromGitOnPath();
-		if (besideGit !== undefined) return { command: besideGit, args: (cmd) => ["-lc", cmd] };
-		return { command: "cmd.exe", args: (cmd) => ["/d", "/s", "/c", cmd], cmdExe: true };
+		if (besideGit !== undefined) return resolveShell(besideGit);
+		return resolveShell("cmd.exe");
 	}
-	return { command: "/bin/bash", args: (cmd) => ["-c", cmd] };
+	return resolveShell("/bin/bash");
 }
 
 // Long-form design notes: docs/dev/tools.md
@@ -456,7 +599,7 @@ function createExecCapture(dir: string) {
 export const EXIT_DRAIN_GRACE_MS = 2_000;
 
 export class ChildProcessExecOperations implements ExecOperations {
-	#shell: ReturnType<typeof detectShell>;
+	#shell: ShellResolution;
 	// Long-form design notes: docs/dev/tools.md
 	/** What this machine can confine with: the runtime is built here, and the Windows probe inside it runs when a field is first read. */
 	readonly #runtime: SandboxRuntime;
@@ -477,7 +620,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 	 * shell: on Windows the selection probe runs this session's shell, and a
 	 * default parameter list cannot see one of its own.
 	 */
-	constructor(runtime?: SandboxRuntime, shell: ReturnType<typeof detectShell> = detectShell()) {
+	constructor(runtime?: SandboxRuntime, shell: ShellResolution = detectShell()) {
 		this.#runtime = runtime ?? detectRuntime(process.platform, shell);
 		this.#shell = shell;
 	}

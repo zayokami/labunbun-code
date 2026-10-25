@@ -185,6 +185,7 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 			tempDir: options.tempDir,
 			writableRoots: options.writableRoots,
 			spillDir: options.spillDir,
+			shell,
 		}),
 		// Edit's first gate reads the same store Read writes: an edit is refused on
 		// a file this session never read, so the two tools have to be looking at one

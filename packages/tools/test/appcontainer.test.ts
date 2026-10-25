@@ -118,7 +118,11 @@ describe("the protected narrowing's boundary", () => {
  */
 describe("the program name a confined command line starts with", () => {
 	test("a bare name is resolved under System32", () => {
-		expect(confinedProgramName("cmd.exe")).toBe("C:\\Windows\\System32\\cmd.exe");
+		// The Windows directory is the machine's, not a literal: `C:\Windows` is
+		// the conventional spelling, not the only one, and this environment may
+		// spell it in either case.
+		const systemRoot = (process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows").replace(/[\\/]+$/, "");
+		expect(confinedProgramName("cmd.exe")).toBe(`${systemRoot}\\System32\\cmd.exe`);
 	});
 
 	test("a name that already carries a separator is used exactly as given", () => {

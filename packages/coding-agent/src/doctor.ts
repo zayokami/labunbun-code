@@ -125,13 +125,15 @@ export async function runDoctorChecks(
 		detail: `Bun ${Bun.version} · Node ${process.version} · ${process.platform}`,
 	});
 
-	// Shell availability (POSIX shell preferred for the Bash tool)
+	// Shell availability (PowerShell on Windows, bash elsewhere)
 	const shell = detectShell();
-	const isCmd = shell.command === "cmd.exe";
 	checks.push({
 		name: "Shell",
-		status: isCmd ? "warn" : "ok",
-		detail: isCmd ? "cmd.exe fallback — install Git for Windows for POSIX syntax" : `${shell.command} (POSIX)`,
+		status: shell.kind === "cmd" ? "warn" : "ok",
+		detail:
+			shell.kind === "cmd"
+				? "cmd.exe fallback — no PowerShell was found; set LBB_SHELL_PATH to the shell the session should run"
+				: `${shell.command} (${shell.kind === "powershell" ? "PowerShell" : "POSIX"})`,
 	});
 
 	// ripgrep presence (informational; Grep has a JS fallback)

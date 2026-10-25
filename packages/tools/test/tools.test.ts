@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -943,25 +943,50 @@ describe("the tail buffer behind live Bash output", () => {
 });
 
 describe("shell resolution", () => {
-	// One machine's install could sit anywhere; these tests move PATH instead of
-	// assuming where it is. The two probes the code tries first are hardcoded
-	// (deliberately — that install is the one the user chose), so a machine that
-	// has it answers with it whatever PATH says, and the PATH test steps aside.
-	const realGit = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe"];
-	const realGitPath = realGit.find((path) => existsSync(path));
-	const hasRealGit = realGitPath !== undefined;
+	/**
+	 * The environment a machine with no PowerShell and no conventional Git
+	 * presents: every derived location points into an empty temporary tree.
+	 * `SystemRoot` matters twice — the PowerShell fallback and the WSL check
+	 * both read it — so a test that stages System32 passes its own root.
+	 */
+	function noPowerShellEnv(pathValue: string, systemRoot: string = tempDir()): Record<string, string | undefined> {
+		return {
+			PATH: pathValue,
+			SystemRoot: systemRoot,
+			windir: systemRoot,
+			ProgramFiles: tempDir(),
+			"ProgramFiles(x86)": tempDir(),
+			LOCALAPPDATA: tempDir(),
+			USERPROFILE: tempDir(),
+			LBB_SHELL_PATH: undefined,
+			LBB_BASH_PATH: undefined,
+		};
+	}
 
-	test("a bash.exe on PATH is found, not only one in the conventional places", () => {
-		if (process.platform !== "win32" || hasRealGit) return;
+	test("Windows PowerShell is the default, and the command is the one -Command carries", () => {
+		if (process.platform !== "win32") return;
+		withEnv({ LBB_SHELL_PATH: undefined, LBB_BASH_PATH: undefined }, () => {
+			const shell = detectShell();
+			expect(shell.kind).toBe("powershell");
+			expect(shell.command.toLowerCase()).toContain("powershell");
+			const args = shell.args("Write-Output hi");
+			expect(args).toContain("-Command");
+			expect(args[args.length - 1]).toContain("Write-Output hi");
+			expect(shell.cmdExe).toBeUndefined();
+		});
+	});
+
+	test("a machine with no PowerShell falls back to a bash.exe on PATH", () => {
+		if (process.platform !== "win32") return;
 		// Git on another drive, or bash from scoop or chocolatey: a machine where
-		// no hardcoded probe hits, and every POSIX-shaped command used to come back
-		// as a cmd.exe error until PATH was consulted too.
+		// no conventional location answers and no PowerShell is installed.
 		const dir = tempDir();
 		writeFileSync(join(dir, "bash.exe"), "");
 
-		withEnv({ PATH: dir, LBB_BASH_PATH: undefined, USERPROFILE: tempDir() }, () => {
+		withEnv(noPowerShellEnv(dir), () => {
 			const shell = detectShell();
 			expect(shell.command).toBe(join(dir, "bash.exe"));
+			expect(shell.kind).toBe("bash");
 			// Still a login shell: PATH lookup was the fix, not the flags.
 			expect(shell.args("echo hi")).toEqual(["-lc", "echo hi"]);
 		});
@@ -979,36 +1004,33 @@ describe("shell resolution", () => {
 		const windowsApps = join(root, "Microsoft", "WindowsApps");
 		mkdirSync(windowsApps, { recursive: true });
 		writeFileSync(join(windowsApps, "bash.exe"), "");
-		const launchers = [join(system32, "bash.exe"), join(windowsApps, "bash.exe")];
 
-		withEnv(
-			{
-				PATH: [system32, windowsApps].join(";"),
-				SystemRoot: root,
-				windir: root,
-				LBB_BASH_PATH: undefined,
-				USERPROFILE: tempDir(),
-			},
-			() => {
-				const command = detectShell().command;
-				// The rule, and the only part of it that is decidable on every
-				// machine: a launcher on PATH is never the answer.
-				expect(launchers).not.toContain(command);
-				// What answers instead is cmd.exe — but only where there is no
-				// conventional install to answer first. `detectShell` probes the
-				// two absolute Git paths *before* it reads PATH, deliberately (the
-				// comment above), and no staged PATH can outrank an absolute
-				// probe. A GitHub windows runner has Git for Windows at exactly
-				// that path, so the fallback is simply unreachable there; the
-				// sibling test steps aside for the same reason, and this one pins
-				// the machine it is on instead of dropping the assertion.
-				expect(command).toBe(hasRealGit ? realGitPath : "cmd.exe");
-			},
-		);
+		withEnv(noPowerShellEnv([system32, windowsApps].join(";"), root), () => {
+			const shell = detectShell();
+			// The rule: a launcher on PATH is never the answer, and with nothing
+			// else on the machine the last answer is cmd.exe.
+			expect([join(system32, "bash.exe"), join(windowsApps, "bash.exe")]).not.toContain(shell.command);
+			expect(shell.command).toBe("cmd.exe");
+			expect(shell.kind).toBe("cmd");
+			expect(shell.cmdExe).toBe(true);
+		});
 
 		// ...but a path the user names outright is theirs to name, launcher or not.
-		withEnv({ LBB_BASH_PATH: join(system32, "bash.exe"), PATH: tempDir() }, () => {
+		withEnv({ ...noPowerShellEnv(tempDir(), root), LBB_BASH_PATH: join(system32, "bash.exe") }, () => {
 			expect(detectShell().command).toBe(join(system32, "bash.exe"));
+		});
+	});
+
+	test("LBB_SHELL_PATH outranks the old LBB_BASH_PATH name", () => {
+		if (process.platform !== "win32") return;
+		const first = join(tempDir(), "bash.exe");
+		const second = join(tempDir(), "bash.exe");
+		writeFileSync(first, "");
+		writeFileSync(second, "");
+		withEnv({ LBB_SHELL_PATH: first, LBB_BASH_PATH: second }, () => {
+			const shell = detectShell();
+			expect(shell.command).toBe(first);
+			expect(shell.kind).toBe("bash");
 		});
 	});
 

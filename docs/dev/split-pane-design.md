@@ -14,7 +14,7 @@ Four candidates were weighed, by what the user is looking at and where that data
 
 | The user is | What they want beside the prompt | What serves it today | Ready for a pane |
 | --- | --- | --- | --- |
-| Waiting on a dev server started with `run_in_background` | The shell's recent output, live | `list()` and `output()` on the shell manager (`packages/tools/src/background.ts:555`, `:544`), a 2 s poll (`packages/coding-agent/src/background-commands.ts:26`), a tail formatter (`:70`), a one-line status row (`packages/tui/src/components/StatusLine.tsx:91`) | Yes — every piece exists |
+| Waiting on a dev server started with `run_in_background` | The shell's recent output, live | `list()` and `output()` on the shell manager (`packages/tools/src/background.ts:561`, `:544`), a 2 s poll (`packages/coding-agent/src/background-commands.ts:26`), a tail formatter (`:70`), a one-line status row (`packages/tui/src/components/StatusLine.tsx:91`) | Yes — every piece exists |
 | Waiting on a subagent | Its status, and what it is doing | Listing and ordering (`packages/coding-agent/src/subagent-commands.ts:18`, `:68`), a retention cap of eight (`packages/coding-agent/src/subagent-registry.ts:26`); no live subscription to a running handle's stream exists | Listing yes, live stream no |
 | Reviewing what the agent changed | A diff that updates as it works | The file checkpoints `/rewind` restores from are written before each Edit/Write mutates a file (`packages/coding-agent/src/checkpoint-log.ts:364`, called from `packages/coding-agent/src/interactive.ts:1638-1641`); nothing computes a live diff | No — new plumbing |
 | Watching the task list | The tree | Already inline above the prompt: `TaskStrip` (`packages/tui/src/components/REPL.tsx:886`) | Done — nothing to add |

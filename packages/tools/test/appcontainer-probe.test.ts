@@ -42,6 +42,18 @@ describe("the probe script", () => {
 	test("no programs is still the full frame: shell marker, then done", () => {
 		expect(probeCommandLine([])).toBe("echo LBB-PROBE-SHELL && echo LBB-PROBE-DONE");
 	});
+
+	test("PowerShell's script uses the call operator and stops at the first failure", () => {
+		// `&` is required: a quoted path at the start of a PowerShell statement
+		// is a string, not a command. `$?` is the stop because `&&` exists only
+		// in PowerShell 7, and the marker pair still names the program that
+		// failed.
+		expect(probeCommandLine(["C:\\Tools\\git.exe"], "powershell")).toBe(
+			'Write-Output LBB-PROBE-SHELL; & "C:\\Tools\\git.exe" --version; if (-not $?) { exit 1 }; ' +
+				"Write-Output LBB-PROBE-OK-0; Write-Output LBB-PROBE-DONE",
+		);
+		expect(probeCommandLine([], "powershell")).toBe("Write-Output LBB-PROBE-SHELL; Write-Output LBB-PROBE-DONE");
+	});
 });
 
 describe("reading the one probe run", () => {
@@ -66,7 +78,7 @@ describe("reading the one probe run", () => {
 			expect(verdict.reason).toContain("0xC0000142");
 			expect(verdict.reason).toContain("BaseNamedObjects");
 			// The reason carries the way out, or it is a dead end for the reader.
-			expect(verdict.reason).toContain("LBB_BASH_PATH");
+			expect(verdict.reason).toContain("LBB_SHELL_PATH");
 		}
 	});
 
