@@ -1,4 +1,4 @@
-export const GAMEPAD_PACKAGE_VERSION = "0.1.0.1";
+export const GAMEPAD_PACKAGE_VERSION = "0.1.0.2";
 
 export {
 	bindingText,

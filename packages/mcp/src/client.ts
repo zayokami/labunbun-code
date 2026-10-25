@@ -700,7 +700,7 @@ export async function connectMcpServer(
 					);
 
 		const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-		const client = new Client({ name: "labunbun", version: "0.1.0.1" });
+		const client = new Client({ name: "labunbun", version: "0.1.0.2" });
 		opened = client;
 		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
 		/** The object the host holds; the notification handlers refresh it in place. */

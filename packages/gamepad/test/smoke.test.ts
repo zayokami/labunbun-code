@@ -3,7 +3,7 @@ import { GAMEPAD_PACKAGE_VERSION, PAD_ACTION_KINDS, PAD_DIRECTIONS } from "../sr
 
 describe("@labunbun/gamepad smoke", () => {
 	test("exports a version", () => {
-		expect(GAMEPAD_PACKAGE_VERSION).toBe("0.1.0.1");
+		expect(GAMEPAD_PACKAGE_VERSION).toBe("0.1.0.2");
 	});
 
 	test("the navigation slots are the directional actions, through the barrel", () => {

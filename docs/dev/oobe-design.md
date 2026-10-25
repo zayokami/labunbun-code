@@ -12,7 +12,7 @@ Bare `labunbun` enters at `packages/coding-agent/src/main.ts:511-513`, parses ar
 
 The interactive path prints one line and hands over:
 
-- `main.ts:498` — `labunbun 0.1.0.1 — starting interactive mode…`. This is the first thing a new user sees on any platform.
+- `main.ts:498` — `labunbun 0.1.0.2 — starting interactive mode…`. This is the first thing a new user sees on any platform.
 - `main.ts:499-508` → `runInteractive` (`packages/coding-agent/src/interactive.ts:428`).
 
 `runInteractive` then does, in order:
@@ -45,7 +45,7 @@ The wizard now reaches both of the things a first-time user could not find: the 
 **(a) No key and no TTY — the exit is fixed in batch 1; the wizard is still TTY-gated.** Measured before batch 1 on this checkout with an empty fake home (`HOME`/`USERPROFILE` pointed at a temp directory, `ANTHROPIC_*` unset, stdin not a TTY):
 
 ```
-labunbun 0.1.0.1 — starting interactive mode…
+labunbun 0.1.0.2 — starting interactive mode…
 Missing API key for anthropic: set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in your environment.
 Example: export ANTHROPIC_API_KEY=sk-...
 ```
