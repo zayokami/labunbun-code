@@ -1,7 +1,7 @@
 import type { AgentEvent, AgentSession, PermissionMode, SandboxMode } from "@labunbun/agent";
 import { cycleModeChoice, describeModeChoice, type ModeChoice } from "@labunbun/agent";
 import { type PadBridge, padPalette } from "@labunbun/gamepad";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WHEEL_ROWS, wheelEntries, wheelMove } from "../command-wheel.ts";
 import { isConPTYHost } from "../conpty.ts";
@@ -285,6 +285,22 @@ export function REPL({
 	// Ink's own writer, not `process.stdout`: it knows where the frame it drew is,
 	// so it can take it down and put it back around whatever we write.
 	const { stdout, write: writeStdout } = useStdout();
+	// One row short of the viewport, and not one row more.
+	//
+	// Ink treats a frame that reaches the bottom of the terminal as fullscreen:
+	// it clears the screen and prints every sealed row again, because it cannot
+	// know which of those rows the clear took off the visible screen. On a
+	// ConPTY host that clear also has its scrollback erase removed (see
+	// `conpty.ts`), so each reprint of the sealed rows lands *above* the last
+	// one — the transcript is copied into the scrollback once per frame while
+	// the frame stays tall. Capping the frame keeps ink on its incremental
+	// erase-and-redraw path, where sealed rows are written exactly once.
+	//
+	// `flex-end` keeps the newest rows when the content is taller than the cap:
+	// the oldest live rows are the ones clipped, never the prompt or a dialog's
+	// buttons. The non-TTY fallback leaves tests and pipes uncapped.
+	const { rows: windowRows } = useWindowSize();
+	const frameCap = stdout.isTTY && windowRows > 1 ? windowRows - 1 : undefined;
 	// A dialog is the user deciding, not the model working. The clock stops while
 	// one is open, so a turn that spent two minutes waiting on an approval does
 	// not go on to report those two minutes as its own work.
@@ -872,125 +888,159 @@ export function REPL({
 	// below — the half-typed draft, its undo stack, the pasted originals, the
 	// history search — and closing it handed back an empty prompt. Both screens
 	// are built on every render now, and the one that is not showing is taken out
-	// of the layout rather than out of the tree.
+	// of the layout rather than out of the tree. That includes the live screen's
+	// <Static>, whose index is what stops it printing the sealed rows again; a
+	// remount would empty the index, and the rows would come back as a second
+	// copy in the terminal's scrollback every time the transcript was closed.
 	const windowSize = Math.min(entries.length, 25);
 	const end = Math.max(windowSize, entries.length - transcriptOffset);
 	const start = end - windowSize;
 	const windowEntries = entries.slice(start, end);
 
 	return (
-		<Box flexDirection="column">
-			{transcriptMode ? (
-				<Box flexDirection="column">
-					{/* full output here — reading back is exactly when truncation hurts */}
-					<MessageList entries={windowEntries} full />
-					<Text dimColor>
-						Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · ctrl+o/Esc back
-					</Text>
-				</Box>
-			) : (
-				<>
-					<TerminalTitle
+		<Box
+			flexDirection="column"
+			maxHeight={frameCap}
+			overflow={frameCap === undefined ? undefined : "hidden"}
+			justifyContent={frameCap === undefined ? undefined : "flex-end"}
+		>
+			{/* The live screen stays in the tree while the transcript is open.
+			    Unmounting it would remount its <Static> on the way back, and a
+			    fresh Static prints every sealed row again — one more copy of
+			    the transcript in the scrollback for each look at Ctrl+O. A
+			    zero-height box keeps the tree (and that index) alive without
+			    letting a single row of it into the frame. */}
+			<Box
+				flexDirection="column"
+				height={transcriptMode ? 0 : undefined}
+				overflow={transcriptMode ? "hidden" : undefined}
+			>
+				<TerminalTitle
+					phase={statusPhase}
+					dirName={dirName}
+					sessionTitle={sessionTitle}
+					actionRequired={awaitingUser}
+				/>
+				<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} paintedTheme={themeCommit} />
+				<StreamingPreview text={streamingText} thinking={thinkingText} />
+				{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
+				<Box marginBottom={1} flexDirection="column">
+					<StatusLine
 						phase={statusPhase}
-						dirName={dirName}
-						sessionTitle={sessionTitle}
-						actionRequired={awaitingUser}
+						modelName={modelName}
+						elapsedMs={elapsedMs}
+						contextInfo={contextInfo}
+						activity={contextActivity}
+						activitySince={contextActivitySince}
+						activityCancellable={contextActivityCancellable}
+						retry={retry}
+						thinkingMs={thinkingMs}
+						outputEstimate={estimateOutputTokens(streamingText.length)}
+						pad={padStatus}
 					/>
-					<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} paintedTheme={themeCommit} />
-					<StreamingPreview text={streamingText} thinking={thinkingText} />
-					{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
-					<Box marginBottom={1} flexDirection="column">
-						<StatusLine
-							phase={statusPhase}
-							modelName={modelName}
-							elapsedMs={elapsedMs}
-							contextInfo={contextInfo}
-							activity={contextActivity}
-							activitySince={contextActivitySince}
-							activityCancellable={contextActivityCancellable}
-							retry={retry}
-							thinkingMs={thinkingMs}
-							outputEstimate={estimateOutputTokens(streamingText.length)}
-							pad={padStatus}
-						/>
-						{/* "Running tools…" for twenty seconds says nothing about what is
+					{/* "Running tools…" for twenty seconds says nothing about what is
 						    running; the row underneath is what makes the wait legible. */}
-						{pendingTools.length > 0 && (
-							<Text dimColor>
-								{"  └ "}
-								{toolSummary(pendingTools)}
-							</Text>
-						)}
-						{/* Not part of the turn: a background shell outlives it, which is
+					{pendingTools.length > 0 && (
+						<Text dimColor>
+							{"  └ "}
+							{toolSummary(pendingTools)}
+						</Text>
+					)}
+					{/* Not part of the turn: a background shell outlives it, which is
 						    precisely why it has to stay on screen after the turn ends. */}
-						{shellRow && <Text dimColor>{`  └ ${shellRow}`}</Text>}
-					</Box>
-					{/* Above the dialogs: it reports, it does not ask, and a dialog that
+					{shellRow && <Text dimColor>{`  └ ${shellRow}`}</Text>}
+				</Box>
+				{/* Above the dialogs: it reports, it does not ask, and a dialog that
 					    appears while it is open is the more urgent of the two. */}
-					{statusCard ? <StatusCard data={statusCard} /> : null}
-					{dialog ? (
-						<PermissionDialog
-							toolName={dialog.toolName}
-							inputPreview={dialog.inputPreview}
-							inputFull={dialog.inputFull}
-							options={dialog.options}
-							queueLength={dialog.queueLength}
-							source={dialog.source}
-							onResolve={(allow, alwaysAllow, alwaysAsk) => dialog.resolve(allow, alwaysAllow, alwaysAsk)}
-							pad={pad}
-						/>
-					) : null}
-					{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} pad={pad} /> : null}
-					{planReview ? <PlanReviewDialog plan={planReview.plan} resolve={planReview.resolve} pad={pad} /> : null}
-					{picker ? (
-						<ListPickerDialog
-							title={picker.title}
-							items={picker.items}
-							// The row the list opens on, carried through from what the
-							// caller asked for: `/theme` opens on the active theme and
-							// `/model` on the active model, and a picker that always
-							// opens at the top makes the active row findable only by
-							// reading every label.
-							initialIndex={picker.initialIndex}
-							resolve={picker.resolve}
-							onHighlight={picker.onHighlight}
-							onCancel={picker.onCancel}
-							preview={picker.preview}
-							pad={pad}
-						/>
-					) : null}
-					{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
-					{shortcutsOpen && (
-						<ShortcutOverlay groups={shortcutGroups({ editor: editor.mode, commands: commandSuggestions })} />
-					)}
-					{activity && (
-						<ActivityPanel
-							home={activity.home}
-							range={activity.range}
-							onRange={(range) => store.set((s) => (s.activity ? { ...s, activity: { ...s.activity, range } } : s))}
-							onClose={() => store.set((s) => (s.activity ? { ...s, activity: null } : s))}
-						/>
-					)}
-					{/* The watch panel, below the heatmap: the heatmap is an overlay on a
+				{statusCard ? <StatusCard data={statusCard} /> : null}
+				{/* Every overlay that reads keys unmounts with the live screen, the
+				    way it did when the transcript was an early return. The zero-height
+				    box keeps the tree mounted, not the input: a permission dialog left
+				    under the transcript would still answer `y` — an approval for a
+				    screen nobody can see. The <Static> above is the only part that
+				    must survive the switch, because its index is what keeps the
+				    sealed rows from being printed again. */}
+				{dialog && !transcriptMode ? (
+					<PermissionDialog
+						toolName={dialog.toolName}
+						inputPreview={dialog.inputPreview}
+						inputFull={dialog.inputFull}
+						options={dialog.options}
+						queueLength={dialog.queueLength}
+						source={dialog.source}
+						onResolve={(allow, alwaysAllow, alwaysAsk) => dialog.resolve(allow, alwaysAllow, alwaysAsk)}
+						pad={pad}
+					/>
+				) : null}
+				{question && !transcriptMode ? (
+					<QuestionDialog questions={question.questions} resolve={question.resolve} pad={pad} />
+				) : null}
+				{planReview && !transcriptMode ? (
+					<PlanReviewDialog plan={planReview.plan} resolve={planReview.resolve} pad={pad} />
+				) : null}
+				{picker && !transcriptMode ? (
+					<ListPickerDialog
+						title={picker.title}
+						items={picker.items}
+						// The row the list opens on, carried through from what the
+						// caller asked for: `/theme` opens on the active theme and
+						// `/model` on the active model, and a picker that always
+						// opens at the top makes the active row findable only by
+						// reading every label.
+						initialIndex={picker.initialIndex}
+						resolve={picker.resolve}
+						onHighlight={picker.onHighlight}
+						onCancel={picker.onCancel}
+						preview={picker.preview}
+						pad={pad}
+					/>
+				) : null}
+				{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
+				{shortcutsOpen && (
+					<ShortcutOverlay groups={shortcutGroups({ editor: editor.mode, commands: commandSuggestions })} />
+				)}
+				{activity && !transcriptMode && (
+					<ActivityPanel
+						home={activity.home}
+						range={activity.range}
+						onRange={(range) => store.set((s) => (s.activity ? { ...s, activity: { ...s.activity, range } } : s))}
+						onClose={() => store.set((s) => (s.activity ? { ...s, activity: null } : s))}
+					/>
+				)}
+				{/* The watch panel, below the heatmap: the heatmap is an overlay on a
 					    question the user asked, while this is a band that belongs to the
 					    prompt, and the band is the one still there after Escape has closed
 					    the overlay. `!transcriptMode` is spelled out even though this slot
 					    is inside the non-transcript branch — the branch is the reason the
 					    panel is *not* drawn there, and the condition is the reason the
 					    state it comes back to is the state it left. */}
-					{watchOpen && !transcriptMode && (
-						<WatchPanel
-							shells={backgroundShells}
-							selection={watchSelection}
-							subagentLines={watchSubagentLines}
-							statusLines={watchStatusLines}
-						/>
-					)}
-					{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
-					<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
-				</>
-			)}
-			{/* The second child of this box on either screen, which is the whole
+				{watchOpen && !transcriptMode && (
+					<WatchPanel
+						shells={backgroundShells}
+						selection={watchSelection}
+						subagentLines={watchSubagentLines}
+						statusLines={watchStatusLines}
+					/>
+				)}
+				{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
+				<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
+			</Box>
+			{/* The transcript screen. Its own box rather than a branch that
+			    replaces the live one: the live screen has to stay mounted (see
+			    above), and three children in the same order on both screens keep
+			    React matching the prompt by position. */}
+			<Box display={transcriptMode ? "flex" : "none"} flexDirection="column">
+				{transcriptMode ? (
+					<>
+						{/* full output here — reading back is exactly when truncation hurts */}
+						<MessageList entries={windowEntries} full />
+						<Text dimColor>
+							Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · ctrl+o/Esc back
+						</Text>
+					</>
+				) : null}
+			</Box>
+			{/* The third child of this box on either screen, which is the whole
 			    trick: React matches children by position, so an editor that moved to
 			    another branch would be a new component with an empty buffer. Out of
 			    the layout while the transcript is up — and through `hidden` out of
