@@ -32,7 +32,7 @@ import {
 } from "./sandbox/index.ts";
 import { type NetworkProxy, portsOf, startNetworkProxy } from "./sandbox/proxy.ts";
 import { feedSeccompFilter, SECCOMP_FD, seccompFilter } from "./sandbox/seccomp.ts";
-import { isFileSync, pathCandidates } from "./sandbox/toolchain-roots.ts";
+import { installRootOf, isFileSync, pathCandidates } from "./sandbox/toolchain-roots.ts";
 
 export type { SandboxExecution } from "./sandbox/index.ts";
 
@@ -291,9 +291,45 @@ function isWindowsBash(path: string): boolean {
 	return normalized.includes("\\microsoft\\windowsapps\\");
 }
 
+/**
+ * A `bash.exe` that ships with a Git install found through its own `git.exe`.
+ *
+ * Git for Windows puts `bash.exe` under `bin\` and `usr\bin\`, and puts only
+ * `cmd\` — which holds `git.exe` alone — on PATH, so looking for `bash.exe`
+ * along PATH misses an install that is plainly there. The install root is
+ * what the PATH entry belongs to, and both bash locations are probed under
+ * it. `exists` is injectable so the search can be pinned in a test without
+ * depending on what this machine has installed.
+ */
+export function bashFromGitOnPath(
+	pathValue: string = process.env.PATH ?? "",
+	exists: (path: string) => boolean = isFileSync,
+): string | undefined {
+	const explored = new Set<string>();
+	for (const git of pathCandidates("git.exe", pathValue)) {
+		const root = installRootOf(git);
+		if (root === null) continue;
+		const base = root.endsWith("\\") ? root : `${root}\\`;
+		const key = base.toLowerCase();
+		if (explored.has(key)) continue;
+		explored.add(key);
+		for (const bash of [`${base}bin\\bash.exe`, `${base}usr\\bin\\bash.exe`]) {
+			if (exists(bash)) return bash;
+		}
+	}
+	return undefined;
+}
+
 // Long-form design notes: docs/dev/tools.md
-/** Shell resolution: a POSIX-compatible shell on Windows when one exists, else `cmd.exe`; `/bin/bash` elsewhere. */
-export function detectShell(): { command: string; args: (cmd: string) => string[] } {
+/**
+ * Shell resolution: a POSIX-compatible shell on Windows when one exists, else
+ * `cmd.exe`; `/bin/bash` elsewhere.
+ *
+ * The `cmdExe` mark is what the spawn path reads: cmd parses its own command
+ * line, and handing it the command as one argv item makes node escape the
+ * inner quotes the way C runtimes expect (`\"`), which cmd does not undo.
+ */
+export function detectShell(): { command: string; args: (cmd: string) => string[]; cmdExe?: true } {
 	if (process.platform === "win32") {
 		const conventional = [
 			process.env.LBB_BASH_PATH,
@@ -308,7 +344,9 @@ export function detectShell(): { command: string; args: (cmd: string) => string[
 			if (isWindowsBash(candidate)) continue;
 			if (isFileSync(candidate)) return { command: candidate, args: (cmd) => ["-lc", cmd] };
 		}
-		return { command: "cmd.exe", args: (cmd) => ["/d", "/s", "/c", cmd] };
+		const besideGit = bashFromGitOnPath();
+		if (besideGit !== undefined) return { command: besideGit, args: (cmd) => ["-lc", cmd] };
+		return { command: "cmd.exe", args: (cmd) => ["/d", "/s", "/c", cmd], cmdExe: true };
 	}
 	return { command: "/bin/bash", args: (cmd) => ["-c", cmd] };
 }
@@ -811,12 +849,29 @@ export class ChildProcessExecOperations implements ExecOperations {
 			// rather than a file so the program never touches the filesystem on
 			// its way to bwrap, and the child reads it to EOF while parsing
 			// arguments.
-			const child = spawn(program, programArgs, {
-				cwd,
-				windowsHide: true,
-				env: childEnv,
-				stdio: seccompProgram === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"],
-			});
+			//
+			// cmd.exe parses its own command line. Handed the command as one
+			// argv item, node escapes the inner quotes the way a C runtime
+			// expects — `cd /d "G:\dir"` becomes `cd /d \"G:\dir\"` — and cmd
+			// does not undo that, so the command died with its own syntax
+			// error. Node's shell mode wraps the command in the outer pair cmd
+			// wants and passes it verbatim. Every other shell keeps the argv
+			// built above, and the container branch never reaches here.
+			const child =
+				resolution.kind === "unconfined" && this.#shell.cmdExe === true
+					? spawn(command, {
+							shell: shellCommand,
+							cwd,
+							windowsHide: true,
+							env: childEnv,
+							stdio: ["ignore", "pipe", "pipe"],
+						})
+					: spawn(program, programArgs, {
+							cwd,
+							windowsHide: true,
+							env: childEnv,
+							stdio: seccompProgram === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"],
+						});
 			// The type definitions spell out overloads only for three-slot stdio
 			// arrays, so the four-slot form falls back to the ChildProcess whose
 			// streams may be null. Slots 1 and 2 name pipes in both arrays above,

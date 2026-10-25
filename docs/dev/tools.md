@@ -18,15 +18,19 @@ The package also holds the parts that must exist once, not once per caller. Thes
 
 The Bash tool runs one command line through the platform shell. On Windows it prefers a POSIX-compatible shell, such as Git Bash or MSYS2, because most commands from an agent assume the POSIX syntax. It falls back to `cmd.exe`. Other platforms use `/bin/bash` with `-c`. On Windows the arguments are `-lc` for bash and `/d /s /c` for `cmd.exe`.
 
-The Windows search order is `LBB_BASH_PATH`, then `C:\Program Files\Git\bin\bash.exe`, then `C:\Program Files\Git\usr\bin\bash.exe`, then `%USERPROFILE%\.bun\bin\bash.exe`, then a PATH scan. The conventional locations come first, because that install is a deliberate one. `LBB_BASH_PATH` comes first of all, because it is where the user pointed the tool.
+The Windows search order is `LBB_BASH_PATH`, then `C:\Program Files\Git\bin\bash.exe`, then `C:\Program Files\Git\usr\bin\bash.exe`, then `%USERPROFILE%\.bun\bin\bash.exe`, then a PATH scan, then a search for a Git install through its own `git.exe`. The conventional locations come first, because that install is a deliberate one. `LBB_BASH_PATH` comes first of all, because it is where the user pointed the tool.
 
 PATH is the long tail. An install under scoop, chocolatey, or another drive used to be a machine where every command went quietly through `cmd.exe`. The POSIX-shaped commands then failed one at a time. The PATH scan reads only entries that start with a drive letter.
+
+Git for Windows adds only its `cmd` directory, which holds `git.exe`, to PATH. `bash.exe` lives one level over, in `bin` and `usr\bin`, so a PATH scan for `bash.exe` misses an install that is plainly there. The `git.exe` search climbs from each PATH entry through its `bin`-class directory names to the install root, then probes `bin\bash.exe` and `usr\bin\bash.exe` beneath it.
 
 A shell that is itself MSYS hands its children a PATH of POSIX paths, such as `/usr/bin`. No Windows process can open those paths. The same directories sit there behind them, under their real names.
 
 The tool rejects a `bash.exe` on PATH when it is the WSL launcher of Windows itself. It answers to the same name and sits in directories that are on every PATH. It starts a Linux VM, and every command this tool runs names Windows paths. The check covers `%SystemRoot%\System32\` and `\Microsoft\WindowsApps\`. `LBB_BASH_PATH` is exempt from that rule, because the user named it.
 
 A candidate must also be a file. A directory named `bash.exe` is not a shell.
+
+The `cmd.exe` fallback is spawned through node's shell mode, which wraps the command in the outer quotes cmd expects. Handed the command as one argv item instead, node escapes its inner quotes as `\"`. cmd does not undo that, and `cd /d "G:\dir"` then fails with a syntax error about the file name, directory name, or volume label. The shell's `cmdExe` mark is what tells the spawn path which form to use; the container branch builds its own command line and is not affected.
 
 Bash inputs are `command`, `timeout` in milliseconds, `description`, `run_in_background`, and the two escalation fields, `escalate` and `justification`. An escalated call runs outside the sandbox after the user approves it (`sandbox.md`, the escalation section). The timeout minimum is one. A foreground wait defaults to 120000 and is clamped to 600000. With `run_in_background` the same field is the shell's lifetime: default 1800000, clamped to 7200000 by the manager. The schema admits the larger ceiling so one field can serve both modes; the foreground branch applies its own clamp. The tool is not read-only and not concurrency safe. Its `overflow` mode is `"spill"`, because command output comes once. A build that fails ends its report with the error. A head-only cut throws that part away.
 
@@ -438,7 +442,7 @@ Unset, accumulation is the unbounded string it always was, one per stream. That 
 
 `NodeFileSystemOperations.writeTextFileAtomic` writes a temp file and then renames it. A rename that fails falls back to a direct write of the target. `isFileSync` is the sync check for the shell candidates.
 
-`isWindowsBash` rejects the WSL launcher by its directory, `\system32\` and `\microsoft\windowsapps\`. `LBB_BASH_PATH` is exempt. `pathCandidates` searches PATH for a shell and reads only drive-anchored entries. A shell that is itself MSYS hands its children POSIX paths, and no Windows process can open those. `detectShell` returns the program and the arguments: `-lc` for the conventional bash list, `/d /s /c` for `cmd.exe`, and `/bin/bash -c` on other platforms.
+`isWindowsBash` rejects the WSL launcher by its directory, `\system32\` and `\microsoft\windowsapps\`. `LBB_BASH_PATH` is exempt. `pathCandidates` searches PATH for a shell and reads only drive-anchored entries. A shell that is itself MSYS hands its children POSIX paths, and no Windows process can open those. `bashFromGitOnPath` turns a `git.exe` PATH entry into its install root with `installRootOf` and probes both shipped bash locations. `detectShell` returns the program and the arguments: `-lc` for the conventional bash list, `/d /s /c` for `cmd.exe`, and `/bin/bash -c` on other platforms. The `cmdExe` mark on the `cmd.exe` answer selects node's shell mode at spawn time.
 
 `proxyPolicyKey` is a JSON key for a policy. The code rejected a hand-joined string, because it is ambiguous. Join each rule as `permission:pattern`, with a space between rules. The pair `{ allow, x }` and `{ allow, y }` gives the same text as one rule with the pattern `x allow:y`. The second list then runs under the key of the first.
 

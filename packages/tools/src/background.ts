@@ -898,12 +898,24 @@ export class BackgroundShellManager {
 			// Only the native branch's argv names fd 3, for the reason the
 			// foreground spawn gives.
 			const seccompProgram = resolution.kind === "native" ? seccomp : undefined;
-			proc = spawn(program, programArgs, {
-				cwd,
-				windowsHide: true,
-				env: proxyEnv ? { ...process.env, ...proxyEnv } : process.env,
-				stdio: seccompProgram === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"],
-			});
+			// cmd.exe gets the same treatment as the foreground path: node's
+			// shell mode keeps the command's own quotes intact, where passing
+			// it as an argv item would escape them into `\"` and break it.
+			proc =
+				resolution.kind === "unconfined" && this.#shell.cmdExe === true
+					? spawn(command, {
+							shell: shellCommand,
+							cwd,
+							windowsHide: true,
+							env: proxyEnv ? { ...process.env, ...proxyEnv } : process.env,
+							stdio: ["ignore", "pipe", "pipe"],
+						})
+					: spawn(program, programArgs, {
+							cwd,
+							windowsHide: true,
+							env: proxyEnv ? { ...process.env, ...proxyEnv } : process.env,
+							stdio: seccompProgram === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "pipe"],
+						});
 			if (seccompProgram !== undefined && !feedSeccompFilter(proc, seccompProgram)) {
 				// A shell that could not receive the promised filter is ended, not
 				// left running behind an argv that describes a boundary it lacks.
