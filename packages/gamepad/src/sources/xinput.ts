@@ -16,6 +16,10 @@
  * product id, so the device this source lists carries zeros for both and says
  * `family: "xbox"` — that claim, not the ids, is what tells `pickLinks` this is
  * a pad it can read. Third-party controllers behind XInput work identically.
+ * `XInputGetCapabilities` does report a pad's subtype, so a wheel or an arcade
+ * stick is listed as one rather than as a generic controller; it still says
+ * nothing about the model, and a pad that will not answer keeps the generic
+ * name rather than disappearing from the list.
  */
 
 import { dlopen, FFIType, ptr } from "bun:ffi";
@@ -24,6 +28,16 @@ import { XBOX_REPORT_LENGTH, XINPUT_VIBRATION_LENGTH } from "../xbox.ts";
 
 /** The bytes `XInputGetState` writes: `XINPUT_STATE`, a DWORD and five fields. */
 export const XINPUT_STATE_LENGTH = 16;
+
+/**
+ * The bytes `XInputGetCapabilities` writes: `XINPUT_CAPABILITIES` — a type
+ * byte, a subtype byte, a flags word, `XINPUT_GAMEPAD` (12 bytes), and
+ * `XINPUT_VIBRATION` (4 bytes).
+ */
+export const XINPUT_CAPABILITIES_LENGTH = 20;
+
+/** `SubType` sits just past `Type` in `XINPUT_CAPABILITIES`. */
+const XINPUT_SUBTYPE_OFFSET = 1;
 
 /** `XINPUT_BATTERY_INFORMATION`: a type byte and a level byte. */
 const XINPUT_BATTERY_LENGTH = 2;
@@ -46,6 +60,12 @@ export interface XInputModule {
 	getState(slot: number, state: Uint8Array): number;
 	getBattery(slot: number, battery: Uint8Array): number;
 	setState(slot: number, vibration: Uint8Array): number;
+	/**
+	 * Optional on purpose: it was added after the calls above, and a fake or an
+	 * embedder that implements only those must keep working. The source then
+	 * lists its pads under the generic name.
+	 */
+	getCapabilities?(slot: number, capabilities: Uint8Array): number;
 }
 
 /** Injected so a test needs neither Windows nor a controller. */
@@ -99,6 +119,64 @@ function slotFromPath(path: string | undefined): number | undefined {
 	return slot < XINPUT_SLOTS ? slot : undefined;
 }
 
+/**
+ * A capabilities subtype as words a person recognizes.
+ *
+ * This is the only identity XInput offers beyond the slot number. UNKNOWN and
+ * GAMEPAD both mean "an ordinary pad", and a byte from a newer driver means
+ * nothing this table can name, so those all get the generic label: a hex value
+ * on screen tells nobody what they plugged in.
+ */
+export function xinputSubtypeLabel(subtype: number): string {
+	switch (subtype) {
+		case 0x02:
+			return "Xbox wheel";
+		case 0x03:
+			return "Xbox arcade stick";
+		case 0x04:
+			return "Xbox flight stick";
+		case 0x05:
+			return "Xbox dance pad";
+		case 0x06:
+		case 0x07:
+			return "Xbox guitar";
+		case 0x08:
+			return "Xbox drum kit";
+		case 0x0b:
+			return "Xbox bass guitar";
+		case 0x13:
+			return "Xbox arcade pad";
+		default:
+			return "Xbox controller";
+	}
+}
+
+/**
+ * The name a connected slot is listed under.
+ *
+ * Every failure here falls back to the generic name. A call whose only job is
+ * a better label must never hide a pad that `getState` just answered — and the
+ * method is optional, so a module written before capabilities existed still
+ * lists its slots.
+ */
+function slotName(lib: XInputModule, slot: number): string {
+	let label = "Xbox controller";
+	if (lib.getCapabilities !== undefined) {
+		try {
+			const capabilities = new Uint8Array(XINPUT_CAPABILITIES_LENGTH);
+			if (
+				lib.getCapabilities(slot, capabilities) === XINPUT_CONNECTED &&
+				capabilities.length >= XINPUT_CAPABILITIES_LENGTH
+			) {
+				label = xinputSubtypeLabel(capabilities[XINPUT_SUBTYPE_OFFSET]);
+			}
+		} catch {
+			// An embedder may not be able to answer; the pad is still there.
+		}
+	}
+	return `${label} (XInput slot ${slot + 1})`;
+}
+
 export function createXInputSource(options: XInputSourceOptions): PadSource {
 	const load = options.load;
 	const timers = options.timers ?? systemTimers;
@@ -131,6 +209,7 @@ export function createXInputSource(options: XInputSourceOptions): PadSource {
 
 		list() {
 			if (!module) return [];
+			const lib = module;
 			const devices: PadSourceDevice[] = [];
 			for (let slot = 0; slot < XINPUT_SLOTS; slot += 1) {
 				if (!probe(slot)) continue;
@@ -140,7 +219,7 @@ export function createXInputSource(options: XInputSourceOptions): PadSource {
 					// says this package can read the device without a vendor table entry.
 					vendorId: 0,
 					productId: 0,
-					name: `Xbox controller (XInput slot ${slot + 1})`,
+					name: slotName(lib, slot),
 					family: "xbox",
 					carriesReports: true,
 				});
@@ -226,9 +305,9 @@ export function createXInputSource(options: XInputSourceOptions): PadSource {
 
 /**
  * The production loader. `xinput1_4.dll` ships with Windows 8 and later;
- * `xinput1_3.dll` is the Windows 7 name and exports the same three functions.
- * Failure is a value, like node-hid's: an unsupported machine is a supported
- * way to run the rest of the package.
+ * `xinput1_3.dll` is the Windows 7 name and exports the same calls, including
+ * `XInputGetCapabilities`. Failure is a value, like node-hid's: an unsupported
+ * machine is a supported way to run the rest of the package.
  */
 export async function importXInput(): Promise<XInputModule | null> {
 	if (process.platform !== "win32") return null;
@@ -238,6 +317,7 @@ export async function importXInput(): Promise<XInputModule | null> {
 				XInputGetState: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.u32 },
 				XInputSetState: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.u32 },
 				XInputGetBatteryInformation: { args: [FFIType.u32, FFIType.u8, FFIType.ptr], returns: FFIType.u32 },
+				XInputGetCapabilities: { args: [FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.u32 },
 			});
 			return {
 				getState(slot, state) {
@@ -249,9 +329,14 @@ export async function importXInput(): Promise<XInputModule | null> {
 				setState(slot, vibration) {
 					return lib.symbols.XInputSetState(slot, ptr(vibration));
 				},
+				getCapabilities(slot, capabilities) {
+					// Flags 0 asks for any device type. `XINPUT_FLAG_GAMEPAD` would refuse
+					// to describe exactly the wheels and sticks this call exists to name.
+					return lib.symbols.XInputGetCapabilities(slot, 0, ptr(capabilities));
+				},
 			};
 		} catch {
-			// This DLL is not here or is not the one with the battery call; the next
+			// This DLL is not here or does not export every call used here; the next
 			// name is the only other place Windows keeps these functions.
 		}
 	}

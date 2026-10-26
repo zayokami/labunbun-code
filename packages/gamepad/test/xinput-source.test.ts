@@ -20,15 +20,26 @@ import {
 	type XInputTimer,
 	xinputSlotPath,
 } from "../src/index.ts";
-import { XINPUT_STATE_LENGTH } from "../src/sources/xinput.ts";
+import { XINPUT_CAPABILITIES_LENGTH, XINPUT_STATE_LENGTH, xinputSubtypeLabel } from "../src/sources/xinput.ts";
 
-/** A library whose slots, state and battery the test sets. */
-function fakeXInput(slots: number[]) {
+/** A capabilities answer for the fake; leaving it out models a module without the call. */
+interface FakeCapabilities {
+	/** `SubType` per slot. A slot not named here answers GAMEPAD. */
+	subtypes?: Record<number, number>;
+	/** A non-zero result to answer instead of filling in the struct. */
+	result?: number;
+	/** Thrown instead of answering. */
+	throws?: Error;
+}
+
+/** A library whose slots, state, battery and capabilities the test sets. */
+function fakeXInput(slots: number[], capabilities?: FakeCapabilities) {
 	const connected = new Set(slots);
 	let state = new Uint8Array(XINPUT_STATE_LENGTH);
 	let batteryType = 1;
 	let batteryLevel = 3;
 	const writes: Uint8Array[] = [];
+	const capabilityCalls: { slot: number; length: number }[] = [];
 
 	const module: XInputModule = {
 		getState(slot, out) {
@@ -49,10 +60,22 @@ function fakeXInput(slots: number[]) {
 		},
 	};
 
+	if (capabilities !== undefined) {
+		module.getCapabilities = (slot, out) => {
+			capabilityCalls.push({ slot, length: out.length });
+			if (capabilities.throws !== undefined) throw capabilities.throws;
+			if (capabilities.result !== undefined) return capabilities.result;
+			// `SubType` is the second byte of `XINPUT_CAPABILITIES`.
+			out[1] = capabilities.subtypes?.[slot] ?? 0x01;
+			return 0;
+		};
+	}
+
 	return {
 		module,
 		connected,
 		writes,
+		capabilityCalls,
 		setState(next: Uint8Array) {
 			state = Uint8Array.from(next);
 		},
@@ -148,6 +171,105 @@ describe("list", () => {
 		expect(s.list()).toHaveLength(2);
 		fake.connected.delete(0);
 		expect(s.list().map((device) => device.path)).toEqual([xinputSlotPath(1)]);
+	});
+});
+
+describe("subtype labels", () => {
+	test("every documented subtype has words, and anything else stays generic", () => {
+		expect(xinputSubtypeLabel(0x00)).toBe("Xbox controller");
+		expect(xinputSubtypeLabel(0x01)).toBe("Xbox controller");
+		expect(xinputSubtypeLabel(0x02)).toBe("Xbox wheel");
+		expect(xinputSubtypeLabel(0x03)).toBe("Xbox arcade stick");
+		expect(xinputSubtypeLabel(0x04)).toBe("Xbox flight stick");
+		expect(xinputSubtypeLabel(0x05)).toBe("Xbox dance pad");
+		expect(xinputSubtypeLabel(0x06)).toBe("Xbox guitar");
+		expect(xinputSubtypeLabel(0x07)).toBe("Xbox guitar");
+		expect(xinputSubtypeLabel(0x08)).toBe("Xbox drum kit");
+		expect(xinputSubtypeLabel(0x0b)).toBe("Xbox bass guitar");
+		expect(xinputSubtypeLabel(0x13)).toBe("Xbox arcade pad");
+		expect(xinputSubtypeLabel(0x7f)).toBe("Xbox controller");
+	});
+});
+
+describe("capabilities naming", () => {
+	test("a plain gamepad keeps the name this source has always used", async () => {
+		const fake = fakeXInput([0], { subtypes: { 0: 0x01 } });
+		const { source: s } = await source(fake);
+		expect(s.list().map((device) => device.name)).toEqual(["Xbox controller (XInput slot 1)"]);
+	});
+
+	test("a wheel is named as a wheel, not as a controller", async () => {
+		const fake = fakeXInput([0], { subtypes: { 0: 0x02 } });
+		const { source: s } = await source(fake);
+		expect(s.list().map((device) => device.name)).toEqual(["Xbox wheel (XInput slot 1)"]);
+	});
+
+	test("an arcade pad on slot 1 is still slot 2 to a person", async () => {
+		const fake = fakeXInput([1], { subtypes: { 1: 0x13 } });
+		const { source: s } = await source(fake);
+		expect(s.list().map((device) => device.name)).toEqual(["Xbox arcade pad (XInput slot 2)"]);
+	});
+
+	test("a subtype newer than this table falls back to the generic name", async () => {
+		const fake = fakeXInput([0], { subtypes: { 0: 0x7f } });
+		const { source: s } = await source(fake);
+		expect(s.list().map((device) => device.name)).toEqual(["Xbox controller (XInput slot 1)"]);
+	});
+
+	test("a module without capabilities still lists its pads", async () => {
+		const fake = fakeXInput([2]);
+		const { source: s } = await source(fake);
+		expect(s.list().map((device) => device.name)).toEqual(["Xbox controller (XInput slot 3)"]);
+	});
+
+	test("a refused capabilities call costs the label, not the pad", async () => {
+		const fake = fakeXInput([0], { result: 1167, subtypes: { 0: 0x02 } });
+		const { source: s } = await source(fake);
+		const devices = s.list();
+		expect(devices.map((device) => device.name)).toEqual(["Xbox controller (XInput slot 1)"]);
+		expect(devices.map((device) => device.path)).toEqual([xinputSlotPath(0)]);
+	});
+
+	test("a capabilities call that throws costs the label, not the pad", async () => {
+		const fake = fakeXInput([0], { throws: new Error("the fake cannot answer"), subtypes: { 0: 0x02 } });
+		const { source: s } = await source(fake);
+		const devices = s.list();
+		expect(devices.map((device) => device.name)).toEqual(["Xbox controller (XInput slot 1)"]);
+		expect(devices.map((device) => device.path)).toEqual([xinputSlotPath(0)]);
+	});
+
+	test("one 20-byte request per connected slot, made by list and by nothing else", async () => {
+		const fake = fakeXInput([0, 2], { subtypes: { 0: 0x02, 2: 0x04 } });
+		const { source: s, clock } = await source(fake);
+		expect(fake.capabilityCalls).toEqual([]);
+
+		// Open and poll a slot without asking `list()` first: capabilities belong
+		// to discovery, not to the report path, so a running pad must not ask.
+		const handle = s.open({ path: xinputSlotPath(0), vendorId: 0, productId: 0, family: "xbox" });
+		clock.fire();
+		handle.close();
+		expect(fake.capabilityCalls).toEqual([]);
+
+		expect(s.list().map((device) => device.name)).toEqual([
+			"Xbox wheel (XInput slot 1)",
+			"Xbox flight stick (XInput slot 3)",
+		]);
+		expect(fake.capabilityCalls).toEqual([
+			{ slot: 0, length: XINPUT_CAPABILITIES_LENGTH },
+			{ slot: 2, length: XINPUT_CAPABILITIES_LENGTH },
+		]);
+		expect(XINPUT_CAPABILITIES_LENGTH).toBe(20);
+	});
+
+	test("the production binding asks for any device type", async () => {
+		// The flags word does not cross the injected module seam — `getCapabilities`
+		// takes a slot and a buffer, so the fake cannot see it. The policy is still
+		// worth pinning: `XINPUT_FLAG_GAMEPAD` would make exactly the wheel and the
+		// flight stick above answer with an error, and both would lose their names.
+		// A source-text check is the only place to stand, the same reason the
+		// node-hid loader has one.
+		const source = await Bun.file(new URL("../src/sources/xinput.ts", import.meta.url)).text();
+		expect(source).toContain("XInputGetCapabilities(slot, 0, ptr(capabilities))");
 	});
 });
 
