@@ -53,6 +53,7 @@ import {
 	bindingText,
 	DS4_BUTTON_IDS,
 	describePadDevice,
+	devicePadKey,
 	PAD_TOUCH_IDS,
 	type PadInputId,
 	type PadSource,
@@ -3421,7 +3422,10 @@ export function appCommandTable(): Array<[string, string]> {
 		["/emacs", "Turn modeless emacs editing in the prompt on or off: /emacs [on|off]"],
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
-		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|reset|approve|rumble]"],
+		[
+			"/gamepad",
+			"Control the session from a DualShock 4 or Xbox controller: /gamepad [on|off|status|watch|list|reset|approve|rumble|switch]",
+		],
 		[
 			"/login",
 			"Sign in to a subscription: /login [claude|chatgpt|gemini|<code#state>] — the Claude and Gemini flows may ask you to paste",
@@ -5147,6 +5151,64 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				return true;
 			}
 
+			if (arg === "switch") {
+				// The target is everything after "switch", kept in its original case: a
+				// device name or path may contain spaces, and `switchPad` is the layer
+				// that lowercases what it compares. No argument, or "next", cycles.
+				const target = text.trim().split(/\s+/).slice(2).join(" ");
+				const status = pad.service.status();
+				const controllers = status.controllers ?? [];
+				// Off is its own answer, with the command that fixes it; any other
+				// non-connected phase already has a sentence in its headline.
+				if (!pad.config.enabled || status.phase !== "connected") {
+					pushInfo(
+						ctx.handle,
+						pad.config.enabled ? padHeadline(status) : "Gamepad is off — turn it on with /gamepad on.",
+					);
+					return true;
+				}
+				if (controllers.length === 0) {
+					pushInfo(ctx.handle, "No controller attached — nothing to switch to.");
+					return true;
+				}
+				// The names the user is choosing between, in the same order as the
+				// `controllers:` block `/gamepad status` prints.
+				const labels = controllers.map((controller) => describePadDevice(controller.device)).join(", ");
+				if (controllers.length === 1) {
+					if (target === "" || target.toLowerCase() === "next") {
+						pushInfo(ctx.handle, "Only one controller is attached — nothing to switch to.");
+						return true;
+					}
+					const only = controllers[0];
+					if (only === undefined) return true;
+					if (!pad.service.switchPad(target)) {
+						pushInfo(ctx.handle, `No controller matches "${target}". Attached: ${labels}.`);
+						return true;
+					}
+					// One controller and the user named it: there is nothing to move to,
+					// but the word they used was right and saying so is the answer.
+					pushInfo(ctx.handle, `Already reading ${describePadDevice(only.device)}.`);
+					return true;
+				}
+				const before = controllers.find((controller) => controller.active);
+				if (!pad.service.switchPad(target)) {
+					pushInfo(ctx.handle, `No controller matches "${target}". Attached: ${labels}.`);
+					return true;
+				}
+				// A manual switch does not consume a press — nothing was pressed. The
+				// only question the sentence answers is whether the pad moved at all,
+				// which is read from the active controller before and after the call.
+				const reading = pad.service.status().controllers?.find((controller) => controller.active) ?? before;
+				if (reading === undefined) return true;
+				pushInfo(
+					ctx.handle,
+					reading.key === before?.key
+						? `Already reading ${describePadDevice(reading.device)}.`
+						: `Switched to ${describePadDevice(reading.device)}.`,
+				);
+				return true;
+			}
+
 			switch (arg) {
 				case undefined: {
 					// The mapping, which is the manual. The ids are what the settings file
@@ -5198,6 +5260,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				}
 				case "list": {
 					const devices = pad.service.devices();
+					// Which pad is being read, by grouping key: a DualShock 4 attached
+					// twice is still one controller, and both of its rows are the same pad.
+					// A device with no path cannot be keyed and so is never marked.
+					const activeKey = pad.service.status().controllers?.find((controller) => controller.active)?.key;
 					// An empty list has two very different causes — nothing plugged in,
 					// and the optional module not installed — and the status is what knows
 					// which, so it supplies the sentence.
@@ -5206,7 +5272,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						devices.length === 0
 							? `${padHeadline(pad.service.status())} — nothing to list.`
 							: devices
-									.map((device) => `  ${describePadDevice(device)}${device.carriesReports ? "" : " (no reports)"}`)
+									.map((device) => {
+										const active =
+											device.path !== undefined && activeKey !== undefined && devicePadKey(device) === activeKey;
+										return `  ${describePadDevice(device)}${device.carriesReports ? "" : " (no reports)"}${active ? " · active" : ""}`;
+									})
 									.join("\n"),
 					);
 					return true;
@@ -5223,7 +5293,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					pushInfo(ctx.handle, "Buzzed.");
 					return true;
 				default:
-					pushInfo(ctx.handle, `Unknown: /gamepad ${arg} — try on, off, status, watch, list, reset, approve, rumble`);
+					pushInfo(
+						ctx.handle,
+						`Unknown: /gamepad ${arg} — try on, off, status, watch, list, reset, approve, rumble, switch`,
+					);
 					return true;
 			}
 		}

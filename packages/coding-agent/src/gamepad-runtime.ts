@@ -41,6 +41,7 @@ import {
 	type PadBindingMap,
 	type PadBridge,
 	type PadClock,
+	type PadControllerStatus,
 	type PadFamily,
 	type PadPalette,
 	type PadSample,
@@ -202,12 +203,12 @@ export function padStartupNotice(status: PadServiceStatus): string | undefined {
 /**
  * One line describing what the pad is doing, for `/gamepad watch`.
  *
- * Every field is one a person verifying a mapping needs: the transport (which is
- * also the payload layout), how long the report was (the quickest way to see the
- * transport change under a Bluetooth reconnect), the buttons, the axes, the
- * battery, whether the CRC checked out, and where the fingers are. Identical
- * samples produce identical lines, which is what lets the caller print on change
- * instead of on report.
+ * Every field is one a person verifying a mapping needs: the family and the
+ * transport (which together are the payload layout), how long the report was
+ * (the quickest way to see the transport change under a Bluetooth reconnect),
+ * the buttons, the axes, the battery, whether the CRC checked out, and where the
+ * fingers are. Identical samples produce identical lines, which is what lets the
+ * caller print on change instead of on report.
  *
  * On a family with a touch surface, the points are printed whether or not
  * anything is touching them. A line that only mentioned a finger when there was
@@ -233,8 +234,11 @@ export function formatSample(sample: PadSample): string {
 	const touch = state.touch === undefined ? "" : ` · touch 1 ${at(state.touch[0])} 2 ${at(state.touch[1])}`;
 	const triggers = sample.family === "xbox" ? ["LT", "RT"] : ["L2", "R2"];
 	const gestures = sample.gestures === undefined ? "" : ` · gesture ${sample.gestures.join("+")}`;
+	// The family leads the line because two pads of different families can be
+	// attached at once: `usb` and `xinput` name the payload layout, not the pad,
+	// and a line read while both are plugged in should say which one answered.
 	return (
-		`${sample.transport} ${sample.bytes}B · ${held} · dpad ${state.dpad ?? "—"}` +
+		`${sample.family} ${sample.transport} ${sample.bytes}B · ${held} · dpad ${state.dpad ?? "—"}` +
 		` · L ${axis(state.leftStick)} · R ${axis(state.rightStick)}` +
 		` · ${triggers[0]} ${state.leftTrigger.toFixed(2)} ${triggers[1]} ${state.rightTrigger.toFixed(2)}` +
 		` · ${battery}${touch}${gestures}${crc}`
@@ -324,7 +328,12 @@ export function padHeadline(status: PadServiceStatus): string {
 	const notice = padStartupNotice(status);
 	if (notice) return notice;
 	if (status.phase === "connected") {
-		return `Gamepad connected — ${status.device ? describePadDevice(status.device) : "unknown device"}`;
+		// The device named here is the one being read. When a second controller is
+		// attached, "connected" alone would hide the fact that there is another pad
+		// to switch to — and `/gamepad switch` exists precisely because of it.
+		const count = status.controllers?.length ?? 0;
+		const attached = count > 1 ? ` — ${count} controllers attached` : "";
+		return `Gamepad connected — ${status.device ? describePadDevice(status.device) : "unknown device"}${attached}`;
 	}
 	return `Gamepad ${status.phase}`;
 }
@@ -352,6 +361,24 @@ export function padConfirmGlyph(status: PadServiceStatus | undefined): string {
 }
 
 /**
+ * One row of the `controllers:` block: which pad, on which links, how much
+ * charge, and whether the app is reading it.
+ *
+ * The family leads because two families can be attached at once, and `usb` /
+ * `xinput` say how a link talks rather than what is on the other end. The
+ * battery is per controller and lives on its own row — the standalone
+ * `battery:` line below would repeat the active pad's charge one row later.
+ */
+function controllerStatusLine(controller: PadControllerStatus, index: number): string {
+	const battery =
+		controller.battery === undefined
+			? ""
+			: ` · battery ${controller.battery.level}/${batteryFull(controller.battery)}${controller.battery.cable ? " (cable)" : ""}${padBatteryLow(controller.battery) ? " — low" : ""}`;
+	const active = controller.active ? " — active" : "";
+	return `    ${index + 1}. ${controller.family} ${controller.transports.join(" + ")}${battery}${active}`;
+}
+
+/**
  * The block `/gamepad status` prints.
  *
  * Written as one function rather than assembled at the call site so the same
@@ -373,6 +400,11 @@ export function formatPadStatus(
 	now: number,
 ): string {
 	const lines: string[] = [padHeadline(status)];
+	// Both halves of the multi-controller view hang off this one question, so it is
+	// asked once: the headline count and the controllers block must never appear
+	// for a status that only has one pad.
+	const controllers = status.controllers;
+	const multiple = status.phase === "connected" && controllers !== undefined && controllers.length > 1;
 	if (status.transport)
 		lines.push(
 			`  transport: ${status.transport}${status.crcOk === undefined ? "" : ` (crc ${status.crcOk ? "ok" : "bad"})`}`,
@@ -390,10 +422,21 @@ export function formatPadStatus(
 	// can be picked automatically — nothing says which one the user means — so the
 	// way out is named instead.
 	if (status.linksDisagree) {
-		lines.push("  both links report — these may be two controllers (pin one with the device filter)");
+		// With another pad attached and switching supported, pinning is no longer
+		// the only way out; the existing sentence keeps its words either way.
+		const wayOut = multiple ? "; switching pads is the way out" : "";
+		lines.push(`  both links report — these may be two controllers (pin one with the device filter)${wayOut}`);
+	}
+	// Which pad the app is reading has to be sayable when there is more than one.
+	// The transport line above names only the reader's link, and the separate
+	// battery line below would repeat the active rows' charge.
+	if (multiple && controllers !== undefined) {
+		lines.push("  controllers:");
+		for (const [at, controller] of controllers.entries()) lines.push(controllerStatusLine(controller, at));
+		lines.push("  switch: press a button on another controller, or /gamepad switch");
 	}
 	if (status.device?.path) lines.push(`  path: ${status.device.path}`);
-	if (status.battery) {
+	if (status.battery && !multiple) {
 		lines.push(
 			`  battery: ${status.battery.level}/${batteryFull(status.battery)}${status.battery.cable ? " (cable)" : ""}${padBatteryLow(status.battery) ? " — low" : ""}`,
 		);
@@ -424,9 +467,15 @@ export function formatPadStatus(
 		if (!config.rumble) off.push("rumble");
 		lines.push(`  feedback: ${off.join(" + ")} off (settings)`);
 	}
-	const family = statusFamily(status);
+	// The filter names what the `device` setting would match. It follows the
+	// *attached controllers*, not the pad being read: with a DualShock 4 and an
+	// Xbox pad in, "(any DualShock 4)" would describe half of what the setting can
+	// name. One family keeps the family's own wording; two, or no list at all,
+	// keeps the wording true for either.
+	const attached = [...new Set((status.controllers ?? []).map((controller) => controller.family))];
+	const onlyFamily = attached.length === 1 ? attached[0] : undefined;
 	const anyDevice =
-		family === "xbox" ? "(any Xbox controller)" : family === "ds4" ? "(any DualShock 4)" : "(any controller)";
+		onlyFamily === "xbox" ? "(any Xbox controller)" : onlyFamily === "ds4" ? "(any DualShock 4)" : "(any controller)";
 	lines.push(`  device filter: ${config.device ?? anyDevice}`);
 	// Two families now, and the line names both. "25 controls" would be shorter and
 	// would hide the surface entirely — and someone reading this line because a

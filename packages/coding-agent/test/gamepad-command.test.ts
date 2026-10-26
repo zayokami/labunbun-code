@@ -12,7 +12,7 @@
  * rather than to a USB port. Every test runs against a throwaway home.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -20,6 +20,7 @@ import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import {
 	createFauxSource,
+	describePadDevice,
 	type FauxSource,
 	PAD_RUMBLE,
 	PAD_TOUCH_IDS,
@@ -27,8 +28,8 @@ import {
 	padPalette,
 } from "@labunbun/gamepad";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
-import { attachedTwice, xboxDevice } from "../../gamepad/test/devices.ts";
-import { CROSS, usbBytes, XBOX_A, xboxBattery, xboxBytes } from "../../gamepad/test/reports.ts";
+import { attachedTwice, wiredDevice, xboxDevice } from "../../gamepad/test/devices.ts";
+import { battery, CROSS, usbBytes, XBOX_A, xboxBattery, xboxBytes } from "../../gamepad/test/reports.ts";
 import {
 	createPadRuntime,
 	createPadWatch,
@@ -116,6 +117,20 @@ function harness(options: { settings?: Record<string, unknown>; home?: string; d
 }
 
 /**
+ * Two controllers from two families, attached before the app starts.
+ *
+ * The devices are handed back so a report can be addressed to one of them: the
+ * faux source's default target is the handle opened last, and with two pads that
+ * is a coin-flip no test should take. The cable is the DualShock 4's only link,
+ * so its controller row says `usb`; the Xbox pad is one XInput slot.
+ */
+function multiHarness() {
+	const ds4 = wiredDevice();
+	const xbox = xboxDevice();
+	return { ...harness({ devices: [ds4, xbox] }), ds4, xbox };
+}
+
+/**
  * Let a command's asynchronous half land (the `.then` after `setEnabled`), or —
  * when a test names a longer wait — let a buzz that arrived with the connection
  * finish, so that "nothing was written" cannot be a packet still in flight.
@@ -133,6 +148,15 @@ function infoText(store: { get: () => UiState }): string {
 		.entries.filter((e) => e.kind === "info")
 		.map((e) => (e as { text: string }).text)
 		.join("\n");
+}
+
+/** The last thing the command said, when earlier lines would mask a wrong answer. */
+function lastInfoText(store: { get: () => UiState }): string {
+	const entry = store
+		.get()
+		.entries.filter((e) => e.kind === "info")
+		.at(-1);
+	return entry === undefined ? "" : (entry as { text: string }).text;
 }
 
 /**
@@ -208,7 +232,9 @@ describe("/gamepad with no argument", () => {
 	test("an unknown subcommand lists the ones that exist", () => {
 		const { ctx, store } = harness();
 		handleAppCommand("/gamepad sideways", ctx);
-		expect(infoText(store)).toContain("Unknown: /gamepad sideways");
+		expect(infoText(store)).toContain(
+			"Unknown: /gamepad sideways — try on, off, status, watch, list, reset, approve, rumble, switch",
+		);
 	});
 
 	test("every sub-argument the switch answers to is named where a user can find it", () => {
@@ -221,6 +247,12 @@ describe("/gamepad with no argument", () => {
 		handleAppCommand("/gamepad sideways", ctx);
 		const usage = infoText(store);
 		const row = appCommandTable().find(([name]) => name === "/gamepad")?.[1] ?? "";
+		// Named in both families' language: the row is what `/help` shows before
+		// anyone has held a controller, and "DualShock 4" alone would hide half the
+		// pads `/gamepad switch` can move between.
+		expect(row).toBe(
+			"Control the session from a DualShock 4 or Xbox controller: /gamepad [on|off|status|watch|list|reset|approve|rumble|switch]",
+		);
 
 		// The scan has to be finding something, or the loop below is vacuous.
 		expect(dispatchedPadArgs().length).toBeGreaterThan(3);
@@ -618,6 +650,203 @@ describe("/gamepad on an Xbox pad", () => {
 		// Both the glyph and the filter follow the pad in hand.
 		expect(text).toContain("approvals: on — A may answer a permission dialog");
 		expect(text).toContain("device filter: (any Xbox controller)");
+	});
+});
+
+describe("/gamepad status with two controllers attached", () => {
+	test("lists both pads, marks the one being read, and names the way to switch", async () => {
+		const { ctx, store, source, ds4, xbox } = multiHarness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+
+		// One report each, so both rows carry their own battery: the DS4 on its
+		// cable and the Xbox pad on XInput's three-step scale.
+		source.push(usbBytes(battery(2, true)), ds4);
+		source.push(xboxBytes(xboxBattery(2, 2)), xbox);
+		handleAppCommand("/gamepad status", ctx);
+
+		const text = lastInfoText(store);
+		expect(text).toContain(`Gamepad connected — ${describePadDevice(ds4)} — 2 controllers attached`);
+		expect(text).toContain("  controllers:");
+		expect(text).toContain("    1. ds4 usb · battery 2/10 (cable) — active");
+		expect(text).toContain("    2. xbox xinput · battery 2/3");
+		expect(text).toContain("  switch: press a button on another controller, or /gamepad switch");
+		// The active pad's charge is on its controller row; the standalone line
+		// would report the same battery a second time.
+		expect(text).not.toContain("\n  battery:");
+		// Two families attached, so the filter cannot name just one of them.
+		expect(text).toContain("device filter: (any controller)");
+	});
+
+	test("a pad on two links is one row, with both transports", async () => {
+		// A DualShock 4 with a cable in and its radio on is one controller, not two.
+		// The card says so by joining its transports inside a single numbered row.
+		const [wireless, wired] = attachedTwice();
+		const { ctx, store } = harness({ devices: [wireless, wired, xboxDevice()] });
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		handleAppCommand("/gamepad status", ctx);
+
+		const text = lastInfoText(store);
+		expect(text).toContain("    1. ds4 usb + bluetooth — active");
+		expect(text).toContain("    2. xbox xinput");
+		expect(text).not.toContain("3. ");
+	});
+
+	test("a single controller keeps the old card exactly", async () => {
+		const { ctx, store, source } = harness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		source.push(usbBytes(battery(4)));
+		handleAppCommand("/gamepad status", ctx);
+
+		const text = lastInfoText(store);
+		expect(text).not.toContain("controllers:");
+		expect(text).not.toContain("controllers attached");
+		// The family's own filter wording is unchanged with one pad in hand.
+		expect(text).toContain("device filter: (any DualShock 4)");
+		// And the battery keeps the standalone line it has always had.
+		expect(text).toContain("\n  battery: 4/10");
+	});
+});
+
+describe("/gamepad switch", () => {
+	test("a family word moves the reader, and the card follows the pad in hand", async () => {
+		const { ctx, store, pad, source, xbox } = multiHarness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		expect(pad.service.status().transport).toBe("usb");
+
+		handleAppCommand("/gamepad switch xbox", ctx);
+		expect(lastInfoText(store)).toBe(`Switched to ${describePadDevice(xbox)}.`);
+
+		// The reader moved, not just the sentence: a report on the named pad is
+		// what the app now sees. It is addressed to that device because the faux
+		// source's default target is the handle opened last.
+		source.push(xboxBytes(XBOX_A), xbox);
+		expect(pad.service.lastSample()?.family).toBe("xbox");
+		expect(pad.service.lastSample()?.transport).toBe("xinput");
+
+		handleAppCommand("/gamepad status", ctx);
+		const card = lastInfoText(store);
+		expect(card).toContain("transport: xinput");
+		expect(card.split("\n").find((line) => line.includes("2. xbox"))).toContain("— active");
+		expect(card.split("\n").find((line) => line.includes("1. ds4"))).not.toContain("— active");
+	});
+
+	test("an index and next choose from the card's list, and next wraps", async () => {
+		const { ctx, store, pad, ds4, xbox } = multiHarness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		const ds4Label = describePadDevice(ds4);
+		const xboxLabel = describePadDevice(xbox);
+
+		// Naming the pad already in hand is a valid target, and changes nothing.
+		handleAppCommand("/gamepad switch 1", ctx);
+		expect(lastInfoText(store)).toBe(`Already reading ${ds4Label}.`);
+		expect(pad.service.status().transport).toBe("usb");
+
+		handleAppCommand("/gamepad switch 2", ctx);
+		expect(lastInfoText(store)).toBe(`Switched to ${xboxLabel}.`);
+		expect(pad.service.status().transport).toBe("xinput");
+
+		// No argument and "next" are the same cycle, and it wraps.
+		handleAppCommand("/gamepad switch next", ctx);
+		expect(lastInfoText(store)).toBe(`Switched to ${ds4Label}.`);
+		expect(pad.service.status().transport).toBe("usb");
+		handleAppCommand("/gamepad switch", ctx);
+		expect(lastInfoText(store)).toBe(`Switched to ${xboxLabel}.`);
+		expect(pad.service.status().transport).toBe("xinput");
+	});
+
+	test("a target nothing answers to names the controllers that are attached", async () => {
+		const { ctx, store, pad, ds4, xbox } = multiHarness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+
+		handleAppCommand("/gamepad switch nope", ctx);
+		expect(lastInfoText(store)).toBe(
+			`No controller matches "nope". Attached: ${describePadDevice(ds4)}, ${describePadDevice(xbox)}.`,
+		);
+		expect(pad.service.status().transport).toBe("usb");
+	});
+
+	test("with one controller, cycling says so and naming it says who is being read", async () => {
+		const { ctx, store, pad } = harness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		const only = pad.service.status().device;
+		if (only === undefined) throw new Error("the only controller should be connected");
+		const label = describePadDevice(only);
+
+		handleAppCommand("/gamepad switch", ctx);
+		expect(lastInfoText(store)).toBe("Only one controller is attached — nothing to switch to.");
+		handleAppCommand("/gamepad switch next", ctx);
+		expect(lastInfoText(store)).toBe("Only one controller is attached — nothing to switch to.");
+
+		handleAppCommand("/gamepad switch ds4", ctx);
+		expect(lastInfoText(store)).toBe(`Already reading ${label}.`);
+
+		handleAppCommand("/gamepad switch xbox", ctx);
+		expect(lastInfoText(store)).toBe(`No controller matches "xbox". Attached: ${label}.`);
+	});
+
+	test("with the pad off it says how to turn it on", async () => {
+		const { ctx, store } = multiHarness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		handleAppCommand("/gamepad off", ctx);
+		await settle();
+
+		handleAppCommand("/gamepad switch xbox", ctx);
+		expect(lastInfoText(store)).toBe("Gamepad is off — turn it on with /gamepad on.");
+	});
+});
+
+describe("/gamepad list and watch with two controllers attached", () => {
+	test("list marks the controller being read, and the mark follows a switch", async () => {
+		const { ctx, store } = multiHarness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+
+		handleAppCommand("/gamepad list", ctx);
+		let rows = lastInfoText(store).split("\n");
+		expect(rows.find((line) => line.includes("DualShock 4 v2"))).toContain("· active");
+		expect(rows.find((line) => line.includes("Xbox controller"))).not.toContain("· active");
+
+		handleAppCommand("/gamepad switch xbox", ctx);
+		handleAppCommand("/gamepad list", ctx);
+		rows = lastInfoText(store).split("\n");
+		expect(rows.find((line) => line.includes("DualShock 4 v2"))).not.toContain("· active");
+		expect(rows.find((line) => line.includes("Xbox controller"))).toContain("· active");
+	});
+
+	test("watch lines open with the family of the pad that reported", async () => {
+		const { ctx, source, watchLines, padWatch, ds4, xbox } = multiHarness();
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		source.push(usbBytes(CROSS), ds4);
+
+		// The watch polls on an interval; fake timers run the poll without a sleep,
+		// and both halves of the test share one fake-timer window.
+		jest.useFakeTimers();
+		try {
+			handleAppCommand("/gamepad watch", ctx);
+			jest.advanceTimersByTime(150);
+			expect(watchLines).toHaveLength(1);
+			expect(watchLines[0]?.startsWith("ds4 usb 64B")).toBe(true);
+
+			padWatch.stop();
+			handleAppCommand("/gamepad switch xbox", ctx);
+			source.push(xboxBytes(XBOX_A), xbox);
+			handleAppCommand("/gamepad watch", ctx);
+			jest.advanceTimersByTime(150);
+			expect(watchLines).toHaveLength(2);
+			expect(watchLines[1]?.startsWith("xbox xinput 18B")).toBe(true);
+		} finally {
+			padWatch.stop();
+			jest.useRealTimers();
+		}
 	});
 });
 
