@@ -402,46 +402,51 @@ The engine uses the Emacs rule for words. A boundary is a change of script. `M-f
 
 The engine takes this key and does not use it: `M-z`. The engine uses it for nothing. It does not reach the terminal as a character. `C-r` does history search in the other editors; in this editor it starts an incremental search backward, and `C-s` starts one forward. `C-t` and `C-o` are the host's keys: they open the watch panel and the transcript.
 
-### DualShock 4 controller
+### Controllers
 
 > **WARNING**: Do not rest a finger on a button. The tool reads a held button as a press.
 
-A DualShock 4 controller can run the session without a keyboard. Connect the controller with USB or with Bluetooth.
+A controller can run the session without a keyboard. The tool reads a DualShock 4 over USB or Bluetooth. On Windows, the tool reads an Xbox controller through XInput.
 
 ```bash
 /gamepad on        # read a controller now, and remember it
 /gamepad status    # show the transport, the battery, and the bindings
 /gamepad watch     # show each press as one line
-/gamepad list      # list each controller interface that the OS reports
+/gamepad list      # list each controller that the OS reports
 /gamepad reset     # look for a controller again
-/gamepad approve   # ask whether ✕ can answer a permission dialog
+/gamepad approve   # ask whether the confirm button can answer a permission dialog
 /gamepad rumble    # buzz once
 /gamepad           # show the table of buttons and actions
 ```
 
 Use `--gamepad` to turn the controller on for one run. The flag does not write a setting. Use `--no-gamepad` to turn it off for one run.
 
+The table gives the DualShock 4 names first. The Xbox name is in brackets. A button does the same action on both controllers.
+
 | Button | Action |
 |--------|--------|
 | D-pad, left stick | Move in lists, dialogs, and the transcript. |
 | Right stick, vertical | Scroll the transcript. |
-| `L2`, `R2` | Change the repeat rate. The rates are 160 ms and 30 ms. |
-| ✕ | Confirm. Hold for 600 ms in a permission dialog to always allow. |
-| ○ | Cancel. Cancel also interrupts a running turn. |
-| □ | Clear the screen. In the on-screen keyboard, delete one character. |
-| △ | Open the command wheel. In the on-screen keyboard, shift. |
-| `L1`, `R1` | Page back or forward. |
-| Options | Open the transcript browser. |
-| Share | Open the on-screen keyboard. |
-| Touchpad press | Run `/status`. |
-| `L3`, `R3` | Open `/model`. Pick the permission mode. |
+| `L2` (`LT`), `R2` (`RT`) | Change the repeat rate. The rates are 160 ms and 30 ms. |
+| ✕ (`A`) | Confirm. Hold for 600 ms in a permission dialog to always allow. |
+| ○ (`B`) | Cancel. Cancel also interrupts a running turn. |
+| □ (`X`) | Clear the screen. In the on-screen keyboard, delete one character. |
+| △ (`Y`) | Open the command wheel. In the on-screen keyboard, shift. |
+| `L1` (`LB`), `R1` (`RB`) | Page back or forward. |
+| Options (`Menu`) | Open the transcript browser. |
+| Share (`View`) | Open the on-screen keyboard. |
+| Touchpad press | Run `/status`. A DualShock 4 only. |
+| `L3` (`LS`), `R3` (`RS`) | Open `/model`. Pick the permission mode. |
 | PS | Nothing. The OS and Steam use this button. |
+| Guide | Nothing. XInput does not report this button. |
 
 A repeat starts after 400 ms. A repeat then happens every 80 ms. `L2` and `R2` change these values.
 
-The lightbar uses the accent color of the theme. It is brighter during a turn. It flashes when a dialog waits. It is red when the battery is low.
+On a DualShock 4, the lightbar uses the accent color of the theme. It is brighter during a turn. It flashes when a dialog waits. It is red when the battery is low.
 
 A waiting dialog also blinks the lightbar on the controller. The bar turns on for 500 ms. The bar turns off for 500 ms. This is the only state that uses a blink.
+
+An Xbox controller has no lightbar and no touchpad. The tool writes no lightbar packet to it. The battery of an Xbox controller has four levels: empty, low, medium, and full. The status shows this level as a number out of 3.
 
 The motors have these signals:
 
@@ -459,7 +464,7 @@ Two signals are not delayed by an earlier signal. They are a waiting dialog and 
 
 #### Touchpad
 
-The touchpad is not a mouse. A finger on it gives a position and a gesture.
+The touchpad is on a DualShock 4 only. It is not a mouse. A finger on it gives a position and a gesture.
 
 | Gesture | Action |
 |---------|--------|
@@ -469,7 +474,7 @@ The touchpad is not a mouse. A finger on it gives a position and a gesture.
 
 A tap never holds a button. A gesture lasts one report. Buttons keep the hold.
 
-The hold on ✕ is 600 ms of reports from the controller. The tool does not count wall-clock time. A controller that stops and starts reports does not keep the age of the press. The hold starts again.
+The hold on the confirm button is 600 ms of reports from the controller. The tool does not count wall-clock time. A controller that stops and starts reports does not keep the age of the press. The hold starts again.
 
 > **NOTE**: A gap of 250 ms with no reports means the controller is gone. The tool then forgets it.
 
@@ -493,9 +498,11 @@ The hold on ✕ is 600 ms of reports from the controller. The tool does not coun
 
 The keys `rumble` and `lightbar` both have the value `true` by default. Set a key to `false` to stop that part of the controller from working.
 
-> **WARNING**: `allowApprove` has the value `false` by default. With it off, ✕ does not answer a permission dialog. Only a user-tier settings file can set `gamepad`.
+> **WARNING**: `allowApprove` has the value `false` by default. With it off, the confirm button does not answer a permission dialog. Only a user-tier settings file can set `gamepad`.
 
-`node-hid` is an optional dependency. The tool works without it. Use `/gamepad on` to see the command that installs it.
+`node-hid` is an optional dependency. The tool works without it. An Xbox controller on Windows does not use it. Use `/gamepad on` to see the command that installs it.
+
+> **NOTE**: XInput is a Windows component. On other systems, the tool does not support an Xbox controller yet.
 
 ## Installation
 
@@ -616,7 +623,7 @@ Use these commands in the terminal.
 | `/theme [name\|auto]` | Show the themes, or change the theme. |
 | `/vim [on\|off]` | Turn vim editing on or off. |
 | `/emacs [on\|off]` | Turn Emacs editing on or off. |
-| `/gamepad [...]` | Set the controller. See [DualShock 4 controller](#dualshock-4-controller). |
+| `/gamepad [...]` | Set the controller. See [Controllers](#controllers). |
 | `/beetle [...]` | Run the four-agent band. See [The four-agent band](#the-four-agent-band). |
 | `/yoshi [...]` | Import from another agent tool. See [Import procedure](#import-procedure). |
 | `/init` | Make a `LABUNBUN.md` file for this project. |
@@ -925,7 +932,7 @@ bun run scripts/gamepad-probe.ts --touch
 | `@labunbun/tools` | The coding tools. |
 | `@labunbun/mcp` | The MCP client. |
 | `@labunbun/tui` | The terminal interface. It uses React and Ink. |
-| `@labunbun/gamepad` | The DualShock 4 support. |
+| `@labunbun/gamepad` | The controller support: DualShock 4 and Xbox. |
 | `@labunbun/coding-agent` | The command line tool, the settings, the commands, the hooks, the subagents, the skills. |
 
 The dependency direction is one way: `ai`, then `agent`, then `tools`, `mcp`, `tui`, then `coding-agent`. The package `gamepad` has no dependency. The tool loop never imports a provider adapter. The adapters arrive in the `StreamFn` parameter. This is why the tests run with no network.

@@ -65,6 +65,29 @@ export function bluetoothBytes(payload: Payload = {}): Uint8Array {
 	return bytes;
 }
 
+/**
+ * An XInput report: the 16-byte `XINPUT_STATE` then the battery bytes, all at
+ * their absolute offsets, so `{ 5: 0x10 }` is A and `{ 16: 2 }` a wireless pad.
+ *
+ * A full battery on a cable is the default for the same reason the DualShock 4
+ * neutral carries ten: an empty byte here is a pad about to switch off, and a
+ * test about a button should not accidentally become a test about a dying one.
+ */
+export function xboxBytes(payload: Payload = {}): Uint8Array {
+	const bytes = new Uint8Array(18);
+	const neutral: Payload = { 16: 1, 17: 3 };
+	for (const [at, value] of Object.entries({ ...neutral, ...payload })) bytes[Number(at)] = value;
+	return bytes;
+}
+
+/** A down on the wire: `wButtons` 0x1000, little-endian. */
+export const XBOX_A = { 5: 0x10 } as const;
+
+/** An XInput battery reading: type 1 wired, 2 alkaline, 3 NiMH; level 0-3. */
+export function xboxBattery(type: number, level: number): Payload {
+	return { 16: type, 17: level };
+}
+
 /** The one byte that means "cross is down" — the button most tests press. */
 export const CROSS = { 4: 0x28 } as const;
 

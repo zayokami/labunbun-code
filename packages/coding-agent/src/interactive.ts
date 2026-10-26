@@ -217,6 +217,7 @@ import {
 	isDefaultBinding,
 	type PadRuntime,
 	padConfigFrom,
+	padConfirmGlyph,
 	padHeadline,
 	padStartupNotice,
 } from "./gamepad-runtime.ts";
@@ -5134,12 +5135,13 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				}
 				// Toggled from what is in force, not from the file: the setting and the
 				// running bridge are kept together by the runtime, and a file read here
-				// would answer with what was written once rather than with what ✕ does.
+				// would answer with what was written once rather than with what the
+				// confirm button does.
 				const next = value ? value === "on" : !pad.config.allowApprove;
 				pad.setAllowApprove(next);
 				pushInfo(
 					ctx.handle,
-					`Gamepad approvals ${next ? "on — ✕ may answer a permission dialog" : "off — the keyboard answers"}` +
+					`Gamepad approvals ${next ? `on — ${padConfirmGlyph(pad.service.status())} may answer a permission dialog` : "off — the keyboard answers"}` +
 						save({ allowApprove: next }),
 				);
 				return true;

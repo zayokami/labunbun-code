@@ -25,11 +25,14 @@
 import type { PadBindingMap } from "./bindings.ts";
 import {
 	buildDs4Output,
-	type Ds4Battery,
 	type Ds4ButtonId,
-	type Ds4OutputState,
-	type Ds4State,
+	type Ds4Touch,
 	type Ds4Transport,
+	type PadBattery,
+	type PadOutputState,
+	type PadReport,
+	type PadState,
+	type PadTransport,
 	parseDs4Input,
 } from "./ds4.ts";
 import {
@@ -44,8 +47,17 @@ import {
 	padSignalEqual,
 } from "./feedback.ts";
 import { createMapper, type PadAction, type PadRepeat } from "./mapping.ts";
-import { deviceTransport, type PadSource, type PadSourceDevice, type PadSourceHandle, pickLinks } from "./source.ts";
+import {
+	deviceFamily,
+	deviceTransport,
+	type PadFamily,
+	type PadSource,
+	type PadSourceDevice,
+	type PadSourceHandle,
+	pickLinks,
+} from "./source.ts";
 import { createTouchReader, type PadTouchConfig, type PadTouchId } from "./touch.ts";
+import { buildXboxOutput, parseXboxInput } from "./xbox.ts";
 
 export type PadServicePhase = "off" | "searching" | "connected" | "error";
 
@@ -63,14 +75,14 @@ export interface PadServiceStatus {
 	 * The link the app is *reading*: the one whose reports move the app. See
 	 * `links` for the rest — a pad attached twice is written to on all of them.
 	 */
-	transport?: Ds4Transport;
+	transport?: PadTransport;
 	/**
 	 * Every link the pad is answering on, the one being read first. More than one
 	 * means the controller is attached twice — a cable and the radio — and is
 	 * being written to on both.
 	 */
-	links?: readonly Ds4Transport[];
-	battery?: Ds4Battery;
+	links?: readonly PadTransport[];
+	battery?: PadBattery;
 	/** Why it is not connected, in words worth showing to the person holding it. */
 	detail?: string;
 	/** Bluetooth only: whether the last report's CRC verified. */
@@ -78,9 +90,9 @@ export interface PadServiceStatus {
 	/**
 	 * The links have been reporting contradictory buttons for long enough that
 	 * they are probably not one pad. Nothing is done about it — there is no
-	 * identity to pick the right one by — but it explains a ✕ nobody pressed and a
-	 * bar changing colour by itself, and `gamepad.device` is how a user pins the
-	 * one they mean.
+	 * identity to pick the right one by — but it explains a button nobody pressed
+	 * and a bar changing colour by itself, and `gamepad.device` is how a user pins
+	 * the one they mean.
 	 */
 	linksDisagree?: boolean;
 }
@@ -89,8 +101,10 @@ export interface PadServiceStatus {
 export interface PadSample {
 	/** When it arrived, on the service's clock. */
 	at: number;
-	transport: Ds4Transport;
-	state: Ds4State;
+	/** Which family decoded it; the button names printed for a person depend on it. */
+	family: PadFamily;
+	transport: PadTransport;
+	state: PadState;
 	/** How long the report was: the quickest way to see the transport change. */
 	bytes: number;
 	/**
@@ -272,25 +286,42 @@ const LINKS_DISAGREE_MS = 1_000;
 const LINK_SCAN_MS = 1_000;
 
 /** The pad's own colour when it should show nothing: motors stopped, bar dark. */
-const DARK: Ds4OutputState = { lightbar: { r: 0, g: 0, b: 0 } };
+const DARK: PadOutputState = { lightbar: { r: 0, g: 0, b: 0 } };
+
+/** No fingers: what a family without a touch surface reports, every report. */
+const NO_TOUCH: Ds4Touch = [undefined, undefined];
 
 /**
  * One open collection of the pad: a link, and the shape its bytes take on it.
  *
  * A controller can have more than one at a time — see `pickLinks` — and each
  * keeps its own last packet, because "unchanged" is a per-link fact: a link
- * opened a moment ago has been told nothing.
+ * opened a moment ago has been told nothing. The family is part of the link
+ * rather than of the device only because it decides both directions: which
+ * parser reads a report and which builder writes a packet.
  */
-interface PadLink {
+interface PadLinkBase {
 	device: PadSourceDevice;
 	handle: PadSourceHandle;
-	/** How this link's packets are framed. See `linkTransport`. */
-	transport: Ds4Transport;
 	/** The last packet written here, byte for byte. An identical one is skipped. */
 	lastPacket?: Uint8Array;
 	/** When this link last delivered a report; `undefined` until one parses. */
 	lastReportAt?: number;
 }
+
+interface Ds4Link extends PadLinkBase {
+	family: "ds4";
+	/** How this link's packets are framed. See `linkTransport`. */
+	transport: Ds4Transport;
+}
+
+interface XInputLink extends PadLinkBase {
+	family: "xbox";
+	/** XInput does not say which wire it is; the transport is the API. */
+	transport: "xinput";
+}
+
+type PadLink = Ds4Link | XInputLink;
 
 /**
  * What a link's packets are framed as, once a report has said something.
@@ -304,8 +335,16 @@ interface PadLink {
  * than from it, and why a USB-shaped report never takes it back to 32-byte
  * packets that the pad would listen to only over a cable.
  */
-function linkTransport(link: PadLink, seen: Ds4Transport): Ds4Transport {
+function linkTransport(link: Ds4Link, seen: Ds4Transport): Ds4Transport {
 	return seen === "bluetooth" ? "bluetooth" : link.transport;
+}
+
+/**
+ * The packet a link understands. The meaning is one app state; the bytes are
+ * the family's, and XInput's are a four-byte vibration rather than a report.
+ */
+function buildLinkOutput(link: PadLink, state: PadOutputState): Uint8Array {
+	return link.family === "xbox" ? buildXboxOutput(state) : buildDs4Output(link.transport, state);
 }
 
 /**
@@ -490,7 +529,7 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 	function flush(now: number, immediate = false): void {
 		if (links.length === 0) return;
 		const signal = currentSignal();
-		const state: Ds4OutputState = {};
+		const state: PadOutputState = {};
 		// A field left out is a field written as zero, which is what the lightbar
 		// switch wants: dark rather than dim. There is no way to write "nothing here"
 		// and have the pad keep its own. The motors switch is not asked here — the one
@@ -502,7 +541,7 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 			if (blink !== undefined) state.blink = blink;
 		}
 		if (motors !== undefined) state.rumble = motors;
-		const packets = links.map((link) => ({ link, packet: buildDs4Output(link.transport, state) }));
+		const packets = links.map((link) => ({ link, packet: buildLinkOutput(link, state) }));
 		const unchanged = packets.every(
 			({ link, packet }) => link.lastPacket !== undefined && sameBytes(link.lastPacket, packet),
 		);
@@ -518,7 +557,7 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 
 	/** Motors off, bar dark, written while the devices are still there to hear it. */
 	function goDark(): void {
-		for (const link of links) link.handle.write(buildDs4Output(link.transport, DARK));
+		for (const link of links) link.handle.write(buildLinkOutput(link, DARK));
 	}
 
 	/** The most recent report any link has delivered: what the watchdog measures. */
@@ -532,7 +571,7 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 	}
 
 	/** Every live link, the one being read first: what the status card names. */
-	function linkTransports(): Ds4Transport[] {
+	function linkTransports(): PadTransport[] {
 		const reader = primary;
 		const transports = links.map((link) => link.transport);
 		if (reader === undefined) return transports;
@@ -541,7 +580,10 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 
 	/** Wire an open handle in as a link of this pad. */
 	function openLink(device: PadSourceDevice, opened: PadSourceHandle): void {
-		const link: PadLink = { device, handle: opened, transport: deviceTransport(device) };
+		const link: PadLink =
+			deviceFamily(device) === "xbox"
+				? { device, handle: opened, family: "xbox", transport: "xinput" }
+				: { device, handle: opened, family: "ds4", transport: deviceTransport(device) };
 		opened.onReport((bytes) => onBytes(link, bytes));
 		opened.onError((error) => dropLink(link, message(error)));
 		links.push(link);
@@ -748,7 +790,9 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 
 	function onBytes(link: PadLink, bytes: Uint8Array): void {
 		if (closed || !links.includes(link)) return;
-		const report = parseDs4Input(bytes);
+		// The parser is the family's, and so is the builder below: an Xbox link is
+		// fed by XInput and speaks four-byte vibration packets, not HID reports.
+		const report: PadReport | undefined = link.family === "xbox" ? parseXboxInput(bytes) : parseDs4Input(bytes);
 		// Anything else on the wire belongs to another collection of the same
 		// device; the pad sends those too.
 		if (report === undefined) return;
@@ -760,8 +804,11 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		link.lastReportAt = now;
 		// What the bytes say this link is, whoever is reading it: the framing of
 		// every link's packets is settled here, and a link nobody is reading still
-		// has to be written to correctly.
-		link.transport = linkTransport(link, report.transport);
+		// has to be written to correctly. XInput reports no framing decision — the
+		// transport is the API, not something the bytes reveal.
+		if (link.family === "ds4" && report.transport !== "xinput") {
+			link.transport = linkTransport(link, report.transport);
+		}
 		if (primary !== link) {
 			// A link that is not being read only says "still here". Reading both
 			// would interleave the same buttons at two latencies: the state from the
@@ -775,12 +822,20 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 			}
 			primary = link;
 		}
-		const next: PadSample = { at: now, transport: link.transport, state: report.state, bytes: bytes.length };
+		const next: PadSample = {
+			at: now,
+			family: link.family,
+			transport: link.transport,
+			state: report.state,
+			bytes: bytes.length,
+		};
 		// Where the surface turns into input. The gestures are read from *this*
 		// report — a tap is decided on the report where the finger is already gone —
 		// and handed to the mapper beside the buttons, so that everything downstream
-		// of it, the sample included, sees the same frame the user's thumb made.
-		const gestures = touch.push(report.state.touch, now);
+		// of it, the sample included, sees the same frame the user's thumb made. A
+		// family with no surface reports no fingers, which is what the reader needs
+		// to hear so a touch from a previous pad cannot become a tap on this one.
+		const gestures = touch.push(report.state.touch ?? NO_TOUCH, now);
 		if (gestures.length > 0) next.gestures = gestures;
 		if (report.crcOk !== undefined) next.crcOk = report.crcOk;
 		sample = next;
@@ -909,6 +964,8 @@ function sameStatus(a: PadServiceStatus, b: PadServiceStatus): boolean {
 		a.device?.carriesReports === b.device?.carriesReports &&
 		a.battery?.level === b.battery?.level &&
 		a.battery?.cable === b.battery?.cable &&
+		a.battery?.full === b.battery?.full &&
+		a.battery?.low === b.battery?.low &&
 		a.linksDisagree === b.linksDisagree
 	);
 }
@@ -918,7 +975,7 @@ function sameStatus(a: PadServiceStatus, b: PadServiceStatus): boolean {
  * because the status is rebuilt from scratch on every report and an identity
  * comparison would re-render the UI 250 times a second.
  */
-function sameLinks(a: readonly Ds4Transport[] | undefined, b: readonly Ds4Transport[] | undefined): boolean {
+function sameLinks(a: readonly PadTransport[] | undefined, b: readonly PadTransport[] | undefined): boolean {
 	if (a === b) return true;
 	if (a === undefined || b === undefined || a.length !== b.length) return false;
 	return a.every((transport, at) => transport === b[at]);

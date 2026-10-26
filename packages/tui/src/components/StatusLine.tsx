@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@labunbun/ai";
-import { DS4_BATTERY_FULL, type Ds4Battery, type PadServiceStatus, padBatteryLow } from "@labunbun/gamepad";
+import { batteryFull, type PadBattery, type PadServiceStatus, padBatteryLow } from "@labunbun/gamepad";
 import { Text } from "ink";
 import { useEffect, useState } from "react";
 import { formatElapsed } from "../elapsed.ts";
@@ -36,18 +36,19 @@ export const CONTEXT_LOW_FREE_PERCENT = 20;
 /**
  * The battery, as a bar.
  *
- * Five cells for the pad's eleven steps, and the rounding can be seen to be
- * honest: four of ten fills two cells, and a level of zero fills none rather than
- * pretending to one. A pad on its cable wears the `+` instead of a colour,
- * because a bar that climbs while it is plugged in is otherwise a thing that
- * looks like a bug.
+ * Five cells for whatever scale the pad counts in — ten steps on a DualShock 4,
+ * three behind XInput — and the rounding can be seen to be honest: four of ten
+ * fills two cells, and a level of zero fills none rather than pretending to one.
+ * A pad on its cable wears the `+` instead of a colour, because a bar that
+ * climbs while it is plugged in is otherwise a thing that looks like a bug.
  */
-export function batteryBar(battery: Ds4Battery, cells = BATTERY_CELLS): string {
+export function batteryBar(battery: PadBattery, cells = BATTERY_CELLS): string {
 	// Clamped rather than trusted: this is also drawn for a level a test or a fake
 	// handed over, and an out-of-range one should be a full bar, not a bar with a
 	// negative number of cells in it.
-	const level = Math.max(0, Math.min(DS4_BATTERY_FULL, battery.level));
-	const filled = Math.round((level / DS4_BATTERY_FULL) * cells);
+	const full = batteryFull(battery);
+	const level = Math.max(0, Math.min(full, battery.level));
+	const filled = Math.round((level / full) * cells);
 	return `${battery.cable ? BATTERY_CABLE : ""}${BATTERY_FULL.repeat(filled)}${BATTERY_EMPTY.repeat(cells - filled)}`;
 }
 

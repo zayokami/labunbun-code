@@ -9,10 +9,11 @@
  *
  * Two decisions are worth stating because they are not visible in the code:
  *
- * The source is created *here*, with `importNodeHid` as the loader, so the one
- * optional dependency in the repository is imported from exactly one place, and
- * lazily: `enable()` is what asks for it, and by then the REPL is on screen. A
- * machine without node-hid runs everything else exactly as before.
+ * The source is created *here*: node-hid for DualShock 4s and XInput for Xbox
+ * pads, joined so the service still sees one source. Both loaders are imported
+ * from exactly one place, and lazily: `enable()` is what asks for them, and by
+ * then the REPL is on screen. A machine without node-hid — or without Windows —
+ * runs everything else exactly as before, with the other family unaffected.
  *
  * The samples `/gamepad watch` shows are *polled*, not subscribed. A DualShock
  * streams ~250 reports a second and the watch is a line of text a person reads;
@@ -22,19 +23,25 @@
  */
 
 import {
+	batteryFull,
 	bindingText,
+	createCombinedSource,
 	createNodeHidSource,
 	createPadBridge,
+	createXInputSource,
 	DEFAULT_BINDINGS,
-	DS4_BATTERY_FULL,
+	type Ds4ButtonId,
 	type Ds4TouchPoint,
 	describePadDevice,
+	deviceFamily,
 	importNodeHid,
+	importXInput,
 	isPadTouchId,
 	type PadBinding,
 	type PadBindingMap,
 	type PadBridge,
 	type PadClock,
+	type PadFamily,
 	type PadPalette,
 	type PadSample,
 	type PadService,
@@ -42,6 +49,7 @@ import {
 	type PadSource,
 	padBatteryLow,
 	resolveBindings,
+	xboxButtonName,
 } from "@labunbun/gamepad";
 import { formatElapsed } from "@labunbun/tui";
 import type { Settings } from "./settings.ts";
@@ -50,7 +58,7 @@ import type { Settings } from "./settings.ts";
 export interface PadConfig {
 	/** Read a controller this run. */
 	enabled: boolean;
-	/** Whether ✕ may answer a permission dialog. */
+	/** Whether the confirm button (✕ on a DualShock 4, A on an Xbox pad) may answer a permission dialog. */
 	allowApprove: boolean;
 	/** Path, or a substring of one, of the controller to open. */
 	device?: string;
@@ -131,7 +139,9 @@ export interface PadRuntime {
 }
 
 export function createPadRuntime(config: PadConfig, deps: PadRuntimeDeps): PadRuntime {
-	const source = deps.source ?? createNodeHidSource({ load: importNodeHid });
+	const source =
+		deps.source ??
+		createCombinedSource([createNodeHidSource({ load: importNodeHid }), createXInputSource({ load: importXInput })]);
 	const { service, bridge } = createPadBridge({
 		source,
 		bindings: config.bindings,
@@ -199,27 +209,35 @@ export function padStartupNotice(status: PadServiceStatus): string | undefined {
  * samples produce identical lines, which is what lets the caller print on change
  * instead of on report.
  *
- * The touch points are printed whether or not anything is touching them. A line
- * that only mentioned a finger when there was one would leave "the pad is not
- * being touched" and "the decoder is reading the wrong bytes" looking exactly
- * alike — and reading those bytes *is* what this line is for, until the offsets
- * have argued with real hardware. `—` is the pad saying "no finger here", which
- * is a fact, not a gap.
+ * On a family with a touch surface, the points are printed whether or not
+ * anything is touching them. A line that only mentioned a finger when there was
+ * one would leave "the pad is not being touched" and "the decoder is reading the
+ * wrong bytes" looking exactly alike — and reading those bytes *is* what this
+ * line is for, until the offsets have argued with real hardware. `—` is the pad
+ * saying "no finger here", which is a fact, not a gap. A pad with no surface at
+ * all says nothing about one: printing `touch —` for an Xbox controller would
+ * read as a decoder that had lost the touchpad rather than as a pad without one.
+ *
+ * Button names are the family's. The state speaks normalized ids because every
+ * layer above does, but a person holding an Xbox pad is looking for A, not for
+ * the ✕ position it was normalized to.
  */
 export function formatSample(sample: PadSample): string {
 	const { state } = sample;
-	const held = state.buttons.length > 0 ? state.buttons.join("+") : "—";
+	const name = (button: Ds4ButtonId) => (sample.family === "xbox" ? xboxButtonName(button) : button);
+	const held = state.buttons.length > 0 ? state.buttons.map(name).join("+") : "—";
 	const axis = (stick: { x: number; y: number }) => `${stick.x.toFixed(2)},${stick.y.toFixed(2)}`;
-	const battery = `battery ${state.battery.level}/${DS4_BATTERY_FULL}${state.battery.cable ? " (cable)" : ""}`;
+	const battery = `battery ${state.battery.level}/${batteryFull(state.battery)}${state.battery.cable ? " (cable)" : ""}`;
 	const crc = sample.crcOk === undefined ? "" : ` · crc ${sample.crcOk ? "ok" : "bad"}`;
 	const at = (point: Ds4TouchPoint | undefined) => (point === undefined ? "—" : `${point.x},${point.y}`);
-	const touch = `touch 1 ${at(state.touch[0])} 2 ${at(state.touch[1])}`;
+	const touch = state.touch === undefined ? "" : ` · touch 1 ${at(state.touch[0])} 2 ${at(state.touch[1])}`;
+	const triggers = sample.family === "xbox" ? ["LT", "RT"] : ["L2", "R2"];
 	const gestures = sample.gestures === undefined ? "" : ` · gesture ${sample.gestures.join("+")}`;
 	return (
 		`${sample.transport} ${sample.bytes}B · ${held} · dpad ${state.dpad ?? "—"}` +
 		` · L ${axis(state.leftStick)} · R ${axis(state.rightStick)}` +
-		` · L2 ${state.leftTrigger.toFixed(2)} R2 ${state.rightTrigger.toFixed(2)}` +
-		` · ${battery} · ${touch}${gestures}${crc}`
+		` · ${triggers[0]} ${state.leftTrigger.toFixed(2)} ${triggers[1]} ${state.rightTrigger.toFixed(2)}` +
+		` · ${battery}${touch}${gestures}${crc}`
 	);
 }
 
@@ -312,6 +330,28 @@ export function padHeadline(status: PadServiceStatus): string {
 }
 
 /**
+ * The family a status is about, when it can say. The connected device is the
+ * authority; a link can only say whether XInput owns it; off or searching knows
+ * nothing, and the wording for that has to be true for either family.
+ */
+function statusFamily(status: PadServiceStatus): PadFamily | undefined {
+	if (status.device !== undefined) return deviceFamily(status.device);
+	if (status.transport === "xinput" || status.links?.includes("xinput") === true) return "xbox";
+	if (status.transport !== undefined) return "ds4";
+	return undefined;
+}
+
+/**
+ * The face button that means "confirm": A on an Xbox pad, ✕ on a DualShock 4.
+ * Without a pad to ask, both are named — a card that picked one would be wrong
+ * for half the controllers it is written for.
+ */
+export function padConfirmGlyph(status: PadServiceStatus | undefined): string {
+	const family = status === undefined ? undefined : statusFamily(status);
+	return family === "xbox" ? "A" : family === "ds4" ? "✕" : "A/✕";
+}
+
+/**
  * The block `/gamepad status` prints.
  *
  * Written as one function rather than assembled at the call site so the same
@@ -355,7 +395,7 @@ export function formatPadStatus(
 	if (status.device?.path) lines.push(`  path: ${status.device.path}`);
 	if (status.battery) {
 		lines.push(
-			`  battery: ${status.battery.level}/${DS4_BATTERY_FULL}${status.battery.cable ? " (cable)" : ""}${padBatteryLow(status.battery) ? " — low" : ""}`,
+			`  battery: ${status.battery.level}/${batteryFull(status.battery)}${status.battery.cable ? " (cable)" : ""}${padBatteryLow(status.battery) ? " — low" : ""}`,
 		);
 	}
 	if (status.detail) lines.push(`  detail: ${status.detail}`);
@@ -373,7 +413,7 @@ export function formatPadStatus(
 	const lastError = stats.lastError ? ` · last error: ${stats.lastError}` : "";
 	lines.push(`  reports: ${stats.reports} · last write: ${wrote}${lastError}`);
 	lines.push(
-		`  approvals: ${config.allowApprove ? "on — ✕ may answer a permission dialog" : "off — the keyboard answers"}`,
+		`  approvals: ${config.allowApprove ? `on — ${padConfirmGlyph(status)} may answer a permission dialog` : "off — the keyboard answers"}`,
 	);
 	// Only when one of them is off: both on is the documented default and needs no
 	// line. But "why is the controller silent" is exactly the question this card is
@@ -384,7 +424,10 @@ export function formatPadStatus(
 		if (!config.rumble) off.push("rumble");
 		lines.push(`  feedback: ${off.join(" + ")} off (settings)`);
 	}
-	lines.push(`  device filter: ${config.device ?? "(any DualShock 4)"}`);
+	const family = statusFamily(status);
+	const anyDevice =
+		family === "xbox" ? "(any Xbox controller)" : family === "ds4" ? "(any DualShock 4)" : "(any controller)";
+	lines.push(`  device filter: ${config.device ?? anyDevice}`);
 	// Two families now, and the line names both. "25 controls" would be shorter and
 	// would hide the surface entirely — and someone reading this line because a
 	// gesture is not firing should be able to see that gestures are bound at all.

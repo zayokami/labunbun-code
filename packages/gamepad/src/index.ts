@@ -33,6 +33,7 @@ export {
 } from "./crc32.ts";
 
 export {
+	batteryFull,
 	buildDs4Output,
 	DPAD_DIRECTIONS,
 	type DpadDirection,
@@ -52,6 +53,13 @@ export {
 	decodeBattery,
 	decodeTouch,
 	describeModel,
+	dpadButtonIds,
+	type PadAxis,
+	type PadBattery,
+	type PadOutputState,
+	type PadReport,
+	type PadState,
+	type PadTransport,
 	parseDs4Input,
 	TOUCH_HEIGHT,
 	TOUCH_WIDTH,
@@ -119,9 +127,13 @@ export {
 
 export {
 	describePadDevice,
+	deviceFamily,
+	deviceLinkKey,
 	deviceTransport,
 	isDs4Device,
+	isPadDevice,
 	matchesDevice,
+	type PadFamily,
 	type PadSource,
 	type PadSourceDevice,
 	type PadSourceHandle,
@@ -129,6 +141,7 @@ export {
 	pickLinks,
 } from "./source.ts";
 
+export { createCombinedSource } from "./sources/combined.ts";
 export { createFauxSource, FAUX_DS4, type FauxSource } from "./sources/faux.ts";
 export {
 	createNodeHidSource,
@@ -142,6 +155,20 @@ export {
 	nodeHidModuleFrom,
 } from "./sources/node-hid.ts";
 export {
+	createXInputSource,
+	importXInput,
+	XINPUT_MISSING,
+	XINPUT_NOT_WINDOWS,
+	XINPUT_POLL_MS,
+	XINPUT_STATE_LENGTH,
+	type XInputLoader,
+	type XInputModule,
+	type XInputSourceOptions,
+	type XInputTimer,
+	type XInputTimers,
+	xinputSlotPath,
+} from "./sources/xinput.ts";
+export {
 	createTouchReader,
 	isPadTouchId,
 	PAD_TOUCH_IDS,
@@ -153,3 +180,15 @@ export {
 	TOUCH_TAP_MS,
 	TOUCH_TAP_SLOP,
 } from "./touch.ts";
+
+export {
+	buildXboxOutput,
+	decodeXboxBattery,
+	parseXboxInput,
+	XBOX_BATTERY_FULL,
+	XBOX_REPORT_LENGTH,
+	XBOX_TRIGGER_PRESS,
+	type XboxReport,
+	XINPUT_VIBRATION_LENGTH,
+	xboxButtonName,
+} from "./xbox.ts";

@@ -15,7 +15,7 @@
  * trying to pick the one the pad will obey.
  */
 
-import type { PadSourceDevice } from "../src/index.ts";
+import { type PadSourceDevice, xinputSlotPath } from "../src/index.ts";
 
 export const WIRED_PATH = "\\\\?\\HID#VID_054C&PID_09CC&MI_03#7&1c3f0d1&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
 export const WIRELESS_PATH =
@@ -42,6 +42,25 @@ export function wirelessDevice(): PadSourceDevice {
 		vendorId: 0x054c,
 		productId: 0x09cc,
 		name: "Wireless Controller",
+		carriesReports: true,
+	};
+}
+
+/**
+ * An Xbox pad as the XInput source lists it.
+ *
+ * Both ids are zero because XInput exposes neither — the synthetic path is the
+ * slot, not an OS device path — so `family` is the only thing that says what
+ * this is. It is also why `isPadDevice` cannot be taught to recognize Xbox pads
+ * by vendor id: a HID collection with Microsoft's id is not readable.
+ */
+export function xboxDevice(slot = 0): PadSourceDevice {
+	return {
+		path: xinputSlotPath(slot),
+		vendorId: 0,
+		productId: 0,
+		name: `Xbox controller (XInput slot ${slot + 1})`,
+		family: "xbox",
 		carriesReports: true,
 	};
 }

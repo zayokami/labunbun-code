@@ -15,7 +15,7 @@
  */
 
 import type { PadActionKind, PadBindingMap, PadDirection, PadInputId } from "./bindings.ts";
-import type { Ds4State } from "./ds4.ts";
+import type { PadState } from "./ds4.ts";
 import { isPadTouchId, type PadTouchId } from "./touch.ts";
 
 export type PadPhase = "press" | "release" | "hold";
@@ -136,7 +136,7 @@ export interface PadMapper {
 	 * by a test is not a pad that went quiet. Time the pad spent silent is not
 	 * time a button spent down — see `holdFrom`.
 	 */
-	update(state: Ds4State, now: number, gestures?: readonly PadTouchId[], quietMs?: number): PadAction[];
+	update(state: PadState, now: number, gestures?: readonly PadTouchId[], quietMs?: number): PadAction[];
 	/** The pad went away: forget every press and say nothing. */
 	reset(): void;
 	/** Stop repeating, keep the presses. A button held across a change of owner
@@ -314,7 +314,7 @@ function scrollAction(value: number, heldMs: number): PadAction {
  * fast ones: whoever is asking for more care should not be overridden by a slip
  * on the other hand.
  */
-function intervalFor(repeat: PadRepeat, state: Ds4State): number {
+function intervalFor(repeat: PadRepeat, state: PadState): number {
 	if (state.leftTrigger >= PAD_MODIFIER_PRESS) return repeat.slowIntervalMs;
 	if (state.rightTrigger >= PAD_MODIFIER_PRESS) return repeat.fastIntervalMs;
 	return repeat.intervalMs;

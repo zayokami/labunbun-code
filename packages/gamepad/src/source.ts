@@ -16,7 +16,10 @@
  * apart at the top.
  */
 
-import { DS4_PRODUCT_IDS, DS4_VENDOR_ID, type Ds4Transport, describeModel } from "./ds4.ts";
+import { DS4_PRODUCT_IDS, DS4_VENDOR_ID, type Ds4Transport, describeModel, type PadTransport } from "./ds4.ts";
+
+/** Which family of pad a device speaks: the decoder and encoder are chosen by this. */
+export type PadFamily = "ds4" | "xbox";
 
 /** A controller the source knows about. */
 export interface PadSourceDevice {
@@ -44,6 +47,12 @@ export interface PadSourceDevice {
 	 * above the source.
 	 */
 	carriesReports?: boolean;
+	/**
+	 * Which family reads this device's reports. A source sets it for anything the
+	 * vendor table does not recognize; one that lists only DualShock 4s may leave
+	 * it off, because `isDs4Device` already says so.
+	 */
+	family?: PadFamily;
 }
 
 /** An open device. Reports arrive on their own; writes are best-effort. */
@@ -85,6 +94,36 @@ export interface PadSource {
 /** Whether the vendor and product id are ones this package knows how to read. */
 export function isDs4Device(device: PadSourceDevice): boolean {
 	return device.vendorId === DS4_VENDOR_ID && DS4_PRODUCT_IDS.includes(device.productId);
+}
+
+/**
+ * Whether this package has a reader for the device.
+ *
+ * A source that says `family` is vouching for it: XInput identifies a pad by
+ * slot, not by product id, so a third-party controller behind it is exactly as
+ * readable as a Microsoft one and would never match a vendor table. An Xbox
+ * vendor id on a raw HID listing is *not* such a claim — on Windows node-hid
+ * cannot read those devices at all, and treating the id alone as readable would
+ * offer the user a device whose reports never arrive.
+ */
+export function isPadDevice(device: PadSourceDevice): boolean {
+	return device.family !== undefined || isDs4Device(device);
+}
+
+/**
+ * Which decoder reads this device. Only called for a device `isPadDevice`
+ * accepted, where the only one without family of its own is a DualShock 4.
+ */
+export function deviceFamily(device: PadSourceDevice): PadFamily {
+	return device.family ?? "ds4";
+}
+
+/**
+ * The identity a link is deduplicated by. Two DualShock 4 collections on one
+ * transport are two controllers; XInput offers one namespace whatever the wire.
+ */
+export function deviceLinkKey(device: PadSourceDevice): PadTransport {
+	return deviceFamily(device) === "xbox" ? "xinput" : deviceTransport(device);
 }
 
 /** For lists and error messages: the model name, with the interface when known. */
@@ -158,7 +197,8 @@ export function matchesDevice(device: PadSourceDevice, wanted: string): boolean 
  * also the only version of this that survives a cable being pulled mid-sentence.
  *
  * One link per transport, because two collections of one model on one transport
- * are two controllers and not one; and the wire ranks first, because it is the
+ * are two controllers and not one; XInput counts as one link of its own, since
+ * it does not say which wire it is. The wire ranks first, because it is the
  * link someone means by "I plugged it in" and the one whose reports arrive on
  * the shorter path. A source that cannot say which interface carries reports —
  * Linux, where every hidraw node looks alike — yields a single link, as it
@@ -173,17 +213,17 @@ export function matchesDevice(device: PadSourceDevice, wanted: string): boolean 
  */
 export function pickLinks(devices: readonly PadSourceDevice[], wanted?: string): PadSourceDevice[] {
 	const pads = devices
-		.filter(isDs4Device)
+		.filter(isPadDevice)
 		.filter((device) => device.path !== undefined)
 		.filter((device) => wanted === undefined || matchesDevice(device, wanted));
 	const reported = pads.filter((device) => device.carriesReports === true);
 	const candidates = reported.length > 0 ? reported : pads.slice(0, 1);
-	const byTransport = new Map<Ds4Transport, PadSourceDevice>();
+	const byLink = new Map<PadTransport, PadSourceDevice>();
 	for (const device of candidates) {
-		const transport = deviceTransport(device);
-		if (!byTransport.has(transport)) byTransport.set(transport, device);
+		const link = deviceLinkKey(device);
+		if (!byLink.has(link)) byLink.set(link, device);
 	}
-	return [...byTransport.values()].sort((a, b) => transportRank(a) - transportRank(b));
+	return [...byLink.values()].sort((a, b) => transportRank(a) - transportRank(b));
 }
 
 /** The one controller `pickLinks` leads with: the device to name and describe. */
@@ -191,7 +231,13 @@ export function pickDevice(devices: readonly PadSourceDevice[], wanted?: string)
 	return pickLinks(devices, wanted)[0];
 }
 
-/** The wire before the radio, by the same reading of the path as `deviceTransport`. */
+/**
+ * The wire before the radio, by the same reading of the path as
+ * `deviceTransport`. XInput comes last because it does not say which wire it is
+ * on; it only ever competes with another family when two controllers are
+ * attached at once, where any stable order will do.
+ */
 function transportRank(device: PadSourceDevice): number {
-	return deviceTransport(device) === "usb" ? 0 : 1;
+	const link = deviceLinkKey(device);
+	return link === "usb" ? 0 : link === "bluetooth" ? 1 : 2;
 }

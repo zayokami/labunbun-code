@@ -9,6 +9,12 @@
  * module load at all under this Bun, which of the pad's interfaces carries the
  * reports, what do the raw bytes look like, and can the pad be written to.
  *
+ * Two families answer those differently. A DualShock 4 arrives through node-hid
+ * as HID reports; an Xbox pad on Windows arrives through XInput, which is the
+ * only path that works there — its HID collection opens and delivers nothing.
+ * The probe uses the same combined source the app uses, and says which family
+ * it opened.
+ *
  * `--touch` is the one mode with a question of its own: are the touchpad offsets
  * right? They came out of another project's source, and the only thing that can
  * settle them is a finger on real hardware — so this prints both the decoded
@@ -17,6 +23,7 @@
  * measurement rather than an impression: the numbers should run to about
  * (0, 0) and (1920, 943), and a run that never lands near them says the offsets,
  * the packing or the panel size is wrong — with the bytes printed to say which.
+ * An Xbox pad has no surface, so the mode says so and runs the ordinary view.
  *
  * It opens the device through the same source the app uses, so a run that works
  * here is a run that works in the REPL, and a crash here is a crash the app
@@ -26,7 +33,8 @@
  * which are visible in the room, and that is the point of them. A write is one
  * packet describing the whole pad, so a run that writes always says which
  * colour it wrote — sending rumble alone would darken the lightbar, and a probe
- * that quietly turned the lights off would be a bad probe.
+ * that quietly turned the lights off would be a bad probe. An Xbox pad has only
+ * motors; there is no lightbar to darken and no touchpad to measure.
  *
  * The pad holds the last packet it is given, which cuts both ways: `--rumble`
  * has to stop its own motors (nothing about this process exiting does), and
@@ -34,21 +42,29 @@
  * lit is to unplug the pad.
  *
  * A run that could read nothing keeps listening for a moment after it writes,
- * because that write is the thing a Bluetooth pad switches on waiting for: the
- * first report after it is the first one that can be read at all.
+ * because that write is the thing a Bluetooth DualShock 4 switches on waiting
+ * for: the first report after it is the first one that can be read at all.
  */
 
 import { formatSample } from "../packages/coding-agent/src/gamepad-runtime.ts";
 import {
 	buildDs4Output,
+	buildXboxOutput,
+	createCombinedSource,
 	createNodeHidSource,
+	createXInputSource,
 	type Ds4Touch,
 	type Ds4TouchPoint,
 	type Ds4Transport,
 	describePadDevice,
+	deviceFamily,
 	deviceTransport,
 	importNodeHid,
+	importXInput,
+	type PadReport,
+	type PadTransport,
 	parseDs4Input,
+	parseXboxInput,
 	pickDevice,
 	TOUCH_HEIGHT,
 	TOUCH_WIDTH,
@@ -100,8 +116,11 @@ function touchLine(touch: Ds4Touch, raw: string): string {
 	return `touch 1 ${point(touch[0])} · 2 ${point(touch[1])} · raw ${TOUCH_FROM}..${TOUCH_TO}: ${raw}`;
 }
 
-console.log("Loading node-hid the way the app does…");
-const source = createNodeHidSource({ load: importNodeHid });
+console.log("Loading the controller sources the way the app does…");
+const source = createCombinedSource([
+	createNodeHidSource({ load: importNodeHid }),
+	createXInputSource({ load: importXInput }),
+]);
 await source.warmUp();
 
 const unavailable = source.unavailable();
@@ -112,10 +131,15 @@ if (unavailable) {
 
 // The raw listing, next to the filtered one: a pad that is attached but absent
 // from `devices` below is a pad this package does not recognize, and the usage
-// fields are what says which interface the reports arrive on.
+// fields are what says which interface the reports arrive on. XInput pads do
+// not appear here at all — XInput is the listing for those.
 const devices = source.list();
 const everyDevice = (await importNodeHid())?.devices() ?? [];
-console.log(`${everyDevice.length} HID device(s) attached · ${devices.length} DualShock 4 interface(s)`);
+const ds4Interfaces = devices.filter((candidate) => deviceFamily(candidate) === "ds4").length;
+console.log(
+	`${everyDevice.length} HID device(s) attached · ${devices.length} controller(s)` +
+		` (${ds4Interfaces} DualShock 4 interface(s), ${devices.length - ds4Interfaces} Xbox)`,
+);
 for (const info of everyDevice) {
 	const isPad = devices.some((device) => device.path === info.path);
 	if (!isPad && !flag("all")) continue;
@@ -128,18 +152,25 @@ for (const info of everyDevice) {
 
 const device = pickDevice(devices);
 if (!device) {
-	console.error("Nothing to open — plug a DualShock 4 in, or pass --all to see every HID device.");
+	console.error(
+		"Nothing to open — plug a DualShock 4 in or connect an Xbox controller, or pass --all to see every HID device.",
+	);
 	process.exit(1);
 }
 
+const family = deviceFamily(device);
 // The line before the open, and this one after it, are the whole point of the
 // step being here: `new HID()` is reported to take Bun down on Windows, and a
 // silent exit between two printed lines names the culprit without a debugger.
-console.log(`Opening ${describePadDevice(device)} — a crash here is the runtime, not the pad.`);
+console.log(`Opening ${describePadDevice(device)} [${family}] — a crash here is the runtime, not the pad.`);
 const handle = source.open(device);
 console.log("Opened. Listening…\n");
 
-if (flag("touch")) {
+if (flag("touch") && family !== "ds4") {
+	console.log("An Xbox controller has no touch surface; showing the decoded state instead.\n");
+}
+
+if (flag("touch") && family === "ds4") {
 	// The offsets, the packing and the panel, all on screen before the measurement:
 	// a person holding a finger on a corner is comparing these numbers with what
 	// comes out below, and having to remember them would make it an impression.
@@ -163,7 +194,7 @@ const touchIds = new Set<number>();
 let first: Uint8Array | undefined;
 /** Per index: the value it is holding, since when, and the last one printed. */
 const settled = new Map<number, { value: number; since: number; reported: number }>();
-const transports = new Set<Ds4Transport>();
+const transports = new Set<PadTransport>();
 const unreadable = new Set<string>();
 
 handle.onReport((bytes) => {
@@ -199,7 +230,9 @@ handle.onReport((bytes) => {
 			}
 		}
 	}
-	const report = parseDs4Input(bytes);
+	// The family decides the parser, exactly as it does in the service: an Xbox
+	// report is built by the XInput source, not framed by the pad's HID firmware.
+	const report: PadReport | undefined = family === "xbox" ? parseXboxInput(bytes) : parseDs4Input(bytes);
 	if (!report) {
 		// Once per shape, not once per report: a stream of identical complaints is
 		// noise, and the shape is the diagnosis.
@@ -212,17 +245,22 @@ handle.onReport((bytes) => {
 	}
 	transports.add(report.transport);
 	if (report.crcOk === false) badCrc++;
-	if (flag("touch")) {
+	if (flag("touch") && family === "ds4") {
 		// Everything else is left unsaid here, which is the point of the mode: a
 		// person sweeping a finger across the surface while the battery, the sticks
 		// and the CRC print on every change has nothing to read.
-		const at = payloadAt(report.transport);
+		// A DS4 report is framed as one of its two transports; the ternary only
+		// teaches the type what this branch already knows.
+		const transport: Ds4Transport = report.transport === "bluetooth" ? "bluetooth" : "usb";
+		const at = payloadAt(transport);
 		const raw = hex(bytes.subarray(at + TOUCH_FROM, at + TOUCH_TO + 1));
 		// Deduped on the block itself and not on the decoded line, so a stick being
 		// moved — which changes the sample but not the surface — prints nothing.
 		if (raw === lastTouch) return;
 		lastTouch = raw;
-		for (const point of report.state.touch) {
+		const touch = report.state.touch;
+		if (touch === undefined) return;
+		for (const point of touch) {
 			if (point === undefined) continue;
 			reached.minX = Math.min(reached.minX, point.x);
 			reached.maxX = Math.max(reached.maxX, point.x);
@@ -230,13 +268,14 @@ handle.onReport((bytes) => {
 			reached.maxY = Math.max(reached.maxY, point.y);
 			touchIds.add(point.id);
 		}
-		console.log(touchLine(report.state.touch, raw));
+		console.log(touchLine(touch, raw));
 		return;
 	}
 	// Same line `/gamepad watch` prints, so what is verified here is what will be
 	// read there; only printed when it changes, because a resting pad repeats.
 	const line = formatSample({
 		at: performance.now(),
+		family,
 		transport: report.transport,
 		state: report.state,
 		bytes: bytes.length,
@@ -252,7 +291,7 @@ handle.onError((error) => {
 });
 
 console.log(
-	flag("touch")
+	flag("touch") && family === "ds4"
 		? `Sweep the surface: top-left corner, then bottom-right, then a drag and a two-finger slide. ${seconds}s…`
 		: `Press every button, one at a time. ${seconds}s…`,
 );
@@ -264,7 +303,7 @@ console.log(
 		`${badCrc > 0 ? ` · ${badCrc} with a bad CRC` : ""}`,
 );
 
-if (flag("touch")) {
+if (flag("touch") && family === "ds4") {
 	const ids = [...touchIds].sort((a, b) => a - b).join(", ");
 	console.log(
 		reached.maxX === -Infinity
@@ -277,24 +316,32 @@ if (flag("light") || flag("rumble") || flag("dark")) {
 	// A report beats the device's own description, and the device's own description
 	// beats a guess: a pad that powered on over Bluetooth reports nothing readable
 	// until it has been written to, so `seen` being empty is exactly the state this
-	// write is here to end.
-	const transport = seen[0] ?? deviceTransport(device);
+	// write is here to end. An Xbox pad has no framing to guess: XInput is the
+	// transport, whether the pad is on a cable or on the radio.
+	const transport: PadTransport = seen[0] ?? (family === "xbox" ? "xinput" : deviceTransport(device));
+	// This branch only runs for a DualShock 4 in the write itself; the type needs
+	// to be told what the family already decided.
+	const ds4Transport: Ds4Transport = transport === "xinput" ? "usb" : transport;
 	if (seen.length === 0)
 		console.log(`No report could be read, so this one is sent as ${transport} — what the device says it is.`);
+	if (family === "xbox" && flag("light")) {
+		console.log("An Xbox controller has no lightbar — only the motors can be asked to do anything.");
+	}
 	// Green rather than a colour of its own: two runs in a row are then two
 	// identical packets, and this is a test of the write, not of the palette.
 	const lightbar = flag("light") ? { r: 0, g: 255, b: 0 } : { r: 0, g: 0, b: 64 };
-	const packet = flag("dark")
-		? buildDs4Output(transport)
-		: buildDs4Output(transport, {
-				lightbar,
-				rumble: flag("rumble") ? { small: 140, large: 200 } : undefined,
-			});
+	const rumble = flag("rumble") ? { small: 140, large: 200 } : undefined;
+	const packet =
+		family === "xbox"
+			? buildXboxOutput(flag("dark") ? {} : { rumble })
+			: flag("dark")
+				? buildDs4Output(ds4Transport)
+				: buildDs4Output(ds4Transport, { lightbar, rumble });
 	const wrote = handle.write(packet);
 	console.log(
 		`${wrote ? "Wrote" : "The device refused"} ${packet.length} bytes as ${transport} · ${hex(packet.subarray(0, 16))}`,
 	);
-	if (seen.length === 0) {
+	if (family === "ds4" && seen.length === 0) {
 		// The write above was also a question, and this is the answer: a pad that
 		// powered on over Bluetooth sends its USB shape — unreadable, and with no CRC
 		// to prove otherwise — until a host writes to it, and its native report from
@@ -318,8 +365,12 @@ if (flag("light") || flag("rumble") || flag("dark")) {
 		// outlives the probe is the one failure a person cannot tell from success.
 		console.log(`Buzzing for ${BUZZ_MS} ms…`);
 		await new Promise((resolve) => setTimeout(resolve, BUZZ_MS));
-		handle.write(buildDs4Output(transport, { lightbar }));
-		console.log("Motors stopped. The lightbar is left as it was — `--dark` turns it off.");
+		handle.write(family === "xbox" ? buildXboxOutput() : buildDs4Output(ds4Transport, { lightbar }));
+		console.log(
+			family === "xbox" ? "Motors stopped." : "Motors stopped. The lightbar is left as it was — `--dark` turns it off.",
+		);
+	} else if (family === "xbox") {
+		console.log("Xbox: there is no lightbar; `--rumble` is the only output this pad has.");
 	} else {
 		console.log(
 			transport === "bluetooth"

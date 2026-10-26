@@ -27,8 +27,8 @@ import {
 	padPalette,
 } from "@labunbun/gamepad";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
-import { attachedTwice } from "../../gamepad/test/devices.ts";
-import { CROSS, usbBytes } from "../../gamepad/test/reports.ts";
+import { attachedTwice, xboxDevice } from "../../gamepad/test/devices.ts";
+import { CROSS, usbBytes, XBOX_A, xboxBattery, xboxBytes } from "../../gamepad/test/reports.ts";
 import {
 	createPadRuntime,
 	createPadWatch,
@@ -321,7 +321,9 @@ describe("/gamepad approve", () => {
 
 		handleAppCommand("/gamepad approve", ctx);
 		expect(pad.bridge.allowApprove).toBe(true);
-		expect(infoText(store)).toContain("✕ may answer a permission dialog");
+		// No pad is connected in this test, so the sentence cannot know which
+		// family's letter to print — and names both rather than guessing.
+		expect(infoText(store)).toContain("A/✕ may answer a permission dialog");
 
 		handleAppCommand("/gamepad approve", ctx);
 		// The bridge is what a permission dialog reads at press time, and the file
@@ -563,6 +565,59 @@ describe("/gamepad watch and list", () => {
 		expect(text).toContain("DualShock 4 v2");
 		expect(text).toContain("interface 3");
 		expect(text).not.toContain("no reports");
+	});
+});
+
+describe("/gamepad on an Xbox pad", () => {
+	test("the headline and the list name the slot, not a DualShock 4", async () => {
+		const { ctx, store } = harness({ devices: [xboxDevice()] });
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		expect(infoText(store)).toContain("Gamepad connected — Xbox controller (XInput slot 1)");
+
+		handleAppCommand("/gamepad list", ctx);
+		expect(infoText(store)).toContain("Xbox controller (XInput slot 1)");
+	});
+
+	test("watch speaks the labels on the plastic and asks nothing about a touchpad", async () => {
+		const { ctx, source, watchLines, pad } = harness({ devices: [xboxDevice()] });
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		source.push(xboxBytes(XBOX_A));
+
+		handleAppCommand("/gamepad watch", ctx);
+		await new Promise((resolve) => setTimeout(resolve, 260));
+
+		expect(pad.service.status().phase).toBe("connected");
+		expect(watchLines).toHaveLength(1);
+		// A, not `cross`: the state speaks normalized ids, but the person reading
+		// this line is looking at an A. The report is 18 bytes because the source
+		// builds `XINPUT_STATE` plus its two battery bytes.
+		expect(watchLines[0]).toContain("xinput 18B · A · dpad");
+		expect(watchLines[0]).toContain("LT 0.00 RT 0.00");
+		expect(watchLines[0]).toContain("battery 3/3 (cable)");
+		// A pad with no surface must not print one, or "no touchpad" reads as a
+		// decoder that lost it.
+		expect(watchLines[0]).not.toContain("touch");
+	});
+
+	test("the status card uses XInput's words and its battery scale", async () => {
+		const { ctx, store, source } = harness({
+			devices: [xboxDevice()],
+			settings: { gamepad: { allowApprove: true } },
+		});
+		handleAppCommand("/gamepad on", ctx);
+		await settle();
+		source.push(xboxBytes(xboxBattery(2, 1)));
+		handleAppCommand("/gamepad status", ctx);
+
+		const text = infoText(store);
+		expect(text).toContain("transport: xinput");
+		expect(text).toContain("path: xinput://0");
+		expect(text).toContain("battery: 1/3 — low");
+		// Both the glyph and the filter follow the pad in hand.
+		expect(text).toContain("approvals: on — A may answer a permission dialog");
+		expect(text).toContain("device filter: (any Xbox controller)");
 	});
 });
 

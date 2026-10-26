@@ -20,6 +20,13 @@ import { bluetoothCrcOk, DS4_BLUETOOTH_CRC_LENGTH, DS4_OUTPUT_CRC_SEED, ds4Bluet
 
 export type Ds4Transport = "usb" | "bluetooth";
 
+/**
+ * How a pad's reports travel, across every family this package can read. The
+ * DualShock 4 has two wires; an Xbox pad behind XInput has one, and XInput does
+ * not say which physical wire it is.
+ */
+export type PadTransport = Ds4Transport | "xinput";
+
 export const DS4_VENDOR_ID = 0x054c;
 
 /** The Sony pads this package knows: product id, and the name worth showing a user. */
@@ -118,20 +125,42 @@ const DPAD_BUTTONS: Readonly<Record<DpadDirection, readonly Ds4ButtonId[]>> = {
 	"up-left": ["up", "left"],
 };
 
-export interface Ds4Axis {
+/** The button ids a direction stands for: two on a diagonal. */
+export function dpadButtonIds(direction: DpadDirection): readonly Ds4ButtonId[] {
+	return DPAD_BUTTONS[direction];
+}
+
+export interface PadAxis {
 	x: number;
 	y: number;
 }
 
-export interface Ds4Battery {
+/** A DualShock 4's axis, by its old name. Same shape as every pad's. */
+export type Ds4Axis = PadAxis;
+
+export interface PadBattery {
 	/**
-	 * The pad's own scale: 0-10, and past 10 with the cable in once the pack is
-	 * full. Not a percentage — the display layer multiplies, and clamps.
+	 * The pad's own scale: 0-10 for a DualShock 4, 0-3 behind XInput. Not a
+	 * percentage — the display layer divides by `batteryFull` and clamps.
 	 */
 	level: number;
 	/** The cable is in. This is the bit that means "charging". */
 	cable: boolean;
+	/**
+	 * The top of this pad's scale, for pads that count in something other than
+	 * tenths. Absent means the DualShock 4's ten — see `batteryFull`.
+	 */
+	full?: number;
+	/**
+	 * The pad itself says this level is low. XInput names three levels and calls
+	 * the bottom one "low"; a ten-step scale has no such word, so its pads leave
+	 * this absent and `padBatteryLow` decides from the level.
+	 */
+	low?: boolean;
 }
+
+/** A DualShock 4's battery, by its old name. Filled from the pad's ten-step scale. */
+export type Ds4Battery = PadBattery;
 
 /**
  * The touch surface in the pad's own units, which is what the reports carry. Only
@@ -164,10 +193,22 @@ export interface Ds4TouchPoint {
  */
 export type Ds4Touch = readonly [Ds4TouchPoint | undefined, Ds4TouchPoint | undefined];
 
-export interface Ds4State {
-	/** Sticks in -1..1, 0 at rest, Y positive *up*. The report has it inverted. */
-	leftStick: Ds4Axis;
-	rightStick: Ds4Axis;
+/**
+ * What a pad is doing, in the names every family is decoded into.
+ *
+ * The binding table, the settings file and the mapper all speak these ids, so a
+ * second pad family is decoded into them rather than teaching every layer a
+ * second vocabulary: an Xbox pad's A is `cross` by position — the bottom face
+ * button, which is what "confirm" was always about.
+ *
+ * Sticks are -1..1 with Y positive *up*; triggers are 0..1. `touch` is the one
+ * field not every family has — the DualShock 4's surface has no counterpart on
+ * an Xbox pad — so it is optional here and required on `Ds4State`.
+ */
+export interface PadState {
+	/** Sticks in -1..1, 0 at rest, Y positive *up*. */
+	leftStick: PadAxis;
+	rightStick: PadAxis;
 	/** Analog, 0..1. The digital bits in `buttons` only close near the end. */
 	leftTrigger: number;
 	rightTrigger: number;
@@ -175,7 +216,12 @@ export interface Ds4State {
 	dpad: DpadDirection | null;
 	/** Pressed buttons in a fixed order, so two identical states compare equal. */
 	buttons: Ds4ButtonId[];
-	battery: Ds4Battery;
+	battery: PadBattery;
+	/** Where the fingers are, if the pad has a surface. See `Ds4Touch`. */
+	touch?: Ds4Touch;
+}
+
+export interface Ds4State extends PadState {
 	/**
 	 * Where the fingers are, if any. Always both points — see `Ds4Touch` — and
 	 * deliberately not part of `buttons`: a touch is a position, and only the
@@ -184,11 +230,17 @@ export interface Ds4State {
 	touch: Ds4Touch;
 }
 
-export interface Ds4Report {
-	transport: Ds4Transport;
-	state: Ds4State;
+/** One decoded report, in the fields every family shares. */
+export interface PadReport {
+	transport: PadTransport;
+	state: PadState;
 	/** Bluetooth only: whether the trailing CRC verified. See `bluetoothCrcOk`. */
 	crcOk?: boolean;
+}
+
+export interface Ds4Report extends PadReport {
+	transport: Ds4Transport;
+	state: Ds4State;
 }
 
 /**
@@ -299,6 +351,11 @@ function touchPoint(bytes: Uint8Array, counterAt: number, dataAt: number): Ds4To
  */
 export const DS4_BATTERY_FULL = 10;
 
+/** The top of a battery's scale. A pad that does not say gets the DualShock 4's ten. */
+export function batteryFull(battery: PadBattery): number {
+	return battery.full ?? DS4_BATTERY_FULL;
+}
+
 /** One past the top of the scale: the pad saying "on the cable, and charged". */
 const DS4_BATTERY_CHARGED = DS4_BATTERY_FULL + 1;
 
@@ -385,7 +442,7 @@ function decode(bytes: Uint8Array, at: number): Ds4State {
 	// Bits 2-7 are the pad's own counter, which is why this is masked: reading
 	// the whole byte would make every report look like eight buttons.
 	for (const [mask, id] of SYSTEM_BUTTONS) if (system & mask) buttons.push(id);
-	if (dpad) buttons.push(...DPAD_BUTTONS[dpad]);
+	if (dpad) buttons.push(...dpadButtonIds(dpad));
 
 	return {
 		leftStick: { x: axis(bytes[at + PAYLOAD.leftX]), y: upAxis(bytes[at + PAYLOAD.leftY]) },
@@ -411,14 +468,18 @@ function upAxis(byte: number): number {
 	return value === 0 ? 0 : -value;
 }
 
-/** What to write to the pad. Everything is optional; absent means "leave dark". */
-export interface Ds4OutputState {
+/** What to write to any pad. Everything is optional; absent means "leave dark". */
+export interface PadOutputState {
 	/** 0-255 per motor: `small` is the right-hand one, `large` the left. */
 	rumble?: { small?: number; large?: number };
+	/** DualShock 4 only; families without a lightbar ignore it. */
 	lightbar?: { r: number; g: number; b: number };
 	/** Blink timings in 10 ms units; the pad needs both halves or neither takes. */
 	blink?: { on: number; off: number };
 }
+
+/** The DualShock 4's output, by its old name. Every field it uses is shared. */
+export type Ds4OutputState = PadOutputState;
 
 const USB_OUTPUT_REPORT_ID = 0x05;
 const BLUETOOTH_OUTPUT_REPORT_ID = 0x11;
@@ -442,7 +503,7 @@ const BLUETOOTH_VALID_FLAGS = 0x07;
  * will look at anything else in them, so a report built here and rejected there
  * is indistinguishable from a pad that is off.
  */
-export function buildDs4Output(transport: Ds4Transport, state: Ds4OutputState = {}): Uint8Array {
+export function buildDs4Output(transport: Ds4Transport, state: PadOutputState = {}): Uint8Array {
 	const lightbar = state.lightbar ?? { r: 0, g: 0, b: 0 };
 	const rumble = state.rumble ?? {};
 

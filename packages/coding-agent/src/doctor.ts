@@ -21,7 +21,7 @@ import {
 } from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import type { SubscriptionSignIns } from "./credential-presence.ts";
-import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
+import { changedBindings, type PadConfig, padConfirmGlyph } from "./gamepad-runtime.ts";
 import { loadOutputStyles, resolveOutputStyle } from "./output-styles.ts";
 import { networkAxisFrom, type Settings } from "./settings.ts";
 import { loadThemeFiles, resolveTheme } from "./theme-file.ts";
@@ -356,7 +356,9 @@ export async function runDoctorChecks(
 	const padEnabled = pad?.enabled ?? settings.gamepad?.enabled === true;
 	const padDetails: string[] = [padEnabled ? "enabled" : "off — /gamepad on, or --gamepad for one run"];
 	if (padEnabled) {
-		if (pad?.allowApprove) padDetails.push("✕ may answer a permission dialog");
+		// Doctor is configuration-only and never asks the hardware, so it does not
+		// know which family is attached; the wording names both possible buttons.
+		if (pad?.allowApprove) padDetails.push(`${padConfirmGlyph(undefined)} may answer a permission dialog`);
 		if (pad?.device) padDetails.push(`device filter: ${pad.device}`);
 		const changed = pad ? changedBindings(pad.bindings).length : 0;
 		if (changed > 0) padDetails.push(`${changed} binding${changed === 1 ? "" : "s"} changed from the default`);

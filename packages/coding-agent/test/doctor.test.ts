@@ -261,7 +261,7 @@ describe("the Gamepad row", () => {
 		const row = padRow(await runDoctorChecks(SettingsSchema.parse({}), cwd, home, undefined, pad));
 		expect(row?.status).toBe("ok");
 		expect(row?.detail).toBe(
-			"enabled · ✕ may answer a permission dialog · device filter: wireless · 1 binding changed from the default",
+			"enabled · A/✕ may answer a permission dialog · device filter: wireless · 1 binding changed from the default",
 		);
 	});
 

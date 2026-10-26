@@ -13,7 +13,7 @@
  * almost gone", which stays red whatever the theme says.
  */
 
-import type { Ds4Battery } from "./ds4.ts";
+import type { PadBattery } from "./ds4.ts";
 
 export interface PadRgb {
 	r: number;
@@ -95,7 +95,7 @@ export interface PadSignal {
 	/** A dialog is on screen waiting for an answer. */
 	awaiting: boolean;
 	/** Unread, or `undefined` until a report has carried one. */
-	battery?: Ds4Battery;
+	battery?: PadBattery;
 }
 
 /** A full on/off cycle of the attention pulse. */
@@ -107,7 +107,7 @@ export const PAD_BREATHE_MS = 1600;
 /** A full on/off cycle of the low battery blink. */
 export const PAD_LOW_PULSE_MS = 1000;
 
-/** The pad counts a blink in units of this long. See `Ds4OutputState.blink`. */
+/** The pad counts a blink in units of this long. See `PadOutputState.blink`. */
 const BLINK_UNIT_MS = 10;
 
 export interface PadBlink {
@@ -183,8 +183,13 @@ export function padBlinkFor(signal: PadSignal): PadBlink | undefined {
 }
 
 /** On battery, and nearly out of it. On the cable it is charging, not dying. */
-export function padBatteryLow(battery: Ds4Battery | undefined): boolean {
+export function padBatteryLow(battery: PadBattery | undefined): boolean {
 	if (!battery) return false;
+	// A family that names its own low level is believed. XInput's scale has three
+	// real levels and calls level one "low", which is not the same fraction of a
+	// charge as two out of ten; comparing it against the DS4 threshold would make
+	// "medium" read as nearly empty on every Xbox pad.
+	if (battery.low !== undefined) return battery.low;
 	return !battery.cable && battery.level <= PAD_LOW_BATTERY_LEVEL;
 }
 

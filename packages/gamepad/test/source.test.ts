@@ -11,15 +11,19 @@
 import { describe, expect, test } from "bun:test";
 import {
 	describePadDevice,
+	deviceFamily,
+	deviceLinkKey,
 	deviceTransport,
 	isDs4Device,
+	isPadDevice,
 	matchesDevice,
 	noDeviceDetail,
 	type PadSourceDevice,
 	pickDevice,
 	pickLinks,
+	xinputSlotPath,
 } from "../src/index.ts";
-import { attachedTwice, WIRED_PATH, WIRELESS_PATH } from "./devices.ts";
+import { attachedTwice, WIRED_PATH, WIRELESS_PATH, xboxDevice } from "./devices.ts";
 
 function device(overrides: Partial<PadSourceDevice> = {}): PadSourceDevice {
 	return { path: "hid#vid_054c&pid_09cc#1", vendorId: 0x054c, productId: 0x09cc, ...overrides };
@@ -41,6 +45,27 @@ describe("isDs4Device", () => {
 		expect(isDs4Device(device({ productId: 0x05c4 }))).toBe(true);
 		expect(isDs4Device(device({ productId: 0x1234 }))).toBe(false);
 		expect(isDs4Device(device({ vendorId: 0x045e }))).toBe(false);
+	});
+});
+
+describe("isPadDevice", () => {
+	test("a source's family claim is enough, and an Xbox vendor id alone is not", () => {
+		// A raw HID collection with Microsoft's id is exactly what node-hid opens and
+		// then reads nothing from on Windows: treating the id as readable would offer
+		// a device that never reports. Only a source that can actually read the pad
+		// says `family`, and XInput's slot devices are the ones that do.
+		expect(isPadDevice(device())).toBe(true);
+		expect(isPadDevice(device({ vendorId: 0x045e, productId: 0x02ea, path: "hid#xbox" }))).toBe(false);
+		expect(isPadDevice(xboxDevice())).toBe(true);
+	});
+
+	test("the family chooses the decoder and the link key", () => {
+		expect(deviceFamily(device())).toBe("ds4");
+		expect(deviceFamily(xboxDevice())).toBe("xbox");
+		expect(deviceLinkKey(device({ path: WIRED_PATH }))).toBe("usb");
+		expect(deviceLinkKey(device({ path: WIRELESS_PATH }))).toBe("bluetooth");
+		// XInput does not say which wire it is, so its API name is the link.
+		expect(deviceLinkKey(xboxDevice())).toBe("xinput");
 	});
 });
 
@@ -205,6 +230,19 @@ describe("pickLinks", () => {
 		const [wireless, wired] = attachedTwice();
 		expect(pickDevice([wireless, wired])).toBe(pickLinks([wireless, wired])[0]);
 		expect(pickDevice([wireless, wired])?.path).toBe(WIRED_PATH);
+	});
+
+	test("an XInput pad is one link, after the DualShock 4's own", () => {
+		const [wireless, wired] = attachedTwice();
+		const links = pickLinks([xboxDevice(1), wireless, wired]);
+		expect(links.map((pad) => pad.path)).toEqual([WIRED_PATH, WIRELESS_PATH, xinputSlotPath(1)]);
+	});
+
+	test("two Xbox pads are one link: XInput's slots are not a way to tell controllers apart here", () => {
+		// The package drives one controller. A second Xbox pad is not a second link
+		// of the first; it is the same situation as two DualShock 4s on one wire.
+		expect(pickLinks([xboxDevice(0), xboxDevice(1)])).toHaveLength(1);
+		expect(pickLinks([xboxDevice(0), xboxDevice(1)])[0]?.path).toBe(xinputSlotPath(0));
 	});
 });
 
