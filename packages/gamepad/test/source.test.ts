@@ -13,6 +13,7 @@ import {
 	describePadDevice,
 	deviceFamily,
 	deviceLinkKey,
+	devicePadKey,
 	deviceTransport,
 	isDs4Device,
 	isPadDevice,
@@ -226,6 +227,19 @@ describe("pickLinks", () => {
 		expect(pickLinks(pads, "nintendo")).toEqual([]);
 	});
 
+	test("a named device pins one pad, even when the word matches another", () => {
+		// "controller" is in both names. The filter chooses a controller; it must not
+		// quietly reopen the switching between pads, so only the first matching pad's
+		// links survive — here the DualShock 4 and both of its wires.
+		const [wireless, wired] = attachedTwice();
+		const links = pickLinks([wireless, wired, xboxDevice(0)], "controller");
+		expect(links.map((pad) => pad.path)).toEqual([WIRED_PATH, WIRELESS_PATH]);
+
+		// A family word matches every Xbox slot, and pins the first one listed.
+		const xbox = pickLinks([xboxDevice(1), xboxDevice(0)], "xbox");
+		expect(xbox.map((pad) => pad.path)).toEqual([xinputSlotPath(1)]);
+	});
+
 	test("`pickDevice` is the link it leads with", () => {
 		const [wireless, wired] = attachedTwice();
 		expect(pickDevice([wireless, wired])).toBe(pickLinks([wireless, wired])[0]);
@@ -238,11 +252,30 @@ describe("pickLinks", () => {
 		expect(links.map((pad) => pad.path)).toEqual([WIRED_PATH, WIRELESS_PATH, xinputSlotPath(1)]);
 	});
 
-	test("two Xbox pads are one link: XInput's slots are not a way to tell controllers apart here", () => {
-		// The package drives one controller. A second Xbox pad is not a second link
-		// of the first; it is the same situation as two DualShock 4s on one wire.
-		expect(pickLinks([xboxDevice(0), xboxDevice(1)])).toHaveLength(1);
-		expect(pickLinks([xboxDevice(0), xboxDevice(1)])[0]?.path).toBe(xinputSlotPath(0));
+	test("two Xbox pads are two links: a slot is a controller", () => {
+		// XInput names pads by slot, so two slots are two controllers and both are
+		// kept. Collapsing them into one was the bug: the second pad's reports were
+		// read as a second opinion of the first and could never drive the app.
+		const links = pickLinks([xboxDevice(0), xboxDevice(1)]);
+		expect(links.map((pad) => pad.path)).toEqual([xinputSlotPath(0), xinputSlotPath(1)]);
+	});
+});
+
+describe("devicePadKey", () => {
+	test("every DualShock 4 link is the same pad, whichever wire it is on", () => {
+		// A cable and the radio on one controller are still one controller: nothing
+		// on either HID collection says they belong together, and that assumption is
+		// what the dual-link handover has always been built on.
+		expect(devicePadKey(device({ path: WIRED_PATH }))).toBe("ds4");
+		expect(devicePadKey(device({ path: WIRELESS_PATH }))).toBe("ds4");
+		expect(devicePadKey(device({ path: "hid#free" }))).toBe("ds4");
+	});
+
+	test("an Xbox slot is a pad of its own", () => {
+		expect(devicePadKey(xboxDevice(0))).toBe(`xbox:${xinputSlotPath(0)}`);
+		expect(devicePadKey(xboxDevice(1))).toBe(`xbox:${xinputSlotPath(1)}`);
+		expect(devicePadKey(xboxDevice(0))).not.toBe(devicePadKey(xboxDevice(1)));
+		expect(devicePadKey(xboxDevice(0))).not.toBe(devicePadKey(device()));
 	});
 });
 

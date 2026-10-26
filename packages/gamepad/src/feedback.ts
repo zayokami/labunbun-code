@@ -228,6 +228,13 @@ export interface PadRumbleCommand {
 export const PAD_RUMBLE = {
 	/** The pad just answered: proof the feature is alive without looking. */
 	connected: { durationMs: 60, rumble: { large: 0, small: 0x40 } },
+	/**
+	 * The app moved to another pad. Short and quiet on purpose: it confirms which
+	 * hand is now driving, which is useful when the switch was a button press the
+	 * user did not mean as input — and it must not be mistaken for the louder
+	 * `connected` hello, because the pad has been here all along.
+	 */
+	switched: { durationMs: 40, rumble: { large: 0, small: 0x30 } },
 	/** Someone wants a decision. Felt across the room, deliberately. */
 	alert: { durationMs: 180, rumble: { large: 0x80, small: 0x80 }, urgent: true },
 	/** Work started. */

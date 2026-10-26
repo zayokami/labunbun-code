@@ -126,6 +126,19 @@ export function deviceLinkKey(device: PadSourceDevice): PadTransport {
 	return deviceFamily(device) === "xbox" ? "xinput" : deviceTransport(device);
 }
 
+/**
+ * Which physical pad a link belongs to: the unit the app switches between.
+ *
+ * Every DualShock 4 link is still assumed to be the same pad — a cable and the
+ * radio on one controller are two links, not two controllers, and nothing on
+ * either device says otherwise (see `pickLinks`). An Xbox link is one XInput
+ * slot, and a slot is a pad: two Xbox controllers are two slots, so they are two
+ * pads however alike their reports look.
+ */
+export function devicePadKey(device: PadSourceDevice): string {
+	return deviceFamily(device) === "xbox" ? `xbox:${device.path ?? ""}` : "ds4";
+}
+
 /** For lists and error messages: the model name, with the interface when known. */
 export function describePadDevice(device: PadSourceDevice): string {
 	const model = describeModel(device.vendorId, device.productId) ?? device.name ?? "unknown controller";
@@ -196,20 +209,30 @@ export function matchesDevice(device: PadSourceDevice, wanted: string): boolean 
  * encode. So all of them are opened and all of them are written to, which is
  * also the only version of this that survives a cable being pulled mid-sentence.
  *
- * One link per transport, because two collections of one model on one transport
- * are two controllers and not one; XInput counts as one link of its own, since
- * it does not say which wire it is. The wire ranks first, because it is the
- * link someone means by "I plugged it in" and the one whose reports arrive on
- * the shorter path. A source that cannot say which interface carries reports —
- * Linux, where every hidraw node looks alike — yields a single link, as it
- * always did.
+ * One link per *link identity*: for a DualShock 4 that is one per transport,
+ * because two collections of one model on one transport are two controllers and
+ * not one; for Xbox it is one per slot, because a slot is a controller. XInput
+ * used to count as a single link for the whole namespace, which collapsed every
+ * Xbox pad into one; slots now survive as separate pads, and the order among
+ * them is the order the source listed them in. The wire ranks first, because it
+ * is the link someone means by "I plugged it in" and the one whose reports
+ * arrive on the shorter path. A source that cannot say which interface carries
+ * reports — Linux, where every hidraw node looks alike — yields a single link,
+ * as it always did.
  *
- * Two controllers attached at once, one wired and one on the radio, are read as
- * one pad's two links: nothing on either device says which pad it belongs to, so
- * that is the closest thing to a rule there is. Being wrong about it costs a
- * second controller whose bar mirrors the app, and one that can drive the app if
- * the first one goes quiet — not nothing, but less than the cost of picking one
- * link and being wrong about which of them the pad obeys.
+ * Two DualShock 4 collections attached at once, one wired and one on the radio,
+ * are read as one pad's two links: nothing on either device says which pad it
+ * belongs to, so that is the closest thing to a rule there is. Being wrong about
+ * it costs a second controller whose bar mirrors the app, and one that can drive
+ * the app if the first one goes quiet — not nothing, but less than the cost of
+ * picking one link and being wrong about which of them the pad obeys.
+ *
+ * A `device` filter pins one pad rather than merely preferring it: every link of
+ * the first pad it matches is opened, and other pads are left alone. The filter
+ * exists to choose a controller, and a broad word such as "controller" can match
+ * both a DualShock 4 and an Xbox pad. Opening both would silently turn "use this
+ * one" back into "switch between these", which is the behavior the setting is
+ * there to remove.
  */
 export function pickLinks(devices: readonly PadSourceDevice[], wanted?: string): PadSourceDevice[] {
 	const pads = devices
@@ -218,17 +241,34 @@ export function pickLinks(devices: readonly PadSourceDevice[], wanted?: string):
 		.filter((device) => wanted === undefined || matchesDevice(device, wanted));
 	const reported = pads.filter((device) => device.carriesReports === true);
 	const candidates = reported.length > 0 ? reported : pads.slice(0, 1);
-	const byLink = new Map<PadTransport, PadSourceDevice>();
-	for (const device of candidates) {
-		const link = deviceLinkKey(device);
+	const byLink = new Map<string, PadSourceDevice>();
+	for (const device of wanted === undefined ? candidates : firstPad(candidates)) {
+		const link = linkIdentity(device);
 		if (!byLink.has(link)) byLink.set(link, device);
 	}
 	return [...byLink.values()].sort((a, b) => transportRank(a) - transportRank(b));
 }
 
+/** The links of the first pad in `devices`, grouped the way the app groups pads. */
+function firstPad(devices: readonly PadSourceDevice[]): PadSourceDevice[] {
+	const first = devices[0];
+	if (first === undefined) return [];
+	const key = devicePadKey(first);
+	return devices.filter((device) => devicePadKey(device) === key);
+}
+
 /** The one controller `pickLinks` leads with: the device to name and describe. */
 export function pickDevice(devices: readonly PadSourceDevice[], wanted?: string): PadSourceDevice | undefined {
 	return pickLinks(devices, wanted)[0];
+}
+
+/**
+ * The key `pickLinks` deduplicates by. A DualShock 4 is deduplicated per wire and
+ * an Xbox pad per slot, which is `devicePadKey` for the consoles and
+ * `deviceTransport` for the one family that can answer on two wires at once.
+ */
+function linkIdentity(device: PadSourceDevice): string {
+	return deviceFamily(device) === "xbox" ? devicePadKey(device) : deviceTransport(device);
 }
 
 /**

@@ -11,6 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+	buildDs4Output,
 	createFauxSource,
 	createPadService,
 	DEFAULT_BINDINGS,
@@ -24,7 +25,7 @@ import {
 } from "../src/index.ts";
 import { createFauxClock, type FauxClock } from "./clock.ts";
 import { wiredDevice, xboxDevice } from "./devices.ts";
-import { CROSS, usbBytes, XBOX_A, xboxBattery, xboxBytes } from "./reports.ts";
+import { usbBytes, XBOX_A, xboxBattery, xboxBytes } from "./reports.ts";
 
 const PALETTE = padPalette({ accent: "cyan", alert: "magenta" });
 
@@ -144,28 +145,63 @@ describe("an Xbox pad is an XInput link", () => {
 describe("the two families side by side", () => {
 	test("their links keep their own framings, and the wire leads", async () => {
 		const { service, source } = await harness([wiredDevice(), xboxDevice()]);
-		expect(service.status().links).toEqual(["usb", "xinput"]);
+		// The status fields describe the pad being read, which is still the wire.
+		expect(service.status().links).toEqual(["usb"]);
 		expect(service.status().transport).toBe("usb");
+		expect(service.status().controllers?.map((controller) => controller.family)).toEqual(["ds4", "xbox"]);
 
-		// Both links were told hello, each in the shape it understands: the Xbox
-		// one is exactly the four-byte vibration packet, not a truncated HID report.
-		const xboxWrites = source.writes().filter((packet) => packet.length === 4);
-		expect(xboxWrites).toEqual([Uint8Array.of(0x00, 0x00, 0x40, 0x40)]);
+		// At open, the wire gets the HID packet it understands, while the Xbox link
+		// gets exactly one four-byte vibration packet — the dark wakeup that makes
+		// it readable — never a truncated HID report.
+		const atOpen = source.writes();
+		expect(atOpen.filter((packet) => packet.length === 32)).toHaveLength(1);
+		expect(atOpen.filter((packet) => packet.length === 4)).toEqual([Uint8Array.of(0x00, 0x00, 0x00, 0x00)]);
+
+		// Once the Xbox pad is used deliberately, everything written to it is four
+		// bytes, and the wire is put out in its own 32-byte framing first.
+		source.takeWrites();
+		const wired = source.opened().find((device) => device.family !== "xbox");
+		if (wired === undefined) throw new Error("the wired link was not opened");
+		source.push(usbBytes(), wired); // the wire is the reader, and it is at rest
+		const xinput = source.opened().find((device) => device.family === "xbox");
+		if (xinput === undefined) throw new Error("the Xbox link was not opened");
+		source.push(xboxBytes(), xinput); // at rest once, which arms the switch
+		source.push(xboxBytes(XBOX_A), xinput);
+		source.push(xboxBytes(XBOX_A), xinput);
+		expect(service.status().transport).toBe("xinput");
+
+		const moved = source.takeWrites();
+		const dark = moved.filter((packet) => packet.length >= 32);
+		expect(dark).toEqual([buildDs4Output("usb")]);
+		expect(moved.filter((packet) => packet.length === 4).length).toBeGreaterThan(0);
 	});
 
-	test("a report on the Xbox link does not drive the app while the wire is fresh", async () => {
-		const { source, actions } = await harness([wiredDevice(), xboxDevice()]);
+	test("an Xbox press is deliberate over two reports, and the one that switches is not mapped", async () => {
+		const { service, source, actions } = await harness([wiredDevice(), xboxDevice()]);
 		// The faux source keys handles by identity, so push to the object the
 		// service opened rather than to an equal one.
 		const wired = source.opened().find((device) => device.family !== "xbox");
 		if (wired === undefined) throw new Error("the wired link was not opened");
-		source.push(usbBytes(CROSS), wired);
-		expect(actions.map((action) => action.phase)).toEqual(["press"]);
+		source.push(usbBytes(), wired); // the wire is the reader, and it is at rest
 
-		// The Xbox link is the second opinion, and says the same thing: no second
-		// press, no release — the state was already the reader's.
 		const xinput = source.opened().find((device) => device.family === "xbox");
+		if (xinput === undefined) throw new Error("the Xbox link was not opened");
+		source.push(xboxBytes(), xinput); // at rest once, which arms the pad
+
 		source.push(xboxBytes(XBOX_A), xinput);
-		expect(actions).toHaveLength(1);
+		// One report of input is a jolt, not a decision: the wire is still read.
+		expect(service.status().transport).toBe("usb");
+		expect(actions).toEqual([]);
+
+		source.push(xboxBytes(XBOX_A), xinput);
+		// The second is a person: the app moves, and the press that moved it is
+		// deliberately not mapped — picking up a pad must not answer a dialog.
+		expect(service.status().transport).toBe("xinput");
+		expect(actions).toEqual([]);
+
+		// It has to be let go of before the next press means anything.
+		source.push(xboxBytes(), xinput);
+		source.push(xboxBytes(XBOX_A), xinput);
+		expect(actions).toEqual([{ kind: "confirm", button: "cross", phase: "press", heldMs: 0 }]);
 	});
 });

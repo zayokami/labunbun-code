@@ -1,5 +1,7 @@
 export const GAMEPAD_PACKAGE_VERSION = "0.1.0.2";
 
+export { PAD_SWITCH_REPORTS, PAD_SWITCH_STICK, PAD_SWITCH_TRIGGER, padIsActive } from "./activity.ts";
+
 export {
 	bindingText,
 	DEFAULT_BINDINGS,
@@ -113,6 +115,7 @@ export {
 	createPadService,
 	noDeviceDetail,
 	type PadClock,
+	type PadControllerStatus,
 	type PadSample,
 	type PadService,
 	type PadServiceConfig,
@@ -129,6 +132,7 @@ export {
 	describePadDevice,
 	deviceFamily,
 	deviceLinkKey,
+	devicePadKey,
 	deviceTransport,
 	isDs4Device,
 	isPadDevice,
@@ -157,6 +161,7 @@ export {
 export {
 	createXInputSource,
 	importXInput,
+	XINPUT_CAPABILITIES_LENGTH,
 	XINPUT_MISSING,
 	XINPUT_NOT_WINDOWS,
 	XINPUT_POLL_MS,
@@ -167,6 +172,7 @@ export {
 	type XInputTimer,
 	type XInputTimers,
 	xinputSlotPath,
+	xinputSubtypeLabel,
 } from "./sources/xinput.ts";
 export {
 	createTouchReader,
