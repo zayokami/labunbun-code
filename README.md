@@ -406,11 +406,18 @@ The engine takes this key and does not use it: `M-z`. The engine uses it for not
 
 > **WARNING**: Do not rest a finger on a button. The tool reads a held button as a press.
 
-A controller can run the session without a keyboard. The tool reads a DualShock 4 over USB or Bluetooth. On Windows, the tool reads an Xbox controller through XInput.
+A controller can run the session without a keyboard. The tool reads a DualShock 4 over USB or Bluetooth. On Windows, the tool reads an Xbox controller through XInput. Both types can be attached at the same time: a DualShock 4 over USB or Bluetooth, and one or more Xbox controllers through XInput.
+
+The tool reads one controller at a time. It switches to another attached controller when you press a button or the D-pad, move a trigger to half or more, or move a stick past 60 percent of its travel on that controller. Last input wins. If only one controller is attached, the way it controls the session does not change.
+
+A button that is held when another controller becomes active does not switch control back. Release the button and press it again to switch back.
+
+An input that switches controllers does not also run its binding. The tool ignores input from the new controller until all of its controls are neutral. A control is neutral when no button is down, the D-pad is centered, both triggers are below half, both sticks are near the center, and no finger is on the touch surface. Let go and center the controls, then press again to use the controller.
 
 ```bash
 /gamepad on        # read a controller now, and remember it
-/gamepad status    # show the transport, the battery, and the bindings
+/gamepad status    # list each controller and mark the active one
+/gamepad switch    # make another attached controller active
 /gamepad watch     # show each press as one line
 /gamepad list      # list each controller that the OS reports
 /gamepad reset     # look for a controller again
@@ -420,6 +427,12 @@ A controller can run the session without a keyboard. The tool reads a DualShock 
 ```
 
 Use `--gamepad` to turn the controller on for one run. The flag does not write a setting. Use `--no-gamepad` to turn it off for one run.
+
+`/gamepad status` lists every attached controller. It marks the active one. It shows the transport and the battery of each controller. It also shows the bindings.
+
+`/gamepad switch` changes the active controller. With no argument, it cycles to the next attached controller. `/gamepad switch 2` picks the second controller. The count starts at 1. `/gamepad switch xbox` picks a matching Xbox controller. A part of a controller name or path also picks a matching controller.
+
+Every `/gamepad watch` line names the family, `ds4` or `xbox`, so a switch is visible.
 
 The table gives the DualShock 4 names first. The Xbox name is in brackets. A button does the same action on both controllers.
 
@@ -447,6 +460,10 @@ On a DualShock 4, the lightbar uses the accent color of the theme. It is brighte
 A waiting dialog also blinks the lightbar on the controller. The bar turns on for 500 ms. The bar turns off for 500 ms. This is the only state that uses a blink.
 
 An Xbox controller has no lightbar and no touchpad. The tool writes no lightbar packet to it. The battery of an Xbox controller has four levels: empty, low, medium, and full. The status shows this level as a number out of 3.
+
+You can attach more than one Xbox controller. Each controller occupies one XInput slot. Any XInput-compatible controller works, including a third-party controller. The tool names a standard pad as an Xbox controller. It names other XInput device types by their subtype, for example a wheel or an arcade stick.
+
+On a switch, the controller that becomes active gets one short tap, if `rumble` is `true`. If a DualShock 4 was active, it goes dark. An Xbox controller has no lightbar.
 
 The motors have these signals:
 
@@ -480,7 +497,7 @@ The hold on the confirm button is 600 ms of reports from the controller. The too
 
 > **NOTE**: A controller that is connected with USB and switched on appears twice. The tool reads one link and writes to both.
 
-> **NOTE**: Two controllers that are both switched on appear as one. Use the `device` key in the settings to choose one.
+> **NOTE**: The tool cannot reliably tell apart two DualShock 4 controllers. If one is on USB and the other is on Bluetooth, the tool reads them as one controller with two links. Their HID collections carry no shared identity. Use the `device` key in the settings to pin one.
 
 ```json
 {
@@ -495,6 +512,8 @@ The hold on the confirm button is 600 ms of reports from the controller. The too
   }
 }
 ```
+
+The `device` key pins one controller. The tool opens only the first controller that matches. It does not open another controller, so automatic switching is off. The value is a part of the controller name or path. The example value `wireless` matches a controller with `wireless` in its name or path.
 
 The keys `rumble` and `lightbar` both have the value `true` by default. Set a key to `false` to stop that part of the controller from working.
 
