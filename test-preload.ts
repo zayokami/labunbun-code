@@ -10,7 +10,19 @@
  * the `git.exe` entries on PATH lead to their install root, and PATH is read
  * again for a `bash.exe` that is not a WSL launcher.
  */
+import { setDefaultTimeout } from "bun:test";
 import { existsSync } from "node:fs";
+
+/**
+ * Bun's five-second default is a budget for a unit test, not for the tests
+ * that spawn a whole CLI. The GitHub Windows runner measures those runs past
+ * it now and then — three different tests in one run, seven in another, never
+ * the same set twice — and every one fails on the harness timeout rather than
+ * on an assertion. Thirty seconds is room for the machine, not for this one:
+ * a green run here still finishes in about the time it always did, and a test
+ * that really hangs still fails, only later.
+ */
+setDefaultTimeout(30_000);
 
 /** Directory names that hold executables inside an install rather than being its root. */
 const CLASS_DIRECTORIES = new Set(["bin", "cmd", "sbin", "usr", "mingw64", "mingw32", "libexec"]);
