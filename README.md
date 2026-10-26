@@ -53,9 +53,9 @@ LaBunbun Code supports these providers:
 - OpenAI, on the Chat Completions wire and on the Responses wire
 - Google
 - Ollama, on a local daemon and on the Ollama cloud
-- OpenAI-compatible endpoints, for example DeepSeek, Kimi, GLM, Mistral, OpenRouter
+- Other endpoints on any of the three wires: Chat Completions, Responses, or Anthropic Messages, for example DeepSeek, Kimi, GLM, Mistral, OpenRouter
 
-You add an OpenAI-compatible provider in the user settings file. See [Add a provider](#add-a-provider).
+You add a provider of your own in the user settings file. See [Add a provider](#add-a-provider).
 
 At startup the tool asks each provider that has an API key which models the provider serves. The local Ollama daemon needs no key, and the tool asks it as well. The tool then corrects the model catalog from the answer.
 
@@ -737,7 +737,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `modelDiscovery` | A boolean. The value `true` is the default. | User |
 | `backgroundShellNotifications` | A boolean. The value `true` is the default. | User |
 | `env` | An object of environment variables | User |
-| `providers` | An object of OpenAI-compatible providers | User |
+| `providers` | An object of providers you define | User |
 | `pricing` | An object of model prices | User |
 | `cache` | An object of cache settings | User |
 | `beetle` | An object with the keys `models`, `maxTurns`, `maxCostUSD`, and `stallNoticeMinutes` | User |
@@ -761,7 +761,7 @@ A request on the session's own loop counts the whole session, subagent runs incl
 
 ### Add a provider
 
-Add a provider in `~/.labunbun/settings.json`.
+Add a provider in `~/.labunbun/settings.json`. The key `providers.openaiCompatible` keeps its historical name; each entry names the wire it speaks.
 
 ```json
 {
@@ -770,6 +770,7 @@ Add a provider in `~/.labunbun/settings.json`.
     "openaiCompatible": [
       {
         "id": "myprovider",
+        "api": "openai-completions",
         "baseUrl": "https://api.example.com/v1",
         "apiKeyEnv": "MYPROVIDER_API_KEY",
         "models": [
@@ -785,6 +786,14 @@ Add a provider in `~/.labunbun/settings.json`.
   }
 }
 ```
+
+The key `api` names the wire. It is one of:
+
+- `openai-completions`: Chat Completions, `POST <baseUrl>/chat/completions`. This is the default when `api` is absent.
+- `openai-responses`: the Responses API, `POST <baseUrl>/responses`.
+- `anthropic-messages`: Anthropic Messages, `POST <baseUrl>/v1/messages`. The `baseUrl` is the host root, without `/v1`.
+
+An entry with no `api` speaks Chat Completions, which is what every provider written before this field existed does.
 
 The unit of each price is US dollars per 1 million tokens. The keys `cacheRead` and `cacheWrite` have the value 0 by default.
 

@@ -289,12 +289,13 @@ describe("mapping", () => {
 		});
 	});
 
-	test("an unsupported provider protocol downgrades with an explanation", () => {
+	test("a provider protocol this build speaks is carried on the entry", () => {
 		withHome({ ".codex/config.toml": CODEX_CONFIG }, (home) => {
 			const plan = planMigration(readSources(home, home), {}, { only: ["codex"] });
 			const item = plan.items.find((i) => i.from.includes("model_providers.packyprov"));
-			expect(item?.action).toBe("downgrade");
-			expect(item?.detail).toContain("chat-completions");
+			// `wire_api = "responses"` names a wire this build dispatches on, so
+			// the entry says so instead of arriving as chat-completions.
+			expect(item?.action).toBe("map");
 			expect(item?.detail).toContain("PACKYPROV_API_KEY");
 
 			const settings = JSON.parse(plan.writes.find((w) => w.kind === "settings")?.content ?? "{}");
@@ -302,6 +303,7 @@ describe("mapping", () => {
 				id: "packyprov",
 				baseUrl: "https://provider.example/v1",
 				apiKeyEnv: "PACKYPROV_API_KEY",
+				api: "openai-responses",
 			});
 		});
 	});

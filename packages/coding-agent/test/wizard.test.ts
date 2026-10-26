@@ -188,6 +188,32 @@ describe("buildWizardSettings", () => {
 		expect(settings.env).toEqual({ MY_KEY: "kv-secret" });
 		const models = spec.models as Array<Record<string, unknown>>;
 		expect(models[0]).toEqual({ id: "big-model", contextWindow: 200_000, maxOutputTokens: 16384, reasoning: true });
+		// Chat completions is what an entry without `api` already means, so the
+		// default answer leaves the field out rather than writing it down.
+		expect("api" in spec).toBe(false);
+	});
+
+	test("a non-default wire is written on the provider, never on the model", () => {
+		for (const api of ["openai-responses", "anthropic-messages"] as const) {
+			const settings = buildWizardSettings({
+				provider: "openai-compatible",
+				apiKey: null,
+				baseUrl: "https://api.example.com",
+				apiKeyEnvName: "MY_KEY",
+				api,
+				modelId: "m",
+				contextWindow: 128_000,
+				maxOutputTokens: 8192,
+				reasoning: false,
+				theme: "dark",
+				vimMode: false,
+				emacsMode: false,
+			});
+			const spec = (settings.providers as { openaiCompatible: Array<Record<string, unknown>> }).openaiCompatible[0];
+			expect(spec.api).toBe(api);
+			// One wire per endpoint: the models under it all speak the provider's.
+			expect((spec.models as Array<Record<string, unknown>>)[0]).not.toHaveProperty("api");
+		}
 	});
 
 	test("openai-compatible path without a pasted key omits the env block entirely", () => {

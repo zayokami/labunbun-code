@@ -31,7 +31,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { apiKeyEnvNames, listModels } from "@labunbun/ai";
+import { apiKeyEnvNames, type CustomProviderApiId, listModels } from "@labunbun/ai";
 import { AUTO_THEME_NAME, BUILT_IN_THEME_NAMES } from "@labunbun/tui";
 import { runChatGptLoginCli } from "./chatgpt-login.ts";
 import { runClaudeLoginCli } from "./claude-login.ts";
@@ -61,6 +61,8 @@ export interface WizardAnswers {
 	apiKey: string | null;
 	baseUrl: string;
 	apiKeyEnvName: string;
+	/** The custom provider's wire; unset means chat completions. */
+	api?: CustomProviderApiId;
 	modelId: string;
 	contextWindow: number;
 	maxOutputTokens: number;
@@ -121,6 +123,10 @@ export function buildWizardSettings(a: WizardAnswers): Record<string, unknown> {
 
 	const provider: Record<string, unknown> = {
 		id: "custom",
+		// Written only when it is not the default: an entry with no `api` already
+		// means chat completions, and omitting it keeps the file readable to a
+		// build that predates the choice.
+		...(a.api && a.api !== "openai-completions" ? { api: a.api } : {}),
 		baseUrl: a.baseUrl,
 		apiKeyEnv: a.apiKeyEnvName,
 		models: [
@@ -164,6 +170,21 @@ export const WIZARD_THEME_DEFAULT: string = AUTO_THEME_NAME;
  * one that needs no thought.
  */
 export const WIZARD_EDITOR_CHOICES: readonly string[] = ["none", "vim", "emacs"];
+
+/**
+ * The wires the custom-provider row offers, as numbered answers. Chat
+ * Completions is first because it is what an entry with no `api` has always
+ * meant, so a bare Enter keeps every existing endpoint working.
+ */
+export const WIZARD_PROVIDER_API_CHOICES: readonly string[] = ["1", "2", "3"];
+export const WIZARD_PROVIDER_API_DEFAULT = "1";
+
+/** The wire a row answer names. Unknown answers cannot arrive (`askChoice`) and mean the default. */
+export function wizardProviderApi(choice: string): CustomProviderApiId {
+	if (choice === "2") return "openai-responses";
+	if (choice === "3") return "anthropic-messages";
+	return "openai-completions";
+}
 
 /** Which row of the payment question a bare Enter takes: `1`–`4`, top to bottom. */
 export type WizardProviderRow = "1" | "2" | "3" | "4";
@@ -467,7 +488,7 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 				"  1. Sign in with a Claude subscription      a browser opens; no API key needed",
 				"  2. Sign in with a ChatGPT subscription     the ChatGPT models, on your plan",
 				"  3. Use an API key                          paste it now, or export it yourself",
-				"  4. Use an OpenAI-compatible endpoint       DeepSeek, Kimi, GLM, a local daemon",
+				"  4. Use another endpoint or gateway         DeepSeek, Kimi, GLM, OpenRouter, a local daemon",
 			].join("\n"),
 			["1", "2", "3", "4"],
 			wizardProviderDefault({ claudeConfigured: sources.includes("claude-code"), envKeysPresent: envKeys.length > 0 }),
@@ -478,6 +499,7 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		let apiKey: string | null = null;
 		let baseUrl = "";
 		let apiKeyEnvName = "CUSTOM_API_KEY";
+		let api: CustomProviderApiId = "openai-completions";
 		let modelId = "";
 		let contextWindow = 128_000;
 		let maxOutputTokens = 8_192;
@@ -510,7 +532,30 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			}
 		} else {
 			provider = "openai-compatible";
-			baseUrl = (await ask("Base URL (e.g. https://api.example.com/v1): ")).trim();
+			// Asked before the URL, because the address a person copies differs by
+			// wire: the OpenAI adapters take the `/v1` root, while the Anthropic
+			// client appends `/v1/messages` to a host root of its own.
+			api = wizardProviderApi(
+				await askChoice(
+					ask,
+					[
+						"Wire protocol?",
+						"  1. OpenAI Chat Completions      /chat/completions",
+						"  2. OpenAI Responses             /responses",
+						"  3. Anthropic Messages           /v1/messages",
+					].join("\n"),
+					WIZARD_PROVIDER_API_CHOICES,
+					WIZARD_PROVIDER_API_DEFAULT,
+					"1/2/3",
+				),
+			);
+			baseUrl = (
+				await ask(
+					api === "anthropic-messages"
+						? "Base URL (e.g. https://api.example.com): "
+						: "Base URL (e.g. https://api.example.com/v1): ",
+				)
+			).trim();
 			apiKeyEnvName = (await ask(`Env var NAME holding your API key [CUSTOM_API_KEY]: `)).trim() || "CUSTOM_API_KEY";
 			modelId = (await ask("Model id as the provider names it: ")).trim();
 			const ctxAnswer = Number(await ask(`Context window in tokens [128000]: `));
@@ -538,6 +583,7 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			apiKey,
 			baseUrl,
 			apiKeyEnvName,
+			api,
 			modelId,
 			contextWindow,
 			maxOutputTokens,

@@ -16,6 +16,7 @@ import {
 	planCommands,
 	planMemoryAsRule,
 	positiveInteger,
+	providerBaseUrl,
 	reportUnhandledKeys,
 	summarizeNames,
 	tildePath,
@@ -936,16 +937,49 @@ export function planGrokBuild(
 			positiveInteger(value.context_window) ?? provider?.contextWindow ?? GROK_ASSUMED_CONTEXT_WINDOW;
 		const maxOutputTokens = positiveInteger(value.max_completion_tokens) ?? ASSUMED_MAX_OUTPUT_TOKENS;
 		const apiKeyEnv = envKey ?? `${alias.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
-		specs.push({ id: alias, baseUrl: endpoint, apiKeyEnv, models: [{ id: wireId, contextWindow, maxOutputTokens }] });
+		// The three backend names grok documents are the three wires a provider
+		// entry here can name, so the answer travels. Any other spelling is a wire
+		// this build has no adapter for: the endpoint is registered as chat
+		// completions, which is what it was before the choice existed, and the
+		// line below says so rather than leaving the guess unnamed.
+		const backend = firstGrokString(value.api_backend) ?? provider?.apiBackend;
+		const wire =
+			backend === "responses"
+				? ("openai-responses" as const)
+				: backend === "messages"
+					? ("anthropic-messages" as const)
+					: ("openai-completions" as const);
+		const backendSpoken =
+			backend === undefined || backend === "chat_completions" || backend === "responses" || backend === "messages";
+		specs.push({
+			id: alias,
+			baseUrl: providerBaseUrl(wire, endpoint),
+			apiKeyEnv,
+			...(backendSpoken && wire !== "openai-completions" ? { api: wire } : {}),
+			models: [{ id: wireId, contextWindow, maxOutputTokens }],
+		});
 		const notes: string[] = [];
 		if (ownEndpoint === undefined) {
 			notes.push(`the endpoint is the one model_providers.${providerId} defines`);
 		} else if (baseUrl === undefined) {
 			notes.push("the endpoint is the one api_base_url names");
 		}
-		const backend = firstGrokString(value.api_backend) ?? provider?.apiBackend;
-		if (backend !== undefined && backend !== "chat_completions") {
-			notes.push(`api_backend is "${backend}", and an imported provider here speaks chat-completions`);
+		if (!backendSpoken) {
+			notes.push(
+				`api_backend is "${backend}", which is not one of the three wires this build speaks — the endpoint is ` +
+					"registered as chat-completions, so check it before use",
+			);
+		} else if (wire === "anthropic-messages") {
+			// Grok's own client appends `/messages` to this address; this build's
+			// appends `/v1/messages`. A trailing `/v1` is therefore the version
+			// segment the client adds here, and it moved into the client. Without
+			// one, the source was calling `/messages` under the address and this
+			// build will call `/v1/messages`, which is a different endpoint.
+			notes.push(
+				/\/v1\/?$/.test(endpoint)
+					? "the trailing /v1 in its address is the version segment the Messages client here appends, so the entry is written without it"
+					: "grok posts /messages under this address, while this build posts /v1/messages under it — check the endpoint after importing",
+			);
 		}
 		if (ownCredential) {
 			if (inlineKey && envKey === undefined) {

@@ -3,6 +3,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { CustomProviderApiId } from "@labunbun/ai";
 import type { HookEventName } from "./hooks.ts";
 import { HOOK_EVENTS } from "./hooks.ts";
 import type {
@@ -580,6 +581,28 @@ export function urlCredentialProblem(url: string): string | null {
 		}
 	}
 	return null;
+}
+
+// Long-form design notes: docs/dev/migration-framework.md
+/**
+ * The base URL this build's provider entry should carry, given the address the
+ * source posts to.
+ *
+ * The two OpenAI wires agree from one end to the other: a source appends
+ * `/chat/completions` or `/responses` to an address that already names the
+ * version, and so does this build, so the address travels as written. The
+ * Anthropic wire is the one that differs. A tool built on the Anthropic SDK
+ * addresses the host root and lets the SDK append `/v1/messages`, which is what
+ * this build does; a tool with its own HTTP client usually copies the `/v1`
+ * into its address and appends only `/messages`. The version segment there is
+ * the one the SDK adds for us, so it is taken off rather than doubled. An
+ * address without it is left alone — what the source called is then `{base}` +
+ * `/messages`, a shape this build cannot express.
+ */
+export function providerBaseUrl(api: CustomProviderApiId, baseUrl: string): string {
+	if (api !== "anthropic-messages") return baseUrl;
+	const trimmed = baseUrl.trim().replace(/\/+$/, "");
+	return trimmed.endsWith("/v1") ? trimmed.slice(0, -3) : trimmed;
 }
 
 // Long-form design notes: docs/dev/migration-framework.md

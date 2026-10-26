@@ -5,6 +5,7 @@
 
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
+import { type CustomProviderApiId, isCustomProviderApiId } from "@labunbun/ai";
 import { BUILT_IN_THEME_NAMES } from "@labunbun/tui";
 import {
 	collectFileWrites,
@@ -304,22 +305,23 @@ function planStepPermissionMode(
 }
 
 /**
- * One provider from `models.json`, as an entry this build can register.
+ * One provider from `models.json`, as the model lists this build can register.
  *
  * `models.json` is a *strict* document — a TypeBox schema the vendor compiles
  * (`core/model-config.ts:209-213`), so a provider that loads there is
  * well-formed by construction — and it holds two different things under one
  * key: the credentials half (`apiKey`, never read) and the endpoint half.
  *
- * Three dispositions, because the two protocols this build cannot speak are not
- * the same kind of thing as a missing endpoint:
+ * A model's wire is the one its own `api` names, or its provider's when it
+ * names none. The three wires the source knows are the three an entry here can
+ * name, so each carried model keeps its wire and the caller groups by it: an
+ * entry here states one wire for all its models, where the source states one
+ * per model. Two dispositions are left out rather than carried:
  *
- *   - a model whose protocol is `openai-completions` travels;
- *   - a model speaking `anthropic-messages` or `openai-responses` does not —
- *     `providers.openaiCompatible` here is one chat-completions endpoint for
- *     the whole provider (`settings.ts:39-53`), and there is no per-model
- *     protocol to say otherwise;
- *   - a model with no protocol at all travels nowhere: the vendor's own
+ *   - a model naming a wire outside those three travels nowhere — the source's
+ *     `Api` type is open (`KnownApi | (string & {})`, `types.ts:10-12`) and
+ *     this build has no adapter to send it to;
+ *   - a model with no wire at all travels nowhere either: the vendor's own
  *     composer throws for it (`provider-composer.ts:141-145`, "no \"api\"
  *     specified"), so nothing was serving it there either.
  *
@@ -332,16 +334,13 @@ function stepModelEntries(
 	provider: Record<string, unknown>,
 	providerApi: unknown,
 ): {
-	entries: Array<Record<string, unknown>>;
-	/** The endpoint behind each carried model, so the caller can tell whether one provider holds several. */
-	endpoints: string[];
+	entries: Array<{ spec: Record<string, unknown>; api: CustomProviderApiId; baseUrl: string }>;
 	foreign: string[];
 	silent: string[];
 	noEndpoint: string[];
 	unapplied: string[];
 } {
-	const entries: Array<Record<string, unknown>> = [];
-	const endpoints: string[] = [];
+	const entries: Array<{ spec: Record<string, unknown>; api: CustomProviderApiId; baseUrl: string }> = [];
 	const foreign: string[] = [];
 	const silent: string[] = [];
 	const noEndpoint: string[] = [];
@@ -359,7 +358,7 @@ function stepModelEntries(
 			silent.push(id);
 			continue;
 		}
-		if (api !== "openai-completions") {
+		if (!isCustomProviderApiId(api)) {
 			foreign.push(`${id} (${api})`);
 			continue;
 		}
@@ -369,7 +368,6 @@ function stepModelEntries(
 			noEndpoint.push(id);
 			continue;
 		}
-		endpoints.push(baseUrl);
 		const context = [override.contextWindow, value.contextWindow].find(
 			(candidate): candidate is number => typeof candidate === "number" && candidate > 0,
 		);
@@ -409,19 +407,23 @@ function stepModelEntries(
 			if (value[key] !== undefined || override[key] !== undefined) unapplied.push(`${id}: ${what}`);
 		}
 		entries.push({
-			id,
-			...(name === undefined ? {} : { name }),
-			contextWindow: Math.floor(context ?? 128_000),
-			maxOutputTokens: Math.floor(output ?? 16_384),
-			...(reasoning === true ? { reasoning: true } : {}),
-			...(pricing === undefined ? {} : { pricing }),
+			spec: {
+				id,
+				...(name === undefined ? {} : { name }),
+				contextWindow: Math.floor(context ?? 128_000),
+				maxOutputTokens: Math.floor(output ?? 16_384),
+				...(reasoning === true ? { reasoning: true } : {}),
+				...(pricing === undefined ? {} : { pricing }),
+			},
+			api,
+			baseUrl,
 		});
 	}
-	const carried = new Set(entries.map((entry) => entry.id));
+	const carried = new Set(entries.map((entry) => entry.spec.id));
 	for (const id of Object.keys(overrides)) {
 		if (!carried.has(id)) unapplied.push(`${id}: an override for a model this provider does not define`);
 	}
-	return { entries, endpoints, foreign, silent, noEndpoint, unapplied };
+	return { entries, foreign, silent, noEndpoint, unapplied };
 }
 
 /**
@@ -457,7 +459,8 @@ function stepApiKeyName(value: unknown, fallback: string): { name: string; note?
 function planStepProviders(
 	raw: RawStepCode,
 	from: string,
-	newIds: Map<string, string>,
+	/** The ids each provider key lands under — one per wire when its models span several. */
+	newIds: Map<string, string[]>,
 	existing: RawSettingsInput,
 	force: boolean,
 ): { specs: Array<Record<string, unknown>>; items: MigrationItem[] } {
@@ -484,10 +487,6 @@ function planStepProviders(
 			continue;
 		}
 		const models = stepModelEntries(value, value.api);
-		// The endpoints a model carries are the ones that decide whether anything is
-		// left to register; a provider whose own `baseUrl` is empty is not a skip in
-		// itself, since every model may carry one of its own.
-		const distinct = new Set(models.endpoints);
 		if (models.entries.length === 0) {
 			items.push({
 				source: "step-code",
@@ -496,8 +495,8 @@ function planStepProviders(
 				action: "skip",
 				detail:
 					models.foreign.length > 0
-						? `no model this build can serve: ${summarizeNames(models.foreign)} speak a protocol other than openai-completions, ` +
-							"and a provider entry here is one chat-completions endpoint"
+						? `no model this build can serve: ${summarizeNames(models.foreign)} name a wire this build has no adapter for ` +
+							"(it speaks chat completions, responses and Anthropic messages)"
 						: models.silent.length > 0
 							? `${models.silent.length} model(s) name no protocol at all, which Step's own composer refuses as well ("no "api" specified")`
 							: models.noEndpoint.length > 0
@@ -507,81 +506,110 @@ function planStepProviders(
 			});
 			continue;
 		}
-		if (distinct.size > 1) {
-			items.push({
-				source: "step-code",
-				from: label,
-				to: "—",
-				action: "skip",
-				detail:
-					`its ${models.entries.length} openai-completions model(s) answer at ${distinct.size} different endpoints, and a ` +
-					"provider entry here has one — split them into a provider each and import them by hand",
-				containsSecret: false,
-			});
-			continue;
-		}
-		const endpoint = [...distinct][0] ?? "";
-		const id = `step-${key}`;
+		// An entry here states one wire and one endpoint for all its models, where
+		// the source states both per model. Models that agree share an entry; a
+		// provider whose models do not becomes one entry per wire, each with the
+		// wire in its id so the two are addressable apart. The endpoints a model
+		// carries are what decides whether its group can be registered at all — a
+		// provider whose own `baseUrl` is empty is not a skip in itself, since
+		// every model may carry one of its own.
+		const wires = [...new Set(models.entries.map((entry) => entry.api))];
+		const split = wires.length > 1;
 		const { name: apiKeyEnv, note } = stepApiKeyName(
 			value.apiKey,
 			`${key.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`,
 		);
-		const spec = { id, baseUrl: endpoint, apiKeyEnv, models: models.entries };
-		if (!OpenAICompatibleProviderSchema.safeParse(spec).success) {
+		const ids: string[] = [];
+		for (const api of wires) {
+			const group = models.entries.filter((entry) => entry.api === api);
+			const fromLabel = split ? `${label} (${api})` : label;
+			const distinct = new Set(group.map((entry) => entry.baseUrl));
+			if (distinct.size > 1) {
+				items.push({
+					source: "step-code",
+					from: fromLabel,
+					to: "—",
+					action: "skip",
+					detail:
+						`its ${group.length} model(s)${split ? ` on ${api}` : ""} answer at ${distinct.size} different endpoints, and a ` +
+						"provider entry here has one — split them into a provider each and import them by hand",
+					containsSecret: false,
+				});
+				continue;
+			}
+			const endpoint = [...distinct][0] ?? "";
+			const id = split ? `step-${key}-${api}` : `step-${key}`;
+			const spec = {
+				id,
+				baseUrl: endpoint,
+				apiKeyEnv,
+				// The default wire is left off, because a spec without `api`
+				// already means it.
+				...(api === "openai-completions" ? {} : { api }),
+				models: group.map((entry) => entry.spec),
+			};
+			if (!OpenAICompatibleProviderSchema.safeParse(spec).success) {
+				items.push({
+					source: "step-code",
+					from: fromLabel,
+					to: "—",
+					action: "skip",
+					detail: "its endpoint is not a usable URL for a provider entry",
+					containsSecret: false,
+				});
+				continue;
+			}
+			const replacing = existingIds.has(id);
+			if (replacing && !force) {
+				items.push({
+					source: "step-code",
+					from: fromLabel,
+					to: "—",
+					action: "skip",
+					detail: `settings.json already defines a provider with the id this would take (${id}) — kept (use --force to overwrite)`,
+					containsSecret: false,
+				});
+				continue;
+			}
+			const extras: string[] = [];
+			if (replacing) extras.push(`it replaces the provider already registered as ${id}`);
+			if (note !== undefined) extras.push(note);
+			if (split) {
+				extras.push(
+					`its models speak ${wires.length} wires, and a provider entry here names one — this entry carries the ${api} models`,
+				);
+			}
+			if (models.foreign.length > 0) {
+				extras.push(
+					`${models.foreign.length} model(s) name a wire this build has no adapter for and were left out — ${summarizeNames(models.foreign, 4)}`,
+				);
+			}
+			if (models.silent.length > 0) {
+				extras.push(
+					`${models.silent.length} model(s) name no protocol and were left out — ${summarizeNames(models.silent, 4)}`,
+				);
+			}
+			if (models.unapplied.length > 0) {
+				extras.push(`not carried: ${summarizeNames(models.unapplied, 4)}`);
+			}
+			if (typeof value.name === "string" && value.name.trim() !== "") {
+				extras.push(`its display name "${value.name.trim()}" has no field here, where a provider is named by its id`);
+			}
+			if (value.headers !== undefined || value.compat !== undefined || value.authHeader !== undefined) {
+				extras.push("its own headers, protocol-compat block or auth-header switch have no counterpart here");
+			}
+			specs.push(spec);
+			ids.push(id);
 			items.push({
 				source: "step-code",
-				from: label,
-				to: "—",
-				action: "skip",
-				detail: "its endpoint is not a usable URL for a provider entry",
+				from: fromLabel,
+				to: `settings.json → providers.openaiCompatible[${id}] (${group.length} model(s))`,
+				action: "map",
+				detail: extras.length > 0 ? extras.join("; ") : "its endpoint and model list copied",
 				containsSecret: false,
 			});
-			continue;
 		}
-		const replacing = existingIds.has(id);
-		if (replacing && !force) {
-			items.push({
-				source: "step-code",
-				from: label,
-				to: "—",
-				action: "skip",
-				detail: `settings.json already defines a provider with the id this would take (${id}) — kept (use --force to overwrite)`,
-				containsSecret: false,
-			});
-			continue;
-		}
-		const extras: string[] = [];
-		if (replacing) extras.push(`it replaces the provider already registered as ${id}`);
-		if (note !== undefined) extras.push(note);
-		if (models.foreign.length > 0) {
-			extras.push(
-				`${models.foreign.length} model(s) were left out for speaking another protocol — ${summarizeNames(models.foreign, 4)}`,
-			);
-		}
-		if (models.silent.length > 0) {
-			extras.push(
-				`${models.silent.length} model(s) name no protocol and were left out — ${summarizeNames(models.silent, 4)}`,
-			);
-		}
-		if (models.unapplied.length > 0) {
-			extras.push(`not carried: ${summarizeNames(models.unapplied, 4)}`);
-		}
-		if (typeof value.name === "string" && value.name.trim() !== "") {
-			extras.push(`its display name "${value.name.trim()}" has no field here, where a provider is named by its id`);
-		}
-		if (value.headers !== undefined || value.compat !== undefined || value.authHeader !== undefined) {
-			extras.push("its own headers, protocol-compat block or auth-header switch have no counterpart here");
-		}
-		specs.push(spec);
-		newIds.set(key, id);
-		items.push({
-			source: "step-code",
-			from: label,
-			to: `settings.json → providers.openaiCompatible[${id}] (${models.entries.length} model(s))`,
-			action: "map",
-			detail: extras.length > 0 ? extras.join("; ") : "its endpoint and model list copied",
-			containsSecret: false,
-		});
+		newIds.set(key, ids);
 	}
 	return { specs, items };
 }
@@ -803,7 +831,7 @@ export function planStepCode(
 			containsSecret: false,
 		});
 	}
-	const newIds = new Map<string, string>();
+	const newIds = new Map<string, string[]>();
 	const providers = planStepProviders(raw, `${modelsFrom} → providers`, newIds, existing, force);
 
 	// ── defaultProvider / defaultModel ───────────────────────────────────────
@@ -815,32 +843,32 @@ export function planStepCode(
 				? `${from} → defaultModel ("${modelName}")`
 				: `${from} → defaultModel ("${modelName}") with defaultProvider ("${providerName}")`;
 		// Step keeps the provider and the model as two settings, where a reference
-		// here is one string. A provider this run imported is rewritten to the id it
-		// lands under; a provider it did not is not resolved through the registry —
-		// the registry answers for labunbun's own models, not for a name only Step
+		// here is one string. A provider this run imported is rewritten to the id
+		// the model landed under — one of several when the provider's models span
+		// wires; a provider it did not is not resolved through the registry — the
+		// registry answers for labunbun's own models, not for a name only Step
 		// knows.
-		const renamed = providerName === "" ? undefined : newIds.get(providerName);
-		const known =
-			renamed === undefined
-				? undefined
-				: (providers.specs.find((spec) => spec.id === renamed)?.models as Array<{ id?: string }> | undefined)?.some(
-						(model) => model.id === modelName,
-					);
-		if (renamed !== undefined && known === true) {
+		const renamed = providerName === "" ? [] : (newIds.get(providerName) ?? []);
+		const renamedTo = renamed.find((id) =>
+			(providers.specs.find((spec) => spec.id === id)?.models as Array<{ id?: string }> | undefined)?.some(
+				(model) => model.id === modelName,
+			),
+		);
+		if (renamedTo !== undefined) {
 			claimScalar(
 				"step-code",
 				"model",
-				`${renamed}/${modelName}`,
+				`${renamedTo}/${modelName}`,
 				label,
-				`mapped to "${renamed}/${modelName}", the same model under the id your provider is imported as`,
+				`mapped to "${renamedTo}/${modelName}", the same model under the id your provider is imported as`,
 			);
-		} else if (renamed !== undefined && known === false) {
+		} else if (renamed.length > 0) {
 			items.push({
 				source: "step-code",
 				from: label,
 				to: "—",
 				action: "skip",
-				detail: `your provider "${providerName}" does not list a model called "${modelName}", so the reference would point at nothing here`,
+				detail: `your provider "${providerName}" has no imported model called "${modelName}", so the reference would point at nothing here`,
 				containsSecret: false,
 			});
 		} else if (providerName !== "" && Object.hasOwn(raw.providers, providerName)) {

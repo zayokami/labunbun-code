@@ -5,7 +5,7 @@
 ## Purpose
 
 - Give the agent loop one stream protocol for the three wires: `anthropic-messages`, `openai-completions`, and `openai-responses` (`packages/ai/src/types.ts:188`).
-- Keep the model list small and hand-written. Users add OpenAI-compatible providers from settings (`packages/ai/src/model.ts:1305`).
+- Keep the model list small and hand-written. Users add providers from settings, each entry naming one of the three wires (`packages/ai/src/model.ts:1305`).
 - State what each provider does about the prompt cache. Measure the traffic the provider reports back (`packages/ai/src/cache.ts:2`).
 - Turn a retryable failure, a stalled stream, and a dead model into one terminal `error` event. A caller never sees a throw cross the stream boundary (`packages/ai/src/retry.ts:2`).
 - Watch the bytes of every request, so a prefix rewind cannot happen quietly (`packages/ai/src/cache-tracker.ts:2`).
@@ -53,7 +53,7 @@
 
 ### The model registry
 
-The registry is a hand-written list, not a generated mega-catalog. Users extend it through `registerOpenAICompatibleProvider`. In these notes, a row is a record in this list. An entry is a record in another list, such as a cache or a catalog.
+The registry is a hand-written list, not a generated mega-catalog. Users extend it through `registerOpenAICompatibleProvider`, whose spec names the wire its entry speaks. In these notes, a row is a record in this list. An entry is a record in another list, such as a cache or a catalog.
 
 - `ANTHROPIC_BASE` is `https://api.anthropic.com` (`packages/ai/src/model.ts:8`).
 - `KIMI_BASE` is `https://api.moonshot.ai/v1`, Kimi's international host. The China host serves the same ids under its own keys (`packages/ai/src/model.ts:10`).
@@ -200,7 +200,7 @@ The registry is a hand-written list, not a generated mega-catalog. Users extend 
 - DeepSeek retired the chat/reasoner pair on 2026-07-24, and both modes live on under the flash id. The two V4 flash ids are different: the API still answers them as compatibility aliases, at flash prices. They name the same row, so a reference to either resolves to it.
 - Kimi is where the line of succession ran twice. The K2 previews and K2.5 stay in the family, since K2.6 is the member that survives at the price they had. The moonshot-v1 ids have no survivor to land on and follow their notice to K3, a far more expensive model than the one they named.
 - `pricingOverrides` holds prices declared in settings, by reference (`packages/ai/src/model.ts:1272`). The built-in table is a dated snapshot of public list prices, and nobody's bill is the list price. A gateway, a negotiated rate, or a repriced model all make it wrong. A bare model id applies to every provider that serves it, the same way `resolveModel` reads a bare id.
-- `OpenAICompatibleProviderSpec` (`packages/ai/src/model.ts:1287`) describes a provider from settings: `id`, `baseUrl`, `apiKeyEnv`, and models with `id`, `name`, `contextWindow`, `maxOutputTokens`, `reasoning`, and `pricing`. The figures are USD per million tokens. An omitted price means tokens count but add no cost.
+- `OpenAICompatibleProviderSpec` (`packages/ai/src/model.ts:1287`) describes a provider from settings: `id`, `baseUrl`, `apiKeyEnv`, `api` (one of the three custom wires; omitted means chat completions), and models with `id`, `name`, `contextWindow`, `maxOutputTokens`, `reasoning`, and `pricing`. The figures are USD per million tokens. An omitted price means tokens count but add no cost.
 
 #### Resolution and the environment
 

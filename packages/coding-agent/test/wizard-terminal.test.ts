@@ -193,6 +193,7 @@ describe("the wizard on a terminal", () => {
 		const term = fakeTerminal();
 		const run = startWizard(term);
 		await term.answer("How do you want to use labunbun?", "4");
+		await term.answer("Wire protocol?", "1");
 		await term.answer("Base URL (e.g.", "https://api.example.com/v1");
 		await term.answer("Env var NAME holding your API key", "");
 		await term.answer("Model id as the provider names it:", "my-model");
@@ -211,5 +212,29 @@ describe("the wizard on a terminal", () => {
 			emacsMode: false,
 			env: { CUSTOM_API_KEY: "sk-compat-key" },
 		});
+	});
+
+	test("row 4's wire question lands on the provider spec", async () => {
+		const term = fakeTerminal();
+		const run = startWizard(term);
+		await term.answer("How do you want to use labunbun?", "4");
+		await term.answer("Wire protocol?", "3");
+		await term.answer("Base URL (e.g.", "https://api.example.com");
+		await term.answer("Env var NAME holding your API key", "");
+		await term.answer("Model id as the provider names it:", "my-model");
+		await term.answer("Context window in tokens", "");
+		await term.answer("Max output tokens", "");
+		await term.answer("Reasoning-capable model?", "");
+		await term.answer("Paste the key value to store now", "");
+		await term.answer("Theme (", "auto");
+		await term.answer("Editing model (", "none");
+		await declineImportOffer(term, run);
+		await settles(run);
+
+		const providers = savedSettings().providers as { openaiCompatible: Array<Record<string, unknown>> };
+		expect(providers.openaiCompatible[0].api).toBe("anthropic-messages");
+		// The Anthropic client appends `/v1/messages` itself, so the example and
+		// the stored address are the host root, not the OpenAI-style `/v1` root.
+		expect(providers.openaiCompatible[0].baseUrl).toBe("https://api.example.com");
 	});
 });

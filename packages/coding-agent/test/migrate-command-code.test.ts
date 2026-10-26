@@ -1014,12 +1014,60 @@ test("a wire protocol decided by an npm package says what the source did with it
 		},
 	});
 	const plan = planOf(home, cwd);
-	const providers = (settingsWrite(plan) as Record<string, unknown>).providers as { openaiCompatible: unknown[] };
+	const providers = (settingsWrite(plan) as Record<string, unknown>).providers as {
+		openaiCompatible: Array<Record<string, unknown>>;
+	};
 	expect(providers.openaiCompatible).toHaveLength(1);
+	// The package named the Anthropic wire, and this build speaks it: the
+	// protocol travels, so the entry needs no downgrade of its own. The note
+	// that remains is about the package not being installed.
+	expect(providers.openaiCompatible[0].api).toBe("anthropic-messages");
 	const item = itemsFor(plan, "providers.json → claudeish")[0];
 	expect(item.action).toBe("downgrade");
 	expect(item.detail).toContain("@ai-sdk/anthropic");
 	expect(item.detail).toContain("protocol it stood for was read");
+});
+
+test("the Messages wire's version segment is folded into the client", () => {
+	const { home, cwd } = commandCodeFixture({
+		files: {
+			"providers.json": providersJson("claudeish", {
+				api: "anthropic-messages",
+				baseURL: "https://api.example.com/v1",
+				apiKey: "$K",
+				...PROVIDER_MODELS,
+			}),
+		},
+	});
+	const plan = planOf(home, cwd);
+	const providers = (settingsWrite(plan) as Record<string, unknown>).providers as {
+		openaiCompatible: Array<Record<string, unknown>>;
+	};
+	// The source's client appends `/messages` to this address; this build's
+	// appends `/v1/messages`, so the version segment must not stay in the URL.
+	expect(providers.openaiCompatible[0].baseUrl).toBe("https://api.example.com");
+	const item = itemsFor(plan, "providers.json → claudeish")[0];
+	expect(item.action).toBe("map");
+	expect(item.detail).toContain("lost the trailing /v1");
+});
+
+test("an explicit Responses wire is carried as-is, with no downgrade line", () => {
+	const { home, cwd } = commandCodeFixture({
+		files: {
+			"providers.json": providersJson("responser", {
+				api: "openai-responses",
+				baseURL: "https://api.example.com/v1",
+				apiKey: "$K",
+				...PROVIDER_MODELS,
+			}),
+		},
+	});
+	const plan = planOf(home, cwd);
+	const providers = (settingsWrite(plan) as Record<string, unknown>).providers as {
+		openaiCompatible: Array<Record<string, unknown>>;
+	};
+	expect(providers.openaiCompatible[0].api).toBe("openai-responses");
+	expect(itemsFor(plan, "providers.json → responser")[0].action).toBe("map");
 });
 
 test("a base URL carrying a credential is refused whole, with the password absent from the plan", () => {

@@ -536,8 +536,70 @@ describe("grok model endpoints", () => {
 		expect(line(planned, "model.via-gateway")?.detail).toContain("mints its token with a credential helper");
 		expect(line(planned, "model.via-gateway")?.detail).toContain("VIA_GATEWAY_API_KEY");
 		// The wire protocol is inherited too: the model names no `api_backend`, so the
-		// one on the provider is the one grok speaks to this endpoint.
-		expect(line(planned, "model.via-gateway")?.detail).toContain('api_backend is "responses"');
+		// one on the provider is the one grok speaks to this endpoint — and it is a
+		// wire this build speaks, so the entry names it.
+		const settings = writtenSettings(planned) as {
+			providers?: { openaiCompatible?: Array<{ id?: string; api?: string }> };
+		};
+		expect(settings.providers?.openaiCompatible?.[0]?.api).toBe("openai-responses");
+	});
+
+	test("the Messages backend travels, and its version segment moves into the client", () => {
+		const planned = plan({
+			"config.toml": [
+				"[model.claude]",
+				'base_url = "https://api.example.com/v1"',
+				'api_backend = "messages"',
+				'env_key = "CLAUDE_KEY"',
+				"",
+			].join("\n"),
+		});
+		// grok appends `/messages` to this address; this build's client appends
+		// `/v1/messages`, so the version segment is the client's to add.
+		const providers = (writtenSettings(planned) as { providers?: { openaiCompatible?: unknown[] } }).providers;
+		expect(providers?.openaiCompatible).toEqual([
+			{
+				id: "claude",
+				baseUrl: "https://api.example.com",
+				apiKeyEnv: "CLAUDE_KEY",
+				api: "anthropic-messages",
+				models: [{ id: "claude", contextWindow: 128000, maxOutputTokens: 8192 }],
+			},
+		]);
+		expect(line(planned, "model.claude")?.detail).toContain("the trailing /v1 in its address is the version segment");
+	});
+
+	test("an address without a version segment is carried as written, and the difference is named", () => {
+		const planned = plan({
+			"config.toml": [
+				"[model.claude]",
+				'base_url = "https://api.example.com/anthropic"',
+				'api_backend = "messages"',
+				"",
+			].join("\n"),
+		});
+		// The source was calling {base}/messages; this build will call
+		// {base}/v1/messages, which is a different endpoint.
+		expect(line(planned, "model.claude")?.detail).toContain(
+			"grok posts /messages under this address, while this build posts /v1/messages under it",
+		);
+	});
+
+	test("a backend outside the three is registered as chat completions and said so", () => {
+		const planned = plan({
+			"config.toml": ["[model.odd]", 'base_url = "https://api.example.com/v1"', 'api_backend = "websocket"', ""].join(
+				"\n",
+			),
+		});
+		const providers = (
+			writtenSettings(planned) as {
+				providers?: { openaiCompatible?: Array<Record<string, unknown>> };
+			}
+		).providers;
+		expect(providers?.openaiCompatible?.[0]?.api).toBeUndefined();
+		const detail = line(planned, "model.odd")?.detail;
+		expect(detail).toContain('api_backend is "websocket"');
+		expect(detail).toContain("registered as chat-completions");
 	});
 
 	test("an override of a model grok already knows stays behind", () => {

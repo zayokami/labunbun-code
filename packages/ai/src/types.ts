@@ -207,6 +207,21 @@ export type ApiId =
 	| "gemini-code-assist";
 
 /**
+ * The wires a user-defined provider may name. The two subscription wires are
+ * deliberately absent: each is tied to a token minted by a login this app
+ * performs, so a settings file naming one could only describe a connection it
+ * cannot make. The first entry is the default, which keeps every provider
+ * written before this choice existed working unchanged.
+ */
+export const CUSTOM_PROVIDER_API_IDS = ["openai-completions", "openai-responses", "anthropic-messages"] as const;
+export type CustomProviderApiId = (typeof CUSTOM_PROVIDER_API_IDS)[number];
+
+/** Whether a value read from outside (a settings file, another agent's config) names a custom wire. */
+export function isCustomProviderApiId(value: unknown): value is CustomProviderApiId {
+	return typeof value === "string" && (CUSTOM_PROVIDER_API_IDS as readonly string[]).includes(value);
+}
+
+/**
  * The thinking levels a session can ask for, as a runtime list. Anything that
  * has to validate a level — the settings schema is one — derives its set from
  * here rather than restating it, so the two cannot drift apart.

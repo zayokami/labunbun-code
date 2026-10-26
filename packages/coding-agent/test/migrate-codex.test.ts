@@ -85,7 +85,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 }
 
 /** A codex config: top-level keys, then the provider table, then anything else. */
-function codexConfig(options: { top?: string[]; provider?: string[]; tail?: string[] } = {}): string {
+function codexConfig(options: { top?: string[]; provider?: string[]; tail?: string[]; wireApi?: string } = {}): string {
 	return [
 		'model = "gpt-5.6-terra"',
 		'model_provider = "packyprov"',
@@ -93,7 +93,7 @@ function codexConfig(options: { top?: string[]; provider?: string[]; tail?: stri
 		"",
 		"[model_providers.packyprov]",
 		'base_url = "https://provider.example/v1"',
-		'wire_api = "responses"',
+		`wire_api = "${options.wireApi ?? "responses"}"`,
 		...(options.provider ?? []),
 		"",
 		...(options.tail ?? []),
@@ -203,6 +203,35 @@ describe("codex providers", () => {
 		const skipped = item(planned, 'model ("gpt-5.6-terra")');
 		expect(skipped?.action).toBe("skip");
 		expect(skipped?.detail).toContain('already defines a "packyprov" provider');
+	});
+
+	test("wire_api responses is the Responses API, carried on the provider", () => {
+		const planned = planConfig(codexConfig());
+		const provider = (plannedSettings(planned).providers as { openaiCompatible: Array<Record<string, unknown>> })
+			.openaiCompatible[0];
+		expect(provider.api).toBe("openai-responses");
+		// The wire is one this build speaks, so nothing was downgraded.
+		expect(item(planned, "model_providers.packyprov")?.action).toBe("map");
+	});
+
+	test("the chat wire leaves the default off the spec", () => {
+		for (const wireApi of ["chat", "completions"]) {
+			const planned = planConfig(codexConfig({ wireApi }));
+			const provider = (plannedSettings(planned).providers as { openaiCompatible: Array<Record<string, unknown>> })
+				.openaiCompatible[0];
+			expect("api" in provider).toBe(false);
+			expect(item(planned, "model_providers.packyprov")?.action).toBe("map");
+		}
+	});
+
+	test("a wire_api this build does not know is registered as chat-completions and says so", () => {
+		const planned = planConfig(codexConfig({ wireApi: "websocket" }));
+		const provider = (plannedSettings(planned).providers as { openaiCompatible: Array<Record<string, unknown>> })
+			.openaiCompatible[0];
+		expect("api" in provider).toBe(false);
+		const downgrade = item(planned, "model_providers.packyprov");
+		expect(downgrade?.action).toBe("downgrade");
+		expect(downgrade?.detail).toContain("websocket");
 	});
 
 	test("the compaction threshold has no equivalent and is reported", () => {

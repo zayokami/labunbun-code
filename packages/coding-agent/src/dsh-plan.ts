@@ -10,7 +10,7 @@
 
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
-import { resolveModel } from "@labunbun/ai";
+import { isCustomProviderApiId, resolveModel } from "@labunbun/ai";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { DshMcpServer } from "./dsh-cordis.ts";
 import type { RawDeepSeekHarness } from "./dsh-read.ts";
@@ -451,7 +451,18 @@ export function planDeepSeekHarness(
 			// number in the entry would describe something that never happens.
 			const carried = declared.filter((entry) => dshWindowDrift(entry) === undefined);
 			const { models, assumed } = dshRouteModels(carried, value, DSH_PI_AI_DEFAULTS);
-			const spec = { id: `dsh-${route}`, baseUrl, apiKeyEnv, models };
+			// The harness spells its three wires the way this build does, so a
+			// recognised id travels. An unknown spelling is not guessed at: the
+			// entry keeps the default and the item below states the difference.
+			const declaredApi = typeof value.api === "string" ? value.api.trim() : "";
+			const wire = isCustomProviderApiId(declaredApi) ? declaredApi : undefined;
+			const spec = {
+				id: `dsh-${route}`,
+				baseUrl,
+				apiKeyEnv,
+				...(wire && wire !== "openai-completions" ? { api: wire } : {}),
+				models,
+			};
 			if (!OpenAICompatibleProviderSchema.safeParse(spec).success) {
 				routeNotes.set(route, "its endpoint or model entries are not what a provider entry here accepts");
 				items.push({
@@ -466,11 +477,9 @@ export function planDeepSeekHarness(
 			}
 			openaiCompatible.push(spec);
 			if (value.reasoning !== undefined) thinkingDefaults.push(`llm-pi-ai.providers.${route}.reasoning`);
-			// The harness speaks one of three protocols per route, and only the first
-			// is the one a provider entry here uses — so a route naming another is
-			// carried with the difference stated rather than presented as equivalent.
-			const api = typeof value.api === "string" ? value.api.trim() : "";
-			const otherProtocol = api !== "" && api !== "openai-completions";
+			// Only a spelling this build does not recognise is a difference worth
+			// stating; a recognised wire was carried as itself above.
+			const otherProtocol = declaredApi !== "" && wire === undefined;
 			items.push({
 				source: "deepseek-harness",
 				from: label,
@@ -478,7 +487,7 @@ export function planDeepSeekHarness(
 				action: otherProtocol ? "downgrade" : "map",
 				detail: [
 					dshModelCarryNote(declared, models.length, assumed, DSH_PI_AI_DEFAULTS),
-					otherProtocol ? `the route speaks "${api}", which is served here as chat-completions` : "",
+					otherProtocol ? `the route speaks "${declaredApi}", which is served here as chat-completions` : "",
 					`set ${apiKeyEnv} in your environment`,
 				]
 					.filter(Boolean)
@@ -510,11 +519,11 @@ export function planDeepSeekHarness(
 		const declared = dshModelEntries(deepseekSection.models);
 		reportDshWindowMismatches(items, declared, `${label}.models → window`);
 		const carried = declared.filter((entry) => dshWindowDrift(entry) === undefined);
-		// A provider entry here speaks chat-completions, and the harness's own
-		// protocol default is `messages` — DeepSeek's Anthropic root. Pointing this
-		// build's provider at a root that serves only the other protocol would hand
-		// it requests it cannot answer, so the section is only carried when it says
-		// chat-completions itself.
+		// The harness's protocol default is `messages` — DeepSeek's Anthropic root.
+		// This build speaks that wire for custom providers, but the section's
+		// baseURL is written for the harness's own client, and the config does not
+		// state that the same address and model ids work unchanged on this build's
+		// adapter. So the section is only carried when it says chat-completions.
 		if (protocol !== "chat-completions") {
 			routeNotes.set(
 				DSH_DEEPSEEK_ROUTE,
@@ -529,7 +538,8 @@ export function planDeepSeekHarness(
 				action: "skip",
 				detail:
 					`the section is served over the harness's ${protocol === "" ? "default messages" : `"${protocol}"`} protocol, ` +
-					`while a provider entry here speaks chat-completions — no entry is registered for its endpoint${
+					`and its endpoint is not registered — its baseURL and model ids were written for the harness's own client, ` +
+					`so add a provider entry by hand after checking that they work here${
 						namedApiKeyEnv === "" || namedApiKeyEnv === DSH_DEEPSEEK_DEFAULT_API_KEY_ENV
 							? ""
 							: `, and its credential variable ${namedApiKeyEnv} is not carried either`

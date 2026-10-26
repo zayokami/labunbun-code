@@ -637,6 +637,36 @@ describe("migrate: DeepSeek Harness source", () => {
 		});
 	});
 
+	// 7b.
+	test("a route's Responses wire travels on the entry instead of being downgraded", () => {
+		const settings = [
+			"- insert:",
+			"    - id: llm-pi-ai",
+			"      name: '@deepseek-ai/dsh-llm-pi-ai'",
+			"      config:",
+			"        providers:",
+			"          responser:",
+			"            apiKeyEnv: RESPONDER_KEY",
+			"            api: openai-responses",
+			"            baseURL: https://responder.example/v1",
+			"            models:",
+			"              - id: responder-chat",
+			"                contextWindow: 131072",
+			"                maxTokens: 4096",
+			"",
+		].join("\n");
+		withHome({ ".dsh/cordis.patch.yml": settings }, (home) => {
+			const result = runMigration({ home });
+			const providers = (settingsJson(result).providers ?? {}) as {
+				openaiCompatible?: Array<{ id?: string; api?: string }>;
+			};
+			const entry = (providers.openaiCompatible ?? []).find((p) => p.id === "dsh-responser");
+			expect(entry?.api).toBe("openai-responses");
+			const item = result.plan.items.find((i) => i.from.includes("llm-pi-ai.providers.responser"));
+			expect(item?.action).toBe("map");
+		});
+	});
+
 	// 8.
 	test("a permission preset is a different axis from a permission mode", () => {
 		// A preset is a bundle — a sandbox plus an approval policy — and a bundle

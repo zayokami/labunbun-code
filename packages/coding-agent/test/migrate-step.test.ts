@@ -635,20 +635,81 @@ describe("models.json → providers", () => {
 		expect(models[0].pricing).toBeUndefined();
 	});
 
-	test("a provider whose models speak another protocol is skipped by name", () => {
+	test("an Anthropic Messages provider travels on its own wire", () => {
 		const { home } = stepHome({
 			"models.json": modelsJson({
 				claude: {
 					apiKey: "$C_KEY",
-					models: [{ id: "m1", api: "anthropic-messages", baseUrl: "https://gw.example.invalid/v1" }],
+					models: [{ id: "m1", api: "anthropic-messages", baseUrl: "https://gw.example.invalid" }],
+				},
+			}),
+		});
+		// Step hands the Anthropic SDK its base URL verbatim, as this build does,
+		// so the address needs no translation.
+		const [provider] = providersWritten(plan(home));
+		expect(provider.id).toBe("step-claude");
+		expect(provider.api).toBe("anthropic-messages");
+		expect(provider.baseUrl).toBe("https://gw.example.invalid");
+		expect(provider.apiKeyEnv).toBe("C_KEY");
+	});
+
+	test("a provider whose models speak a wire this build has no adapter for is skipped by name", () => {
+		const { home } = stepHome({
+			"models.json": modelsJson({
+				odd: {
+					apiKey: "$O_KEY",
+					models: [{ id: "m1", api: "google-generative-ai", baseUrl: "https://gw.example.invalid" }],
 				},
 			}),
 		});
 		const planned = plan(home);
 		expect(providersWritten(planned)).toHaveLength(0);
 		const [detail] = detailsMatching(planned, /no model this build can serve/);
-		expect(detail).toContain("m1 (anthropic-messages)");
-		expect(detail).toContain("one chat-completions endpoint");
+		expect(detail).toContain("m1 (google-generative-ai)");
+		expect(detail).toContain("chat completions, responses and Anthropic messages");
+	});
+
+	test("a provider whose models span wires lands as one entry per wire", () => {
+		const { home } = stepHome({
+			"models.json": modelsJson({
+				mixed: {
+					apiKey: "$M_KEY",
+					models: [
+						model("chat-model"),
+						{ id: "anthropic-model", api: "anthropic-messages", baseUrl: "https://gw.example.invalid" },
+					],
+				},
+			}),
+		});
+		const planned = plan(home);
+		// One entry here names one wire, where the source names it per model, so
+		// the split is the only shape both wires fit in — and the id says which.
+		const providers = providersWritten(planned);
+		expect(providers.map((provider) => provider.id)).toEqual([
+			"step-mixed-openai-completions",
+			"step-mixed-anthropic-messages",
+		]);
+		expect(providers[0].api).toBeUndefined();
+		expect(providers[1].api).toBe("anthropic-messages");
+		expect((providers[0].models as Array<{ id: string }>).map((entry) => entry.id)).toEqual(["chat-model"]);
+		expect((providers[1].models as Array<{ id: string }>).map((entry) => entry.id)).toEqual(["anthropic-model"]);
+		expect(detailsMatching(planned, /its models speak 2 wires/)).toHaveLength(2);
+	});
+
+	test("a default model in the second wire's group is rewritten to that group's id", () => {
+		const { home } = stepHome({
+			"config.toml": 'defaultProvider = "mixed"\ndefaultModel = "anthropic-model"\n',
+			"models.json": modelsJson({
+				mixed: {
+					apiKey: "$M_KEY",
+					models: [
+						model("chat-model"),
+						{ id: "anthropic-model", api: "anthropic-messages", baseUrl: "https://gw.example.invalid" },
+					],
+				},
+			}),
+		});
+		expect(settingsWritten(plan(home)).model).toBe("step-mixed-anthropic-messages/anthropic-model");
 	});
 
 	test("a model with no protocol at all is skipped the way Step's own composer refuses it", () => {
@@ -768,18 +829,18 @@ describe("defaultModel and defaultProvider", () => {
 		expect(
 			detailsMatching(
 				planned,
-				/your provider "gw" does not list a model called "m9", so the reference would point at nothing/,
+				/your provider "gw" has no imported model called "m9", so the reference would point at nothing/,
 			),
 		).toHaveLength(1);
 	});
 
 	test("a provider whose own line was a skip is pointed at rather than silently dropped", () => {
 		const { home } = stepHome({
-			"config.toml": 'defaultProvider = "claude"\ndefaultModel = "m1"\n',
+			"config.toml": 'defaultProvider = "odd"\ndefaultModel = "m1"\n',
 			"models.json": modelsJson({
-				claude: {
-					apiKey: "$C_KEY",
-					models: [{ id: "m1", api: "anthropic-messages", baseUrl: "https://x.invalid/v1" }],
+				odd: {
+					apiKey: "$O_KEY",
+					models: [{ id: "m1", api: "google-generative-ai", baseUrl: "https://x.invalid/v1" }],
 				},
 			}),
 		});

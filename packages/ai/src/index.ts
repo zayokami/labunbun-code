@@ -229,6 +229,7 @@ export type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
+	CustomProviderApiId,
 	FallbackNotice,
 	ImageContent,
 	JsonSchemaObject,
@@ -251,6 +252,8 @@ export type {
 } from "./types.ts";
 export {
 	assistantMessage,
+	CUSTOM_PROVIDER_API_IDS,
+	isCustomProviderApiId,
 	THINKING_LEVELS,
 	textContent,
 	toolResultMessage,

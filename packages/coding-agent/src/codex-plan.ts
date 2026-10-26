@@ -323,17 +323,34 @@ export function planCodex(
 			}
 			// A provider entry with no models is still worth writing: it records the
 			// endpoint and credential variable, and models can be added to it later.
-			openaiCompatible.push({ id: name, baseUrl, apiKeyEnv, models });
 			const wireApi = typeof spec.wire_api === "string" ? spec.wire_api : undefined;
-			if (wireApi && wireApi !== "chat" && wireApi !== "completions") {
+			// The two spellings Codex uses, and nothing more: `responses` is the
+			// Responses API, and the chat wire has been written both `chat` and
+			// `completions` over its history. A value this build does not know is
+			// not guessed at — the entry keeps the default and the item says so.
+			const api =
+				wireApi === "responses"
+					? "openai-responses"
+					: wireApi === "chat" || wireApi === "completions"
+						? "openai-completions"
+						: undefined;
+			openaiCompatible.push({
+				id: name,
+				baseUrl,
+				apiKeyEnv,
+				...(api === "openai-responses" ? { api } : {}),
+				models,
+			});
+			if (wireApi !== undefined && api === undefined) {
 				items.push({
 					source: "codex",
 					from: `${configAt} → model_providers.${name} (wire_api="${wireApi}")`,
 					to: `settings.json → providers.openaiCompatible[${name}]`,
 					action: "downgrade",
 					detail:
-						`only the chat-completions and Anthropic messages protocols are supported, so this ` +
-						`provider is registered as chat-completions; ${credentialNote}`,
+						`\`wire_api\` is "${wireApi}", and this build maps "chat"/"completions" to chat completions and ` +
+						`"responses" to the Responses API — this provider is registered as chat-completions, so a server ` +
+						`that only speaks "${wireApi}" will fail at first use; ${credentialNote}`,
 					containsSecret: false,
 				});
 			} else {

@@ -64,6 +64,34 @@ describe("SettingsSchema", () => {
 		expect(parsed.sandbox).toBe("danger-full-access");
 	});
 
+	test("a provider names one of the three wires, and an absent api means chat completions", () => {
+		const provider = (api?: string) => ({
+			providers: {
+				openaiCompatible: [
+					{
+						id: "x",
+						baseUrl: "https://x.example",
+						apiKeyEnv: "K",
+						...(api ? { api } : {}),
+						models: [],
+					},
+				],
+			},
+		});
+		expect(SettingsSchema.parse(provider()).providers?.openaiCompatible[0].api).toBeUndefined();
+		expect(SettingsSchema.parse(provider("openai-responses")).providers?.openaiCompatible[0].api).toBe(
+			"openai-responses",
+		);
+		expect(SettingsSchema.parse(provider("anthropic-messages")).providers?.openaiCompatible[0].api).toBe(
+			"anthropic-messages",
+		);
+		// The subscription wires are not a settings choice: each needs a token this
+		// app mints by logging in, so accepting the name would promise a connection
+		// nothing could make. Any other spelling is a typo, caught at load time.
+		expect(SettingsSchema.safeParse(provider("chatgpt-responses")).success).toBe(false);
+		expect(SettingsSchema.safeParse(provider("chat-completions")).success).toBe(false);
+	});
+
 	test("rejects invalid permission mode and bad urls", () => {
 		expect(SettingsSchema.safeParse({ permissionMode: "yolo" }).success).toBe(false);
 		expect(

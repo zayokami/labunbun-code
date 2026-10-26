@@ -18,7 +18,12 @@ import {
 	SANDBOX_MODES,
 	type SandboxMode,
 } from "@labunbun/agent";
-import { registerOpenAICompatibleProvider, setPricingOverride, THINKING_LEVELS } from "@labunbun/ai";
+import {
+	CUSTOM_PROVIDER_API_IDS,
+	registerOpenAICompatibleProvider,
+	setPricingOverride,
+	THINKING_LEVELS,
+} from "@labunbun/ai";
 import { isMissingPathError } from "@labunbun/tools";
 import { z } from "zod";
 import { stripBom } from "./json-text.ts";
@@ -85,6 +90,12 @@ export const OpenAICompatibleProviderSchema = z.object({
 	id: z.string(),
 	baseUrl: z.string().url(),
 	apiKeyEnv: z.string(),
+	/**
+	 * The wire this endpoint speaks. Unset means chat completions, which is
+	 * what every provider written before this field existed understands; the
+	 * set itself lives beside `ApiId` so it cannot drift from the dispatch.
+	 */
+	api: z.enum(CUSTOM_PROVIDER_API_IDS).optional(),
 	models: z.array(
 		z.object({
 			id: z.string(),

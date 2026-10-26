@@ -300,14 +300,14 @@ How do you want to use labunbun?
   1. Sign in with a Claude subscription      a browser opens; no API key needed
   2. Sign in with a ChatGPT subscription     the ChatGPT models, on your plan
   3. Use an API key                          paste it now, or export it yourself
-  4. Use an OpenAI-compatible endpoint       DeepSeek, Kimi, GLM, a local daemon
+  4. Use another endpoint or gateway         DeepSeek, Kimi, GLM, OpenRouter, a local daemon
 [1]:
 ```
 
 - The list is ordered the way Codex orders its picker (`auth.rs:494-520`) and the default is the row that is true for this machine: `1` when a Claude config is detected, `3` when a known key variable is already set, otherwise `1` (`wizardProviderDefault`, `wizard.ts:180-186`). Codex's default rule is the same shape (`onboarding_screen.rs:169-175`).
 - `1` calls `runClaudeLoginCli`'s flow (`claude-login.ts:161-210`) with the terminal's `askCode` (`claude-login.ts:261-278`) — it is console-native already. `2` calls `chatGptLoginFlow` (`chatgpt-login.ts:124-166`), whose fallback is the device code, so a machine with no reachable loopback still finishes. Built as the dispatch at `wizard.ts:475-482`; a failure returns non-zero and the wizard continues with a retry line.
 - `3` with a variable already set skips the paste and says so, in Codex's wording (`auth.rs:710-718`); otherwise it uses the existing masked reader (`wizard.ts:250-295`). Built at `wizard.ts:484-493`; the detected names are the row's own env names, resolved through the registry (`detectedAnthropicEnv`, `wizard.ts:312-315`).
-- `4` is today's `openai-compatible` branch, unchanged (`wizard.ts:494-508`).
+- `4` asks for the wire first — Chat Completions, Responses, or Anthropic Messages — because the address a person copies differs by wire: the OpenAI adapters take the `/v1` root, the Anthropic client appends `/v1/messages` to a host root. An answer other than the default is written as `api` on the provider entry.
 
 ### Screen C — import offer (question 2, only when Screen A found something) — implemented (batch 2), run after the write
 

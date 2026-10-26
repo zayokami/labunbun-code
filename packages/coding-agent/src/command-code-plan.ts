@@ -20,6 +20,7 @@
 
 import { basename } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
+import type { CustomProviderApiId } from "@labunbun/ai";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import {
 	COMMAND_CODE_DEFAULT_CONTEXT_WINDOW,
@@ -48,6 +49,7 @@ import {
 	mergeProviderSpecs,
 	normalizeClaudeHooks,
 	planAssetTrees,
+	providerBaseUrl,
 	summarizeNames,
 	tildePath,
 	urlCredentialProblem,
@@ -1144,12 +1146,6 @@ function planCommandCodeProviders(
 					"the environment under it before the provider works",
 			);
 		}
-		if (provider.api === "openai-responses" || provider.api === "anthropic-messages") {
-			notes.push(
-				`its wire protocol is \`${provider.api}\`, and this build's openaiCompatible providers speak chat completions — the entry was registered as one, so a server that only ` +
-					"speaks the other protocol will fail at first use",
-			);
-		}
 		if (provider.apiSource === "npm") {
 			notes.push(
 				`the wire protocol was decided by its \`npm\` package (${provider.npm ?? "an unnamed one"}), which this build does not install — only the protocol it stood for was read`,
@@ -1169,25 +1165,39 @@ function planCommandCodeProviders(
 		}
 		if (modelNotes > 0) {
 			notes.push(
-				`${modelNotes} model field(s) had no destination (a reasoning-effort list, per-model options, a per-model endpoint or a partial price) — the models were registered ` +
+				`${modelNotes} model field(s) had no destination (a reasoning-effort list, per-model options, a per-model endpoint or wire override, or a partial price) — the models were registered ` +
 					"without them",
 			);
 		}
+		// The source names exactly the three wires this build speaks, so the
+		// answer travels. The default is left off, because a spec without `api`
+		// already means it.
+		const api = provider.api as CustomProviderApiId;
+		const baseUrl = providerBaseUrl(api, provider.baseURL);
+		// The address is the one thing that is rewritten rather than copied, and
+		// it is not a loss: the source's own client puts `/v1` in front of the
+		// path, and this build's client does that itself.
+		const foldedVersion =
+			api === "anthropic-messages" && /\/v1\/?$/.test(provider.baseURL.trim())
+				? "its base URL lost the trailing /v1 that the Messages client here adds itself"
+				: undefined;
 		openaiCompatible.push({
 			id: provider.id,
-			baseUrl: provider.baseURL,
+			baseUrl,
 			apiKeyEnv,
+			...(api !== "openai-completions" ? { api } : {}),
 			models: provider.models.map((model) => commandCodeModelSpec(model)),
 		});
+		const carried =
+			notes.length > 0
+				? `${provider.models.length} model(s) registered — ${notes.join("; ")}`
+				: `${provider.models.length} model(s) registered, the key read as the environment variable name it was`;
 		items.push({
 			source: SOURCE,
 			from: `${providersLabel} → ${provider.id}`,
 			to: `settings.json → providers.openaiCompatible[${provider.id}]`,
 			action: notes.length > 0 ? "downgrade" : "map",
-			detail:
-				notes.length > 0
-					? `${provider.models.length} model(s) registered — ${notes.join("; ")}`
-					: `${provider.models.length} model(s) registered, the key read as the environment variable name it was`,
+			detail: foldedVersion === undefined ? carried : `${carried}; ${foldedVersion}`,
 			containsSecret: false,
 		});
 	}

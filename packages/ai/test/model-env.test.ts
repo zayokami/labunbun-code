@@ -183,4 +183,24 @@ describe("custom providers", () => {
 		setEnv("ACME_AI_BASE_URL", "https://acme-proxy.example/v1");
 		expect(resolveModel("acme-ai/acme-1")?.baseUrl).toBe("https://acme-proxy.example/v1");
 	});
+
+	test("the spec chooses the wire, and an omitted api keeps chat completions", () => {
+		registerOpenAICompatibleProvider({
+			id: "wired",
+			baseUrl: "https://wired.example",
+			apiKeyEnv: "WIRED_API_KEY",
+			api: "anthropic-messages",
+			models: [{ id: "m", contextWindow: 128_000, maxOutputTokens: 8_000 }],
+		});
+		registerOpenAICompatibleProvider({
+			id: "defaulted",
+			baseUrl: "https://defaulted.example",
+			apiKeyEnv: "DEFAULTED_API_KEY",
+			models: [{ id: "m", contextWindow: 128_000, maxOutputTokens: 8_000 }],
+		});
+		expect(resolveModel("wired/m")?.api).toBe("anthropic-messages");
+		// Every provider written before the choice existed has no `api`, and the
+		// chat-completions wire is what those files have always run on.
+		expect(resolveModel("defaulted/m")?.api).toBe("openai-completions");
+	});
 });

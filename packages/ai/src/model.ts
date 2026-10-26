@@ -3,7 +3,7 @@
  * user-defined OpenAI-compatible providers from settings. No generated
  * mega-catalog; users extend via `registerOpenAICompatibleProvider`.
  */
-import type { ApiId, Model, ModelPricing, ThinkingLevel } from "./types.ts";
+import type { ApiId, CustomProviderApiId, Model, ModelPricing, ThinkingLevel } from "./types.ts";
 
 const ANTHROPIC_BASE = "https://api.anthropic.com";
 /** Kimi's international host; the China host serves the same ids under its own keys. */
@@ -1505,12 +1505,19 @@ function withPricingOverride(model: Model): Model {
 	return override ? { ...model, pricing: override } : model;
 }
 
+/**
+ * A provider from the settings file. The name is historical: the entry started
+ * as an OpenAI-compatible endpoint and now names one of three wires, so a
+ * spec without `api` still means the chat-completions one.
+ */
 export interface OpenAICompatibleProviderSpec {
 	/** Provider key used in "provider/model" references. */
 	id: string;
 	baseUrl: string;
 	/** Environment variable holding the API key. */
 	apiKeyEnv: string;
+	/** The wire this endpoint speaks; omitted means `openai-completions`. */
+	api?: CustomProviderApiId;
 	models: Array<{
 		id: string;
 		name?: string;
@@ -1522,13 +1529,14 @@ export interface OpenAICompatibleProviderSpec {
 	}>;
 }
 
-/** Register user-defined OpenAI-compatible providers (from settings). */
+/** Register user-defined providers (from settings). */
 export function registerOpenAICompatibleProvider(spec: OpenAICompatibleProviderSpec): void {
+	const api = spec.api ?? ("openai-completions" satisfies ApiId);
 	for (const m of spec.models) {
 		customModels.set(`${spec.id}/${m.id}`, {
 			id: m.id,
 			name: m.name ?? m.id,
-			api: "openai-completions" satisfies ApiId,
+			api,
 			provider: spec.id,
 			baseUrl: spec.baseUrl,
 			apiKeyEnv: spec.apiKeyEnv,
