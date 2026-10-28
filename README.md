@@ -984,13 +984,13 @@ MIT © 2026 zayoka. Read [LICENSE](./LICENSE).
 
 LaBunbun is free software licensed under the MIT License.
 
-If you enjoy this software, please consider supporting organizations that help children living in war zones, people affected by disasters, and persons with disabilities. Children are the future and hope of our world, and every child deserves the chance to grow up healthy, safe, and strong. Every person, regardless of ability or circumstance, deserves dignity, equal opportunities, and the freedom to pursue their dreams.
+If you enjoy this software, please consider supporting organizations that help children living in war zones, people affected by disasters, persons with disabilities, and individuals coping with mental health challenges and psychological trauma. Children are the future and hope of our world, and every child deserves the chance to grow up healthy, safe, and strong. Every person, regardless of ability, mental well-being, or circumstance, deserves dignity, psychological safety, equal opportunities, and the freedom to pursue their dreams.
 
 To all the children of the world:
 
 The world needs you to help create a better tomorrow. Whatever your dream may be, if you believe in it and work toward it, you can make a difference. Believe in yourself.
 
-We encourage you to donate through the official donation pages of [UNICEF](https://www.unicef.org/), your national Red Cross or Red Crescent society, [Doctors Without Borders](https://www.doctorswithoutborders.org/), the [Heal Los Angeles Foundation](https://www.heallosangeles.org/), [Leonard Cheshire](https://www.leonardcheshire.org/get-involved/support-our-work/thank-you-visiting-us), or the [Disability Rights Fund](https://www.disabilityrightsfund.org/donate/). You can also learn more about disability-inclusive development through [CBM Global](https://cbm-global.org/).
+We encourage you to donate through the official donation pages of [UNICEF](https://www.unicef.org/), your national Red Cross or Red Crescent society, [Doctors Without Borders](https://www.doctorswithoutborders.org/), global mental health initiatives such as [StrongMinds](https://strongminds.org/), [United for Global Mental Health](https://unitedgmh.org/), and the [World Federation for Mental Health](https://wfmh.global/), the [Heal Los Angeles Foundation](https://www.heallosangeles.org/), [Leonard Cheshire](https://www.leonardcheshire.org/get-involved/support-our-work/thank-you-visiting-us), or the [Disability Rights Fund](https://www.disabilityrightsfund.org/donate/). You can also learn more about disability-inclusive development through [CBM Global](https://cbm-global.org/).
 
 LaBunbun thanks everyone working to create a better future. You are all true heroes.
 
