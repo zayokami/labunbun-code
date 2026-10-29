@@ -687,6 +687,14 @@ describe("the registry", () => {
 		expect(resolveModel("openai/gpt-6.1-sol")?.reasoningEfforts).toEqual(["low", "medium", "high"]);
 	});
 
+	test("gpt-6.1-terra is a Responses row with Sol's efforts and its own base-band price", () => {
+		const terra = resolveModel("openai/gpt-6.1-terra");
+		expect(terra?.api).toBe("openai-responses");
+		expect(terra?.reasoningEfforts).toEqual(["low", "medium", "high"]);
+		expect(terra?.pricing).toEqual({ input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 });
+		expect(resolveModel("gpt-6.1-terra")?.provider).toBe("openai");
+	});
+
 	test("the reseller row stays on Chat Completions and is marked", () => {
 		// Zen's listing proves the id is served; it does not prove Zen answers
 		// /v1/responses. Registering it there would be a row that 404s, so it stays

@@ -994,6 +994,17 @@ const BUILT_IN_MODELS: Model[] = [
 		reasoningEfforts: ["low", "medium", "high"],
 		pricing: openAIPricing(2, 10, 0.1),
 	}),
+	// Base band; above a 272k-token prompt the vendor charges 2/7.5/0.1. Tools go through Responses, as on
+	// `gpt-6.1-sol`. Published with `none` through `max` but not `minimal`; the row names the three levels the
+	// Responses `reasoningEfforts` field can express. The vendor publishes no cache-write price, so it follows
+	// `openAIPricing`'s 1.25x rule like every other first-party row.
+	openAIResponsesModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6.1-terra", "GPT-6.1 Terra", {
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		reasoning: true,
+		reasoningEfforts: ["low", "medium", "high"],
+		pricing: openAIPricing(1, 5, 0.05),
+	}),
 	openAICompatModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6-astra", "GPT-6 Astra", {
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
@@ -1424,6 +1435,14 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 128_000,
 		reasoning: false,
 		pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+	}),
+	// Base band; above a 272k-token prompt the host charges 2/7.5/0.1/2.5. As with
+	// `openai/gpt-6.1-sol`, the host's listing accepts `tools` on this wire.
+	openAICompatModel("openrouter", OPENROUTER_BASE, "OPENROUTER_API_KEY", "openai/gpt-6.1-terra", "GPT-6.1 Terra", {
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		reasoning: false,
+		pricing: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
 	}),
 	// The base band; above a 200k-token prompt the host charges 4/12/1. These
 	// numbers are the Go plan's, not the Zen plan's — same model, two plans, two

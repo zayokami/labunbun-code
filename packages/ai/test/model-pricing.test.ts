@@ -116,6 +116,7 @@ const BUILT_IN_REFS = [
 	"glm/glm-4.7-flashx",
 	"glm/glm-4.6",
 	"openai/gpt-6.1-sol",
+	"openai/gpt-6.1-terra",
 	"openai/gpt-6-astra",
 	"openai/gpt-6-sol",
 	"openai/gpt-6-luna",
@@ -442,6 +443,7 @@ const BUILT_IN_REFS = [
 	"openrouter/moonshotai/kimi-k3",
 	"openrouter/moonshotai/kimi-k3.1-pro",
 	"openrouter/openai/gpt-6.1-sol",
+	"openrouter/openai/gpt-6.1-terra",
 	"openrouter/x-ai/grok-4.7",
 ];
 
@@ -802,6 +804,7 @@ describe("the built-in catalog", () => {
 			// The current regime's rates: Flash doubles on 2027-01-01, and the Pro
 			// row's figures are its ≤200k tier.
 			["openai/gpt-6.1-sol", 2, 10, 0.1, 2.5],
+			["openai/gpt-6.1-terra", 1, 5, 0.05, 1.25],
 			["openai/gpt-6-astra", 10, 50, 1, 12.5],
 			// Sol is half of 5.6 Sol on all three channels. Luna is not: its output
 			// comes down harder than its input ($1.20 → $0.50 against $0.20 → $0.10),
@@ -1141,6 +1144,7 @@ describe("the built-in catalog", () => {
 			["openrouter/moonshotai/kimi-k3", 0.73, 10, 0.55, 0],
 			["openrouter/moonshotai/kimi-k3.1-pro", 2, 10, 0.2, 0],
 			["openrouter/openai/gpt-6.1-sol", 2, 10, 0.1, 2.5],
+			["openrouter/openai/gpt-6.1-terra", 1, 5, 0.05, 1.25],
 			["openrouter/x-ai/grok-4.7", 2, 6, 0.5, 0],
 		]);
 	});
@@ -1185,6 +1189,7 @@ describe("the built-in catalog", () => {
 			["glm/glm-4.7-flashx", 200_000, 131_072],
 			["glm/glm-4.6", 200_000, 131_072],
 			["openai/gpt-6.1-sol", 1_050_000, 128_000],
+			["openai/gpt-6.1-terra", 1_050_000, 128_000],
 			["openai/gpt-6-astra", 1_050_000, 128_000],
 			["openai/gpt-6-sol", 1_050_000, 128_000],
 			["openai/gpt-6-luna", 1_050_000, 128_000],
@@ -1517,6 +1522,7 @@ describe("the built-in catalog", () => {
 			["openrouter/moonshotai/kimi-k3", 1_048_576, 943_718],
 			["openrouter/moonshotai/kimi-k3.1-pro", 1_048_576, 943_718],
 			["openrouter/openai/gpt-6.1-sol", 1_050_000, 128_000],
+			["openrouter/openai/gpt-6.1-terra", 1_050_000, 128_000],
 			["openrouter/x-ai/grok-4.7", 500_000, 450_000],
 		]);
 	});
@@ -1602,7 +1608,7 @@ describe("the built-in catalog", () => {
 			"ollama-cloud/gemma4:31b",
 			"ollama-cloud/glm-5.3",
 			"ollama-cloud/mistral-large-3:675b",
-			// OpenRouter's seven, and the reason is one layer up from the plans': the
+			// OpenRouter's eight, and the reason is one layer up from the plans': the
 			// host's listing names `reasoning_effort` among every one of these ids'
 			// accepted parameters, but nothing states what an effort maps to behind
 			// the route, so no row claims "medium" and the default sends nothing.
@@ -1612,6 +1618,7 @@ describe("the built-in catalog", () => {
 			"openrouter/moonshotai/kimi-k3",
 			"openrouter/moonshotai/kimi-k3.1-pro",
 			"openrouter/openai/gpt-6.1-sol",
+			"openrouter/openai/gpt-6.1-terra",
 			"openrouter/x-ai/grok-4.7",
 		]);
 		// The other half of the partition, exhaustive over the same rows. Every
