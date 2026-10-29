@@ -12,6 +12,8 @@ import { describe, expect, test } from "bun:test";
 import {
 	buildXboxOutput,
 	createXInputSource,
+	parseXboxInput,
+	XBOX_BATTERY_FULL,
 	XBOX_REPORT_LENGTH,
 	XINPUT_MISSING,
 	XINPUT_NOT_WINDOWS,
@@ -38,6 +40,7 @@ function fakeXInput(slots: number[], capabilities?: FakeCapabilities) {
 	let state = new Uint8Array(XINPUT_STATE_LENGTH);
 	let batteryType = 1;
 	let batteryLevel = 3;
+	let batteryResult = 0;
 	const writes: Uint8Array[] = [];
 	const capabilityCalls: { slot: number; length: number }[] = [];
 
@@ -49,6 +52,8 @@ function fakeXInput(slots: number[], capabilities?: FakeCapabilities) {
 		},
 		getBattery(slot, out) {
 			if (!connected.has(slot)) return 1167;
+			// A non-zero answer leaves the buffer as it was, the way the real call does.
+			if (batteryResult !== 0) return batteryResult;
 			out[0] = batteryType;
 			out[1] = batteryLevel;
 			return 0;
@@ -86,6 +91,10 @@ function fakeXInput(slots: number[], capabilities?: FakeCapabilities) {
 		setBattery(type: number, level: number) {
 			batteryType = type;
 			batteryLevel = level;
+		},
+		/** What `XInputGetBatteryInformation` answers: 0 reads, anything else is a failed read. */
+		setBatteryResult(result: number) {
+			batteryResult = result;
 		},
 	};
 }
@@ -313,6 +322,31 @@ describe("open", () => {
 		expect([reports.at(-1)?.[16], reports.at(-1)?.[17]]).toEqual([1, 3]);
 		clock.fire();
 		expect([reports.at(-1)?.[16], reports.at(-1)?.[17]]).toEqual([2, 1]);
+	});
+
+	test("a battery read that has not succeeded yet does not report a dying pad", async () => {
+		// Zero and zero decodes as "empty, on no cable" — low. A first read that fails
+		// used to put exactly that in every report until the next read, a second
+		// later, and the pad would be flagged as nearly dead for no reason.
+		const fake = fakeXInput([0]);
+		fake.setBatteryResult(1167);
+		const { source: s, clock } = await source(fake);
+		const handle = s.open(s.list()[0]);
+		const reports: Uint8Array[] = [];
+		handle.onReport((bytes) => reports.push(bytes));
+
+		clock.fire();
+		const before = parseXboxInput(reports[0])?.state.battery;
+		expect(before?.low).toBe(false);
+		expect(before?.level).toBe(XBOX_BATTERY_FULL);
+
+		// The read that follows replaces the placeholder with what the pad said.
+		fake.setBatteryResult(0);
+		fake.setBattery(2, 1);
+		const batteryPolls = Math.max(1, Math.round(1000 / XINPUT_POLL_MS));
+		for (let at = 0; at < batteryPolls; at += 1) clock.fire();
+		expect([reports.at(-1)?.[16], reports.at(-1)?.[17]]).toEqual([2, 1]);
+		expect(parseXboxInput(reports.at(-1) as Uint8Array)?.state.battery.low).toBe(true);
 	});
 
 	test("a write is four bytes of vibration, refused when it is another family's packet", async () => {

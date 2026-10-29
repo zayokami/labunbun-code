@@ -184,6 +184,11 @@ export function matchesDevice(device: PadSourceDevice, wanted: string): boolean 
 	return name.includes(needle) || (device.path ?? "").toLowerCase().includes(needle);
 }
 
+/** Whether the `device` setting names anything: unset, empty and blank all say "no". */
+export function hasDeviceFilter(wanted: string | undefined): wanted is string {
+	return wanted !== undefined && wanted.trim() !== "";
+}
+
 /**
  * Every link the controller has, best first.
  *
@@ -235,14 +240,17 @@ export function matchesDevice(device: PadSourceDevice, wanted: string): boolean 
  * there to remove.
  */
 export function pickLinks(devices: readonly PadSourceDevice[], wanted?: string): PadSourceDevice[] {
+	// A blank setting is "unset", as `matchesDevice` has it: it must not pin the
+	// first pad and quietly turn automatic switching off.
+	const pin = hasDeviceFilter(wanted) ? wanted : undefined;
 	const pads = devices
 		.filter(isPadDevice)
 		.filter((device) => device.path !== undefined)
-		.filter((device) => wanted === undefined || matchesDevice(device, wanted));
+		.filter((device) => pin === undefined || matchesDevice(device, pin));
 	const reported = pads.filter((device) => device.carriesReports === true);
 	const candidates = reported.length > 0 ? reported : pads.slice(0, 1);
 	const byLink = new Map<string, PadSourceDevice>();
-	for (const device of wanted === undefined ? candidates : firstPad(candidates)) {
+	for (const device of pin === undefined ? candidates : firstPad(candidates)) {
 		const link = linkIdentity(device);
 		if (!byLink.has(link)) byLink.set(link, device);
 	}

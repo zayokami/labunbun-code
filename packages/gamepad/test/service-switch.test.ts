@@ -88,6 +88,12 @@ function leftStick(value: number) {
 	return { 8: raw & 0xff, 9: (raw >> 8) & 0xff };
 }
 
+/** An XInput report that pushes the right stick to `value` on its y axis (up is positive). */
+function rightStickY(value: number) {
+	const raw = Math.round(value * 32767);
+	return { 14: raw & 0xff, 15: (raw >> 8) & 0xff };
+}
+
 describe("two pads attached", () => {
 	test("the DualShock 4 leads, and both controllers are listed", async () => {
 		const { service } = await harness();
@@ -280,6 +286,88 @@ describe("two pads attached", () => {
 		expect(service.status().transport).toBe("xinput");
 	});
 
+	test("a stick that chose the pad runs no binding as it eases back through the deadzone", async () => {
+		// The push that moves the app is at 0.6 or more, but the mapper reads a
+		// direction from 0.25. A stick springing home passes through the band between
+		// them, and a pad that counted as neutral there answered with a navigation
+		// step for a push that was only meant to pick it up.
+		const { service, source, actions } = await harness();
+		const xbox = opened(source, "xbox");
+		source.push(xboxBytes(), xbox); // arm
+		source.push(xboxBytes(leftStick(0.9)), xbox);
+		source.push(xboxBytes(leftStick(0.9)), xbox);
+		expect(service.status().transport).toBe("xinput");
+
+		for (const value of [0.55, 0.4, 0.3]) source.push(xboxBytes(leftStick(value)), xbox);
+		expect(actions).toEqual([]);
+
+		// Inside the deadzone is centered as far as the mapper is concerned: that
+		// report ends the suppression and is mapped, and it produces nothing.
+		source.push(xboxBytes(leftStick(0.1)), xbox);
+		expect(actions).toEqual([]);
+
+		// From here the stick is the user's again.
+		source.push(xboxBytes(leftStick(0.9)), xbox);
+		expect(actions).toEqual([{ kind: "right", button: "stick", phase: "press", heldMs: 0 }]);
+	});
+
+	test("the same holds for the right stick, which scrolls from the deadzone", async () => {
+		const { service, source, actions } = await harness();
+		const xbox = opened(source, "xbox");
+		source.push(xboxBytes(), xbox);
+		source.push(xboxBytes(rightStickY(0.9)), xbox);
+		source.push(xboxBytes(rightStickY(0.9)), xbox);
+		expect(service.status().transport).toBe("xinput");
+
+		for (const value of [0.5, 0.35]) source.push(xboxBytes(rightStickY(value)), xbox);
+		expect(actions).toEqual([]);
+		source.push(xboxBytes(rightStickY(0.1)), xbox);
+		expect(actions).toEqual([]);
+	});
+
+	test("the user's deadzone is where a stick stops being neutral", async () => {
+		// A wider deadzone means the mapper ignores more of the travel, so a stick
+		// at 0.4 is already home; a narrower one reads it as a push.
+		const { service, source, actions } = await harness(undefined, { deadzone: 0.5 });
+		const xbox = opened(source, "xbox");
+		source.push(xboxBytes(), xbox);
+		source.push(xboxBytes(leftStick(0.9)), xbox);
+		source.push(xboxBytes(leftStick(0.9)), xbox);
+		expect(service.status().transport).toBe("xinput");
+
+		source.push(xboxBytes(leftStick(0.55)), xbox); // still past the user's deadzone
+		expect(service.stats().reports).toBe(0);
+		source.push(xboxBytes(leftStick(0.4)), xbox); // inside it: neutral, and mapped
+		expect(service.stats().reports).toBe(1);
+		expect(actions).toEqual([]);
+	});
+
+	test("the active pad going silent hands the app to the other pad instead of closing it", async () => {
+		// A Bluetooth pad that goes out of range raises no error; it just stops. The
+		// watchdog used to answer by dropping every link, healthy Xbox pad included,
+		// and searching from scratch.
+		const { service, source, clock } = await harness();
+		const ds4 = opened(source, "ds4");
+		const xbox = opened(source, "xbox");
+		source.push(usbBytes(), ds4);
+
+		for (let at = 0; at < 2_500; at += 16) {
+			source.push(xboxBytes(), xbox);
+			clock.advance(16);
+		}
+
+		const status = service.status();
+		expect(status.phase).toBe("connected");
+		expect(status.detail).toBeUndefined();
+		expect(status.transport).toBe("xinput");
+		expect(status.controllers?.find((controller) => controller.active)?.family).toBe("xbox");
+		expect(source.closedFor(xbox)).toBe(false);
+		expect(source.closedFor(ds4)).toBe(true);
+		// The pad in hand is the one being read: its next report is mapped.
+		source.push(xboxBytes(XBOX_A), xbox);
+		expect(service.lastSample()?.family).toBe("xbox");
+	});
+
 	test("the active pad's cable comes out, and the other pad takes over at once", async () => {
 		const { service, source } = await harness();
 		const wired = opened(source, "ds4");
@@ -385,6 +473,34 @@ describe("choosing a pad by hand", () => {
 		const { service } = await harness(undefined, { device: "controller" });
 		expect(service.status().controllers?.map((controller) => controller.family)).toEqual(["ds4"]);
 		expect(service.switchPad()).toBe(false);
+	});
+
+	test("a blank device filter pins nothing, so the pads still switch", async () => {
+		// The settings schema takes `""`, and a blank value means "unset".
+		for (const device of ["", "   "]) {
+			const { service } = await harness(undefined, { device });
+			expect(service.status().controllers?.map((controller) => controller.family)).toEqual(["ds4", "xbox"]);
+			expect(service.switchPad()).toBe(true);
+			expect(service.status().transport).toBe("xinput");
+		}
+	});
+
+	test("a name copied from the list picks that pad, not the first of its family", async () => {
+		// The name of slot 2 contains "xbox". Reading the family word first picked
+		// slot 1 every time, and answered `true` as if that were the pad asked for.
+		const { service } = await harness([xboxDevice(0), xboxDevice(1)]);
+		expect(service.switchPad("Xbox controller (XInput slot 2)")).toBe(true);
+		expect(service.status().device?.path).toBe(xinputSlotPath(1));
+		expect(service.switchPad("xbox controller (xinput slot 1)")).toBe(true);
+		expect(service.status().device?.path).toBe(xinputSlotPath(0));
+	});
+
+	test("a phrase that only contains a family word still reaches the family", async () => {
+		const { service } = await harness();
+		expect(service.switchPad("xbox")).toBe(true);
+		expect(service.status().transport).toBe("xinput");
+		expect(service.switchPad("dualshock 4")).toBe(true);
+		expect(service.status().transport).toBe("usb");
 	});
 
 	test("two XInput slots are two pads, switchable by slot path or name", async () => {

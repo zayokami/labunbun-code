@@ -167,6 +167,10 @@ describe("noDeviceDetail", () => {
 		expect(noDeviceDetail([], "nintendo")).toBe("no controller attached");
 	});
 
+	test("a blank device setting names nothing, so it cannot have matched nothing", () => {
+		expect(noDeviceDetail([device({ path: undefined })], "  ")).toContain("another program is holding it");
+	});
+
 	test("an attached, openable pad is not something to have an excuse for", () => {
 		// The service only asks when it found nothing; this is the wording for a
 		// list that has no usable device in it.
@@ -238,6 +242,19 @@ describe("pickLinks", () => {
 		// A family word matches every Xbox slot, and pins the first one listed.
 		const xbox = pickLinks([xboxDevice(1), xboxDevice(0)], "xbox");
 		expect(xbox.map((pad) => pad.path)).toEqual([xinputSlotPath(1)]);
+	});
+
+	test("a blank device setting is unset: it pins nothing", () => {
+		// `matchesDevice` says an empty or blank setting matches everything, and the
+		// settings schema accepts `""`. Treating it as a filter anyway kept only the
+		// first pad's links, which turned automatic switching off for a user who had
+		// written nothing.
+		const [wireless, wired] = attachedTwice();
+		const pads = [wireless, wired, xboxDevice(0)];
+		const unset = pickLinks(pads).map((pad) => pad.path);
+		expect(unset).toEqual([WIRED_PATH, WIRELESS_PATH, xinputSlotPath(0)]);
+		expect(pickLinks(pads, "").map((pad) => pad.path)).toEqual(unset);
+		expect(pickLinks(pads, "   ").map((pad) => pad.path)).toEqual(unset);
 	});
 
 	test("`pickDevice` is the link it leads with", () => {

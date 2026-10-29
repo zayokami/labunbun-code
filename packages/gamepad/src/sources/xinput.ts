@@ -24,7 +24,7 @@
 
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import type { PadSource, PadSourceDevice, PadSourceHandle } from "../source.ts";
-import { XBOX_REPORT_LENGTH, XINPUT_VIBRATION_LENGTH } from "../xbox.ts";
+import { XBOX_BATTERY_FULL, XBOX_REPORT_LENGTH, XINPUT_VIBRATION_LENGTH } from "../xbox.ts";
 
 /** The bytes `XInputGetState` writes: `XINPUT_STATE`, a DWORD and five fields. */
 export const XINPUT_STATE_LENGTH = 16;
@@ -237,8 +237,13 @@ export function createXInputSource(options: XInputSourceOptions): PadSource {
 			const state = new Uint8Array(XINPUT_STATE_LENGTH);
 			const battery = new Uint8Array(XINPUT_BATTERY_LENGTH);
 			const packet = new Uint8Array(XBOX_REPORT_LENGTH);
+			// What the packet says until a read has succeeded. Zero and zero is a real
+			// reading, "empty, on no cable", and a first `getBattery` that fails would
+			// otherwise put it in every report for the next second and flag a healthy
+			// pad as nearly dead. Full on no cable is the one answer that raises no alarm
+			// and claims no cable; the next successful read replaces it.
 			let batteryType = 0;
-			let batteryLevel = 0;
+			let batteryLevel = XBOX_BATTERY_FULL;
 			let polls = 0;
 			let closed = false;
 			let timer: XInputTimer | undefined;

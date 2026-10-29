@@ -47,11 +47,12 @@ import {
 	type PadUiPhase,
 	padSignalEqual,
 } from "./feedback.ts";
-import { createMapper, type PadAction, type PadRepeat } from "./mapping.ts";
+import { createMapper, PAD_DEADZONE, type PadAction, type PadRepeat } from "./mapping.ts";
 import {
 	deviceFamily,
 	devicePadKey,
 	deviceTransport,
+	hasDeviceFilter,
 	matchesDevice,
 	type PadFamily,
 	type PadSource,
@@ -347,6 +348,24 @@ function hasFinger(state: PadState): boolean {
 }
 
 /**
+ * Whether a stick is pushed far enough for the mapper to read a direction from it.
+ *
+ * `padIsActive` asks for 0.6 before a stick can *choose* a pad; the mapper acts
+ * from the deadzone, a quarter of the travel by default. A stick that chose the
+ * pad passes back through the band between the two on its way home, and a pad
+ * that counted as neutral there would answer with a navigation step for the push
+ * that was only meant to pick it up. Both sticks count, on either axis, because
+ * "near the center" is what the README promises for each. A deadzone of zero
+ * leaves nothing to push past, so only a stick that is off zero counts.
+ */
+function stickPushed(state: PadState, deadzone: number): boolean {
+	return [state.leftStick, state.rightStick].some((stick) => {
+		const travel = Math.hypot(stick.x, stick.y);
+		return travel > 0 && travel >= deadzone;
+	});
+}
+
+/**
  * One open collection of the pad: a link, and the shape its bytes take on it.
  *
  * A controller can have more than one at a time — see `pickLinks` — and each
@@ -428,7 +447,7 @@ function buildLinkOutput(link: PadLink, state: PadOutputState): Uint8Array {
  * would send someone to check a cable that is already plugged in.
  */
 export function noDeviceDetail(devices: readonly PadSourceDevice[], wanted?: string): string {
-	if (wanted !== undefined && devices.length > 0) return `no controller matching "${wanted}"`;
+	if (hasDeviceFilter(wanted) && devices.length > 0) return `no controller matching "${wanted}"`;
 	if (devices.some((device) => device.path === undefined)) {
 		return "a controller is attached but another program is holding it — close Steam or DS4Windows and try again";
 	}
@@ -452,7 +471,8 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 	// it buzzed) lives in a closure that a theme change must not reset.
 	const palette: PadPalette = { ...config.palette };
 	const feedback = createPadFeedback(palette);
-	const mapper = createMapper({ bindings: config.bindings, deadzone: config.deadzone, repeat: config.repeat });
+	const deadzone = config.deadzone ?? PAD_DEADZONE;
+	const mapper = createMapper({ bindings: config.bindings, deadzone, repeat: config.repeat });
 	// The surface's gestures, read before the mapper sees a report. They come out
 	// as ids the mapper treats exactly like buttons, which is why nothing above
 	// this line had to learn about the touchpad at all.
@@ -793,6 +813,13 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 			if (links.length > 0 && now - (activeReportAt() ?? activeSince) > silenceMs) {
 				// Gone without saying so. Same as a cable: keep what the user had, drop
 				// the pad, look again.
+				if (padKeys().length > 1) {
+					// Another pad is attached and healthy, and losing everything would
+					// close it too. Only the silent pad's links go: the last of them hands
+					// the app to the next pad, as a pulled cable does.
+					for (const link of activeLinks()) dropLink(link, "the controller stopped reporting");
+					return;
+				}
 				lose("the controller stopped reporting");
 				return;
 			}
@@ -1156,8 +1183,11 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		// ignores touch: `touch-tap` is a default binding for confirm, so a finger
 		// already resting when the pad became active would become an accidental
 		// approval the moment it moved or lifted. Suppression ends only on a report
-		// with no buttons, sticks, triggers and no touch points.
-		const suppressed = suppressUntilNeutral && (padIsActive(report.state) || hasFinger(report.state));
+		// with no buttons, triggers and no touch points, and with both sticks back
+		// inside the deadzone, where the mapper reads them as centered.
+		const suppressed =
+			suppressUntilNeutral &&
+			(padIsActive(report.state) || hasFinger(report.state) || stickPushed(report.state, deadzone));
 		// Where the surface turns into input. The gestures are read from *this*
 		// report — a tap is decided on the report where the finger is already gone —
 		// and handed to the mapper beside the buttons, so that everything downstream
@@ -1285,10 +1315,13 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 				// Every link of a pad answers to its name and path: the controller row
 				// names the reader, but `/gamepad list` shows both links of a DualShock 4,
 				// and a path copied from it must pick the pad whichever one it came from.
-				key = controllersStatus().find(
-					(controller) =>
-						controllerMatches(controller, wanted) ||
-						padLinks(controller.key).some((link) => matchesDevice(link.device, wanted)),
+				const controllers = controllersStatus();
+				key = (
+					controllers.find(
+						(controller) =>
+							controllerNamed(controller, wanted) ||
+							padLinks(controller.key).some((link) => matchesDevice(link.device, wanted)),
+					) ?? controllers.find((controller) => controllerInFamily(controller, wanted))
 				)?.key;
 			} else {
 				key = keys[indexed - 1];
@@ -1384,15 +1417,24 @@ const FAMILY_WORDS: Readonly<Record<PadFamily, readonly string[]>> = {
 };
 
 /**
- * Whether a controller answers to a `switchPad` target: a family word, one of
- * its transports, or the same case-insensitive substring of name and path that
- * the `device` setting matches.
+ * Whether a controller answers to a `switchPad` target by what is printed on it:
+ * one of its transports, or the same case-insensitive substring of name and path
+ * that the `device` setting matches.
+ *
+ * Asked of every controller before any family word is, because a name is more
+ * specific than a family: the name of one Xbox pad, copied from the list, contains
+ * "xbox", and matching the word first would pick the first Xbox pad every time.
  */
-function controllerMatches(controller: PadControllerStatus, wanted: string): boolean {
+function controllerNamed(controller: PadControllerStatus, wanted: string): boolean {
 	const needle = wanted.trim().toLowerCase();
-	if (FAMILY_WORDS[controller.family].some((word) => word.includes(needle) || needle.includes(word))) return true;
 	if (controller.transports.some((transport) => transport.includes(needle))) return true;
 	return matchesDevice(controller.device, wanted);
+}
+
+/** Whether a controller answers to a `switchPad` target by its family word. */
+function controllerInFamily(controller: PadControllerStatus, wanted: string): boolean {
+	const needle = wanted.trim().toLowerCase();
+	return FAMILY_WORDS[controller.family].some((word) => word.includes(needle) || needle.includes(word));
 }
 
 /**
