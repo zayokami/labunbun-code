@@ -519,6 +519,11 @@ const STOP_REASON_MAP: Record<string, StopReason> = {
 	// read, not here: each needs more than a one-word translation.
 };
 
+/** Whether a value is `{}`: the placeholder a tool_use block opens with. */
+function isEmptyObject(value: unknown): boolean {
+	return typeof value === "object" && value !== null && Object.keys(value).length === 0;
+}
+
 /**
  * The explanation to show for a refusal, or nothing when the API gave none.
  *
@@ -582,8 +587,11 @@ export async function* mapAnthropicStream(
 					yield builder.thinkingStart(index);
 				} else if (block.type === "tool_use") {
 					yield builder.toolCallStart(index, block.id ?? "", block.name ?? "");
-					// Some models inline a complete input object instead of deltas.
-					if (block.input !== undefined && block.input !== null) {
+					// Some models inline a complete input object instead of deltas. An
+					// empty object is not that: the API opens every tool_use block with
+					// `input: {}` and streams the real input as deltas after it, so
+					// taking the placeholder for an input would prefix `{}` to them.
+					if (block.input !== undefined && block.input !== null && !isEmptyObject(block.input)) {
 						yield builder.toolCallDelta(index, JSON.stringify(block.input));
 					}
 				}

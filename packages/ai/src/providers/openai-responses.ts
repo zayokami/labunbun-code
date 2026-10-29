@@ -10,6 +10,7 @@ import {
 } from "../cache.ts";
 import { MessageBuilder } from "../message-builder.ts";
 import { resolveApiKey } from "../model.ts";
+import { looksLikeContextOverflow } from "../retry.ts";
 import { composeSignals } from "../signals.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, ThinkingLevel, WireTool } from "../types.ts";
 
@@ -62,6 +63,8 @@ export interface ResponsesRawEvent {
 	response?: ResponsesEnvelope;
 	error?: { message?: string; code?: string };
 	code?: string;
+	/** The stream's own `error` event states its message at the top level. */
+	message?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,9 +301,21 @@ export async function* mapResponsesStream(
 	let usage: ResponsesEnvelope["usage"];
 	let incompleteReason: string | undefined;
 	let failure: string | undefined;
+	let failureCode: string | undefined;
 	/** The explanation a declining turn streams instead of an answer. */
 	let refusalText = "";
 	let sawEvent = false;
+
+	/**
+	 * The kind of the failure the stream stated, where it names one. A failure
+	 * that arrives in-stream never becomes a throw, so the retry layer cannot
+	 * classify it; the overflow code is the wire's own name for a prompt that does
+	 * not fit, and its wording matches none of the patterns.
+	 */
+	function failureOptions(): { errorKind?: "context_overflow" } {
+		const overflow = failureCode === "context_length_exceeded" || looksLikeContextOverflow(failure ?? "");
+		return overflow ? { errorKind: "context_overflow" } : {};
+	}
 
 	/** Content index for a wire output slot, allocated the first time it is used. */
 	function slot(outputIndex: number): number {
@@ -425,8 +440,19 @@ export async function* mapResponsesStream(
 				incompleteReason = envelope?.incomplete_details?.reason ?? incompleteReason;
 				const message = envelope?.error?.message ?? event.error?.message;
 				if (message || event.type === "response.failed") {
-					failure = message ?? `Responses stream failed (${envelope?.error?.code ?? event.code ?? "unknown"})`;
+					failureCode = envelope?.error?.code ?? event.code;
+					failure = message ?? `Responses stream failed (${failureCode ?? "unknown"})`;
 				}
+				break;
+			}
+			case "error": {
+				// The stream's own error event, which carries no envelope: the code
+				// and message sit at the top level, and no terminal event follows.
+				// Ignored as unknown, the turn ended as "without a terminal event"
+				// and the provider's reason — a rate limit, an over-long prompt —
+				// was thrown away with it.
+				failureCode = event.code ?? event.error?.code;
+				failure = event.message ?? event.error?.message ?? `Responses stream failed (${failureCode ?? "unknown"})`;
 				break;
 			}
 			default:
@@ -448,7 +474,9 @@ export async function* mapResponsesStream(
 	// never finished writing. The terminal events above are the only way a
 	// status gets set, so its absence is the lie detector.
 	if (status === undefined) {
-		yield builder.error("Responses stream ended without a terminal event");
+		// Unless the stream said why: an `error` event is a reason, and it ends
+		// the turn without a terminal event of its own.
+		yield builder.error(failure ?? "Responses stream ended without a terminal event", failureOptions());
 		return;
 	}
 
@@ -493,7 +521,7 @@ export async function* mapResponsesStream(
 	}
 
 	if (failure) {
-		yield builder.error(failure, { usage: builder.message.usage });
+		yield builder.error(failure, { usage: builder.message.usage, ...failureOptions() });
 		return;
 	}
 

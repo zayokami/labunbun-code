@@ -354,8 +354,10 @@ export function cacheCeiling(promptTotals: readonly number[]): number | undefine
 	for (let i = 0; i < known.length; i++) {
 		const current = known[i] ?? 0;
 		total += current;
-		// The first request has nothing before it to read.
-		if (i > 0) achieved += known[i - 1] ?? 0;
+		// The first request has nothing before it to read. A request can read no
+		// more than it sent, so a prompt that shrank (compaction, a rewind) is
+		// capped at its own length.
+		if (i > 0) achieved += Math.min(known[i - 1] ?? 0, current);
 	}
 	return total > 0 ? achieved / total : undefined;
 }

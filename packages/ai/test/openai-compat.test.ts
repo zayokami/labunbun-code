@@ -368,6 +368,90 @@ describe("mapOpenAIStream", () => {
 		expect(end.toolCall.arguments).toBe('{"path":"x"}');
 	});
 
+	test("a name that arrives on a later fragment reaches the finished call", async () => {
+		// The name was only kept on the mapper's own bookkeeping, so the block the
+		// finish reads kept the empty one it was opened with and the call was
+		// dispatched to a tool called "".
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"a":' } }] } }] },
+					{
+						choices: [
+							{ delta: { tool_calls: [{ index: 0, id: "call_A", function: { name: "read", arguments: "1}" } }] } },
+						],
+					},
+					{ choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+				]),
+				"deepseek",
+				"deepseek-chat",
+			),
+		);
+		const end = events.find((e) => e.type === "toolcall_end") as any;
+		expect(end.toolCall).toEqual({ type: "toolCall", id: "call_A", name: "read", arguments: '{"a":1}' });
+	});
+
+	test("index-less fragments that carry different ids are different calls", async () => {
+		// A shim that omits the index and sends each call whole, in a chunk of its
+		// own. Treated as one slot, the second id replaced the first and the two
+		// argument objects were glued into `{"a":1}{"b":2}`.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{
+						choices: [
+							{ delta: { tool_calls: [{ id: "call_aaa", function: { name: "read", arguments: '{"a":1}' } }] } },
+						],
+					},
+					{
+						choices: [
+							{ delta: { tool_calls: [{ id: "call_bbb", function: { name: "write", arguments: '{"b":2}' } }] } },
+						],
+					},
+					{ choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+				]),
+				"ollama",
+				"qwen3:8b",
+			),
+		);
+		const ends = events.filter((e) => e.type === "toolcall_end") as any[];
+		expect(ends.map((e) => e.toolCall)).toEqual([
+			{ type: "toolCall", id: "call_aaa", name: "read", arguments: '{"a":1}' },
+			{ type: "toolCall", id: "call_bbb", name: "write", arguments: '{"b":2}' },
+		]);
+	});
+
+	test("a slot reused by a call with another id opens a new call", async () => {
+		// Some shims number every call 0. The id is then the only thing that tells
+		// two whole calls apart, and an id repeated on a later fragment of the same
+		// call must still be one.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{
+						choices: [
+							{ delta: { tool_calls: [{ index: 0, id: "fc-1", function: { name: "read", arguments: '{"a":' } }] } },
+						],
+					},
+					{ choices: [{ delta: { tool_calls: [{ index: 0, id: "fc-1", function: { arguments: "1}" } }] } }] },
+					{
+						choices: [
+							{ delta: { tool_calls: [{ index: 0, id: "fc-2", function: { name: "write", arguments: '{"b":2}' } }] } },
+						],
+					},
+					{ choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+				]),
+				"google",
+				"gemini-3.8-flash",
+			),
+		);
+		const ends = events.filter((e) => e.type === "toolcall_end") as any[];
+		expect(ends.map((e) => e.toolCall)).toEqual([
+			{ type: "toolCall", id: "fc-1", name: "read", arguments: '{"a":1}' },
+			{ type: "toolCall", id: "fc-2", name: "write", arguments: '{"b":2}' },
+		]);
+	});
+
 	test("two parallel tool calls stay in slot order", async () => {
 		const events = await collect(
 			mapOpenAIStream(

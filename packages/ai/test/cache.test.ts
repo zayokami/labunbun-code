@@ -278,6 +278,15 @@ describe("cacheCeiling", () => {
 		expect(ceiling).toBeGreaterThan(0.99);
 	});
 
+	test("a prompt that shrank can read no more than it sent", () => {
+		// After a compaction the next prompt is smaller than the one before it. The
+		// 100k written earlier cannot be read by a 20k request: 20k out of 120k,
+		// not 100k out of 120k.
+		expect(cacheCeiling([100_000, 20_000])).toBeCloseTo(20_000 / 120_000);
+		// Growth after the shrink is unaffected: the third request reads the 20k before it.
+		expect(cacheCeiling([100_000, 20_000, 30_000])).toBeCloseTo((20_000 + 20_000) / 150_000);
+	});
+
 	test("undefined below two measurable requests", () => {
 		expect(cacheCeiling([])).toBeUndefined();
 		expect(cacheCeiling([1000])).toBeUndefined();

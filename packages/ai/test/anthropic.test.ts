@@ -921,7 +921,14 @@ describe("mapAnthropicStream", () => {
 			mapAnthropicStream(
 				raw([
 					{ type: "message_start", message: { usage: { input_tokens: 5 } } },
-					{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "write" } },
+					// The wire opens every tool_use block with an empty `input`; the fixture
+					// used to leave it out, which is a shape the API never sends and is why
+					// the `{}` placeholder used to be glued in front of the deltas unseen.
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "tool_use", id: "tu_1", name: "write", input: {} },
+					},
 					{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path"' } },
 					{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: ':"a.txt"}' } },
 					{ type: "content_block_stop", index: 0 },
@@ -1160,6 +1167,31 @@ describe("mapAnthropicStream", () => {
 		);
 		const end = events.find((e) => e.type === "toolcall_end") as any;
 		expect(JSON.parse(end.toolCall.arguments)).toEqual({ path: "a.txt" });
+	});
+
+	test("the empty input a tool_use block opens with is not taken for an input", async () => {
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "tool_use", id: "tu_2", name: "ls", input: {} },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{ type: "message_delta", delta: { stop_reason: "tool_use" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-sonnet-5",
+			),
+		);
+		// A call that takes no arguments streams no deltas: nothing to send, so the
+		// text stays empty rather than becoming a `{}` the deltas would have followed.
+		expect(events.map((e) => e.type)).toEqual(["start", "toolcall_start", "toolcall_end", "done"]);
+		const end = events.find((e) => e.type === "toolcall_end") as any;
+		expect(end.toolCall.arguments).toBe("");
 	});
 
 	test("redacted_thinking blocks pass through without crashing", async () => {

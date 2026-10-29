@@ -250,6 +250,8 @@ interface OpenToolCallState {
 	id: string;
 	name: string;
 	index: number;
+	/** True while `id` is the placeholder this mapper made up, not one the wire wrote. */
+	synthetic: boolean;
 }
 
 export async function* mapOpenAIStream(
@@ -258,7 +260,10 @@ export async function* mapOpenAIStream(
 	modelId: string,
 ): AsyncGenerator<AssistantMessageEvent> {
 	const builder = new MessageBuilder(provider, modelId);
-	const openCalls = new Map<number, OpenToolCallState>();
+	/** Every call the stream opened, in the order it opened them. */
+	const calls: OpenToolCallState[] = [];
+	/** The call currently receiving each wire slot; a reused slot points at the newest. */
+	const callsBySlot = new Map<number, OpenToolCallState>();
 	let textIndex = -1;
 	let thinkingIndex = -1;
 	let nextContentIndex = 0;
@@ -358,30 +363,44 @@ export async function* mapOpenAIStream(
 
 		if (delta?.tool_calls) {
 			for (const fragment of delta.tool_calls) {
-				// A missing index is slot 0 rather than its own key: `undefined`
-				// as a map key makes the first fragment's synthesized id read
-				// `call_undefined`, a string no provider could ever have written.
-				const slot = fragment.index ?? 0;
-				let state = openCalls.get(slot);
+				// The call this fragment continues. A shim that omits the index
+				// (Ollama's) continues the newest call instead of every fragment
+				// landing on one shared slot.
+				let state = fragment.index === undefined ? calls.at(-1) : callsBySlot.get(fragment.index);
+				// A fragment that carries an id other than the one the open call was
+				// given is the next call, whatever slot it names: some shims number
+				// every call 0, and the id is the one thing that tells them apart.
+				if (state && fragment.id && !state.synthetic && fragment.id !== state.id) state = undefined;
 				if (!state) {
 					state = {
-						id: fragment.id ?? `call_${slot}`,
+						// A placeholder id names the call's place in the stream, so it
+						// cannot collide with the one before it; `call_undefined` is a
+						// string no provider could ever have written.
+						id: fragment.id || `call_${fragment.index ?? calls.length}`,
 						name: fragment.function?.name ?? "",
 						index: nextContentIndex++,
+						synthetic: !fragment.id,
 					};
-					openCalls.set(slot, state);
+					calls.push(state);
+					if (fragment.index !== undefined) callsBySlot.set(fragment.index, state);
 					yield builder.toolCallStart(state.index, state.id, state.name);
-				} else if (fragment.id && state.id.startsWith("call_")) {
-					// The id can arrive on a later fragment than the one that
-					// opened the call. The placeholder was already emitted and the
-					// block it created is what the finish reads, so the wire's own
-					// id replaces it in both places — otherwise this transcript
-					// replays an id the provider never wrote.
-					state.id = fragment.id;
+				} else {
 					const block = builder.message.content[state.index];
-					if (block?.type === "toolCall") block.id = fragment.id;
-				} else if (fragment.function?.name && !state.name) {
-					state.name = fragment.function.name;
+					if (fragment.id && state.synthetic) {
+						// The id can arrive on a later fragment than the one that
+						// opened the call. The placeholder was already emitted and the
+						// block it created is what the finish reads, so the wire's own
+						// id replaces it in both places — otherwise this transcript
+						// replays an id the provider never wrote.
+						state.id = fragment.id;
+						state.synthetic = false;
+						if (block?.type === "toolCall") block.id = fragment.id;
+					}
+					if (fragment.function?.name && !state.name) {
+						// A name can lag the same way, and the block is what the finish reads.
+						state.name = fragment.function.name;
+						if (block?.type === "toolCall") block.name = fragment.function.name;
+					}
 				}
 				if (fragment.function?.arguments) {
 					yield builder.toolCallDelta(state.index, fragment.function.arguments);
@@ -430,8 +449,8 @@ export async function* mapOpenAIStream(
 	}
 	builder.message.stopReason = stop;
 
-	const sorted = [...openCalls.values()].sort((a, b) => a.index - b.index);
-	for (const state of sorted) {
+	// Opened in content order, so they close in the order the message reads back.
+	for (const state of calls) {
 		yield builder.toolCallEnd(state.index);
 	}
 

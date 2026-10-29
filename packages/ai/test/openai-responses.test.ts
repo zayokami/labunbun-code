@@ -469,6 +469,50 @@ describe("mapResponsesStream", () => {
 		expect(events.at(-1).message.errorMessage).toBe("quota exceeded");
 	});
 
+	test("the stream's own error event carries the provider's message, not a missing-terminal-event guess", async () => {
+		// `error` has no envelope: the code and message sit at the top level and no
+		// terminal event follows. Read as an unknown event the turn ended as
+		// "without a terminal event" and the reason was gone.
+		const events = await collect(
+			mapResponsesStream(
+				raw([
+					{ type: "response.created", response: {} },
+					{ type: "error", code: "rate_limit_exceeded", message: "Rate limit reached for requests" },
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		expect(events.at(-1).type).toBe("error");
+		expect(events.at(-1).message.errorMessage).toBe("Rate limit reached for requests");
+		expect(events.at(-1).message.errorKind).toBeUndefined();
+	});
+
+	test("an error event naming the context window is tagged, so it is not replayed", async () => {
+		const events = await collect(
+			mapResponsesStream(
+				raw([
+					{
+						type: "error",
+						code: "context_length_exceeded",
+						message: "Your input exceeds the context window of this model.",
+					},
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		expect(events.at(-1).message.errorMessage).toBe("Your input exceeds the context window of this model.");
+		expect(events.at(-1).message.errorKind).toBe("context_overflow");
+	});
+
+	test("an error event with no message still names its code", async () => {
+		const events = await collect(
+			mapResponsesStream(raw([{ type: "error", code: "server_error" }]), "openai", MODEL.id),
+		);
+		expect(events.at(-1).message.errorMessage).toBe("Responses stream failed (server_error)");
+	});
+
 	test("unknown event names are ignored rather than failing the turn", async () => {
 		const events = await collect(
 			mapResponsesStream(
