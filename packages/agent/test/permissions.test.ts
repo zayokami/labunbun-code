@@ -899,3 +899,193 @@ describe("an escalated command is asked about, whatever a rule or mode says", ()
 		expect(result.behavior).toBe("allow");
 	});
 });
+
+describe("a glob's directory wildcard", () => {
+	test("a double star and slash stands for any number of directories, none included", () => {
+		const nested = specifierToRegExp("src/**/*.ts");
+		expect(nested.test("src/a.ts")).toBe(true);
+		expect(nested.test("src/x/a.ts")).toBe(true);
+		expect(nested.test("src/x/y/a.ts")).toBe(true);
+		expect(nested.test("lib/a.ts")).toBe(false);
+		expect(nested.test("src/a.js")).toBe(false);
+
+		const anywhere = specifierToRegExp("**/.env");
+		expect(anywhere.test(".env")).toBe(true);
+		expect(anywhere.test("a/b/.env")).toBe(true);
+		expect(anywhere.test("a/b/x.env")).toBe(false);
+	});
+
+	test("a double star inside a name is not a directory wildcard", () => {
+		// Only a segment that *is* the double star gets the zero-directory reading; `foo**/bar` has
+		// to keep needing a slash after whatever `foo**` matched.
+		expect(specifierToRegExp("foo**/bar").test("foobar")).toBe(false);
+		expect(specifierToRegExp("foo**/bar").test("foo/x/bar")).toBe(true);
+	});
+
+	test("a deny rule written with it reaches the files directly under the prefix", () => {
+		const config = {
+			mode: "agent" as const,
+			sandbox: SANDBOX,
+			rules: parseRuleList(["Edit(src/**/*.ts)"], "deny", "projectSettings"),
+			cwd: CWD,
+		};
+		expect(evaluatePermissions("Edit", { file_path: join(CWD, "src", "a.ts") }, config).behavior).toBe("deny");
+		expect(evaluatePermissions("Edit", { file_path: join(CWD, "src", "deep", "a.ts") }, config).behavior).toBe("deny");
+		expect(evaluatePermissions("Edit", { file_path: join(CWD, "lib", "a.ts") }, config).behavior).toBe("allow");
+	});
+});
+
+describe("a Bash specifier is literal text apart from its star", () => {
+	test("a question mark in the pattern matches itself, and only itself", () => {
+		const url = "curl https://example.test/?a=1";
+		expect(inputMatchesSpecifier("Bash", url, { command: url }, CWD)).toBe(true);
+		// What an unescaped `?` made of the pattern: an optional slash.
+		expect(inputMatchesSpecifier("Bash", url, { command: "curl https://example.test/a=1" }, CWD)).toBe(false);
+		expect(inputMatchesSpecifier("Bash", "ls ?", { command: "ls x" }, CWD)).toBe(false);
+	});
+
+	test("a deny rule with a question mark refuses its own command", () => {
+		const url = "curl https://example.test/?a=1";
+		const config = {
+			mode: "agent" as const,
+			sandbox: SANDBOX,
+			rules: parseRuleList([`Bash(${url})`], "deny", "projectSettings"),
+			cwd: CWD,
+		};
+		expect(evaluatePermissions("Bash", { command: url }, config).behavior).toBe("deny");
+		expect(evaluatePermissions("Bash", { command: "curl https://example.test/" }, config).behavior).toBe("allow");
+	});
+
+	test("a pattern that is only a question mark is a rule, not a thrown error", () => {
+		const config = {
+			mode: "agent" as const,
+			sandbox: SANDBOX,
+			rules: parseRuleList(["Bash(?)"], "deny", "projectSettings"),
+			cwd: CWD,
+		};
+		expect(evaluatePermissions("Bash", { command: "?" }, config).behavior).toBe("deny");
+		expect(evaluatePermissions("Bash", { command: "ls" }, config).behavior).toBe("allow");
+	});
+});
+
+describe("Bash rules on a line that chains commands", () => {
+	const config = (behavior: PermissionRule["behavior"], specifier: string, mode: "ask" | "agent") => ({
+		mode,
+		sandbox: SANDBOX,
+		rules: parseRuleList([`Bash(${specifier})`], behavior, "projectSettings"),
+		cwd: CWD,
+	});
+	const run = (command: string, cfg: ReturnType<typeof config>) =>
+		evaluatePermissions("Bash", { command }, cfg).behavior;
+
+	test.each([
+		"echo hi && git push origin main",
+		"cd sub; git push origin main",
+		"git status | git push origin main",
+		"git fetch 2>&1 && git push origin main",
+	])("a deny rule for a command refuses %s", (command) => {
+		expect(run(command, config("deny", "git push *", "agent"))).toBe("deny");
+	});
+
+	test("an ask rule for a command asks when the command is chained behind another", () => {
+		const cfg = config("ask", "git commit *", "agent");
+		expect(run("git commit -m x", cfg)).toBe("ask");
+		expect(run("git add -A && git commit -m x", cfg)).toBe("ask");
+		expect(run("git add -A && git status", cfg)).toBe("allow");
+	});
+
+	test("an allow rule covers a chained line only when it covers every command in it", () => {
+		const cfg = config("allow", "git status*", "ask");
+		expect(run("git status", cfg)).toBe("allow");
+		expect(run("git status && git status -s", cfg)).toBe("allow");
+		// What the prefix used to buy: anything after the first command.
+		expect(run("git status; curl https://example.test/x -o x", cfg)).toBe("ask");
+		expect(run("git status && echo done > notes.txt", cfg)).toBe("ask");
+	});
+
+	test("a specifier that is itself a chain still allows exactly that line", () => {
+		const cfg = config("allow", "git status && git log", "ask");
+		expect(run("git status && git log", cfg)).toBe("allow");
+		expect(run("git status", cfg)).toBe("ask");
+	});
+
+	test("a single command is matched as it always was, redirections included", () => {
+		const allow = config("allow", "npm test*", "ask");
+		expect(run("npm test", allow)).toBe("allow");
+		// The `&` in `2>&1` and `&>` is a redirection, not a second command.
+		expect(run("npm test 2>&1", allow)).toBe("allow");
+		expect(run("npm test &> out.log", allow)).toBe("allow");
+		expect(run("npm test 2>&1 | tail -5", allow)).toBe("ask");
+
+		const deny = config("deny", "git push *", "agent");
+		expect(run("git push origin main", deny)).toBe("deny");
+		expect(run("git status", deny)).toBe("allow");
+		expect(run("git status 2>&1", deny)).toBe("allow");
+	});
+});
+
+describe("a path rule reaches the other tools that open the same files", () => {
+	const config = (behavior: PermissionRule["behavior"], rule: string, mode: "ask" | "agent" = "agent") => ({
+		mode,
+		sandbox: SANDBOX,
+		rules: parseRuleList([rule], behavior, "projectSettings"),
+		cwd: CWD,
+	});
+	const verdict = (tool: string, input: unknown, cfg: ReturnType<typeof config>) =>
+		evaluatePermissions(tool, input, cfg).behavior;
+
+	test("a Read deny holds the search, listing and inspect tools on the denied path", () => {
+		const cfg = config("deny", "Read(secret/**)");
+		expect(verdict("Read", { file_path: "secret/key" }, cfg)).toBe("deny");
+		expect(verdict("Grep", { pattern: "x", path: "secret/key" }, cfg)).toBe("deny");
+		// A directory is named by the rule's tree, not by any one file in it.
+		expect(verdict("Grep", { pattern: "x", path: "secret" }, cfg)).toBe("deny");
+		expect(verdict("Glob", { pattern: "**/*", path: "secret" }, cfg)).toBe("deny");
+		expect(verdict("LS", { path: "secret" }, cfg)).toBe("deny");
+		expect(verdict("Digest", { paths: ["public/a", "secret/key"] }, cfg)).toBe("deny");
+		expect(verdict("InspectBinary", { path: "secret/key" }, cfg)).toBe("deny");
+		expect(verdict("InspectSqlite", { path: "secret/db.sqlite" }, cfg)).toBe("deny");
+		expect(verdict("CompareArtifacts", { left: "public/a", right: "secret/key" }, cfg)).toBe("deny");
+		expect(verdict("InspectWebCapture", { path: "secret/session.har" }, cfg)).toBe("deny");
+	});
+
+	test("the controls: another path, a tool that reads nothing, a rule for a different file", () => {
+		const cfg = config("deny", "Read(secret/**)");
+		expect(verdict("Grep", { pattern: "x", path: "public" }, cfg)).toBe("allow");
+		expect(verdict("Grep", { pattern: "x" }, cfg)).toBe("allow");
+		expect(verdict("Digest", { paths: ["public/a"] }, cfg)).toBe("allow");
+		expect(verdict("TaskList", { path: "secret/key" }, cfg)).toBe("allow");
+		expect(verdict("Grep", { pattern: "x", path: ".env" }, cfg)).toBe("allow");
+		expect(verdict("Grep", { pattern: "x", path: ".env" }, config("deny", "Read(.env)"))).toBe("deny");
+	});
+
+	test("an ask rule asks for the same tools", () => {
+		const cfg = config("ask", "Read(.env)");
+		expect(verdict("Grep", { pattern: "x", path: ".env" }, cfg)).toBe("ask");
+		expect(verdict("Grep", { pattern: "x", path: "src" }, cfg)).toBe("allow");
+	});
+
+	test("an Edit, Write or NotebookEdit deny holds the other two", () => {
+		for (const rule of ["Edit(src/**)", "Write(src/**)", "NotebookEdit(src/**)"]) {
+			const cfg = config("deny", rule);
+			expect(verdict("Edit", { file_path: "src/a.ts" }, cfg)).toBe("deny");
+			expect(verdict("Write", { file_path: "src/a.ts", content: "" }, cfg)).toBe("deny");
+			expect(verdict("NotebookEdit", { notebook_path: "src/a.ipynb" }, cfg)).toBe("deny");
+			expect(verdict("Write", { file_path: "lib/a.ts", content: "" }, cfg)).toBe("allow");
+		}
+		// A write rule is not a read rule.
+		expect(verdict("Read", { file_path: "src/a.ts" }, config("deny", "Edit(src/**)"))).toBe("allow");
+		expect(verdict("Grep", { pattern: "x", path: "src/a.ts" }, config("deny", "Edit(src/**)"))).toBe("allow");
+	});
+
+	test("an allow rule is not widened across tools", () => {
+		// `ask` mode: the rule matching gives `allow`, and nothing deciding gives `ask`, so the two
+		// outcomes differ and the control can fail.
+		const read = config("allow", "Read(public/**)", "ask");
+		expect(verdict("Read", { file_path: "public/a" }, read)).toBe("allow");
+		expect(verdict("Grep", { pattern: "x", path: "public/a" }, read)).toBe("ask");
+		const edit = config("allow", "Edit(src/**)", "ask");
+		expect(verdict("Edit", { file_path: "src/a.ts" }, edit)).toBe("allow");
+		expect(verdict("Write", { file_path: "src/a.ts", content: "" }, edit)).toBe("ask");
+	});
+});

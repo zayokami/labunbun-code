@@ -148,6 +148,12 @@ export class SessionStore {
 	#leafId: string | null = null;
 	#skippedLines = 0;
 	#truncated = false;
+	/**
+	 * The file ends in a line with no terminator: a writer that died mid-line left
+	 * it. The next append has to start a line of its own, or its entry is glued onto
+	 * the fragment and read back as one damaged line.
+	 */
+	#unterminatedTail = false;
 	/** The walk `linearEntries` last returned, until the tree it described changed. */
 	#linear: SessionEntry[] | null = null;
 
@@ -206,6 +212,9 @@ export class SessionStore {
 					text = lastBreak === -1 ? "" : text.slice(0, lastBreak);
 				}
 			}
+			// A capped read was cut by the caller, not by a crash; only a whole read
+			// can say how the file itself ends.
+			store.#unterminatedTail = !store.#truncated && text.length > 0 && !text.endsWith("\n");
 			for (const line of text.split("\n")) {
 				if (!line.trim()) continue;
 				const entry = parseSessionLine(line);
@@ -267,7 +276,9 @@ export class SessionStore {
 
 	// Long-form design notes: docs/dev/crash-consistency.md
 	append(entry: SessionEntry): void {
-		const line = `${JSON.stringify(entry)}\n`;
+		// A torn tail gets its line break first, so this entry survives next to the
+		// fragment it follows instead of being swallowed by it.
+		const line = `${this.#unterminatedTail ? "\n" : ""}${JSON.stringify(entry)}\n`;
 		// Write first, adopt second: a failed write must leave the in-memory tree
 		// exactly where the file is. The old order pushed the entry before the
 		// write, so a full disk left the session holding a message no resume could
@@ -285,6 +296,7 @@ export class SessionStore {
 			mkdirSync(dirname(this.path), { recursive: true });
 			appendFileSync(this.path, line, "utf8");
 		}
+		this.#unterminatedTail = false;
 		this.entries.push(entry);
 		this.#leafId = entry.id;
 		this.#linear = null;

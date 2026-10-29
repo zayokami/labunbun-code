@@ -506,6 +506,8 @@ export class AgentSession {
 				earlyPromises = new Map<string, Promise<void>>();
 				earlySettled = new Set<string>();
 				const toolSemaphore = new Semaphore(DEFAULT_MAX_CONCURRENCY);
+				// Per turn, like the maps: set by the first call that must wait for the stream to end.
+				const earlyGate = { blocked: false };
 				// A cancel that lands while the stream is in flight must end the turn as
 				// aborted. Transports surface a cancel differently: some throw (handled
 				// below), others merely stop the stream — the OpenAI SDK ends an aborted
@@ -537,7 +539,14 @@ export class AgentSession {
 								assistantMessageEvent: event,
 							});
 							if (event.type === "toolcall_end") {
-								this.#maybeStartEarlyTool(event.toolCall, earlyResults, earlyPromises, earlySettled, toolSemaphore);
+								this.#maybeStartEarlyTool(
+									event.toolCall,
+									earlyResults,
+									earlyPromises,
+									earlySettled,
+									toolSemaphore,
+									earlyGate,
+								);
 							}
 						}
 					}
@@ -865,6 +874,12 @@ export class AgentSession {
 	 * instead of each enforcing an independent one — once the shared budget is
 	 * exhausted, later calls are left for the post-stream path, which blocks on
 	 * the same semaphore until a permit frees up.
+	 *
+	 * Source order is kept across an unsafe call. The first call in the turn that
+	 * is not concurrency-safe waits for the end of the stream, so a safe call that
+	 * follows it must wait too: started now, it would run before the write the model
+	 * listed ahead of it and read the world as it was. `gate` carries that from one
+	 * call of the turn to the next.
 	 */
 	#maybeStartEarlyTool(
 		toolCall: ToolCall,
@@ -872,12 +887,17 @@ export class AgentSession {
 		earlyPromises: Map<string, Promise<void>>,
 		earlySettled: Set<string>,
 		semaphore: Semaphore,
+		gate: { blocked: boolean },
 	): void {
 		if (this.#abortController?.signal.aborted) return;
+		if (gate.blocked) return;
 		const tool = this.#tools.find((t) => t.name === toolCall.name);
 		if (!tool?.isEnabled?.()) return;
 		const input = parseArguments(toolCall.arguments);
-		if (!tool.isConcurrencySafe?.(input)) return;
+		if (!tool.isConcurrencySafe?.(input)) {
+			gate.blocked = true;
+			return;
+		}
 		if (!semaphore.tryAcquire()) return; // no shared budget left; post-stream path will run it
 
 		const resolved: ResolvedToolCall = { callId: toolCall.id, tool, input };

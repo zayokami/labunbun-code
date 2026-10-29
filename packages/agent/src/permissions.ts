@@ -59,6 +59,12 @@
  * there — it is not a whitelist, and nothing upstream treats its silence as
  * safety.
  *
+ * What "a rule matches" means widens only in the direction that refuses. A deny or
+ * ask rule for Bash matches a chained line when any one command in it does
+ * (`bashRuleMatches`), and a file deny or ask rule also covers the sibling tools
+ * that open the same files (`siblingRuleMatches`). Neither widens an allow rule:
+ * on a chained line it must hold for every command in the line.
+ *
  * Step 1 used to come after a `bypassPermissions` early return, so that one mode
  * was the only thing in the system that could overrule a user's own `deny`. That
  * line is gone; `deny-scan-first` was already written down as a security
@@ -121,15 +127,28 @@ export function normalizePathSpec(specifier: string): string {
 	return specifier.replace(/\\/g, "/");
 }
 
-/** Glob → RegExp: ** crosses directories, * stays within a segment. */
+/**
+ * Glob → RegExp: ** crosses directories, * stays within a segment.
+ *
+ * A double star that opens a segment and is followed by a slash stands for any
+ * number of directories, including none: `src/` + double star + `/*.ts` must name
+ * `src/a.ts` as well as `src/x/a.ts`. Read as a bare `.*` followed by a literal
+ * slash, it demanded one directory more than that, and a deny rule written that
+ * way missed every file directly under its prefix.
+ */
 export function specifierToRegExp(specifier: string): RegExp {
 	let pattern = "";
 	for (let i = 0; i < specifier.length; i++) {
 		const char = specifier[i];
 		if (char === "*") {
 			if (specifier[i + 1] === "*") {
-				pattern += ".*";
-				i++;
+				if (specifier[i + 2] === "/" && (i === 0 || specifier[i - 1] === "/")) {
+					pattern += "(?:.*/)?";
+					i += 2;
+				} else {
+					pattern += ".*";
+					i++;
+				}
 			} else {
 				pattern += "[^/]*";
 			}
@@ -231,22 +250,75 @@ function bashHitsFileRule(rule: PermissionRule, input: unknown, cwd: string): st
 	return null;
 }
 
+/**
+ * One Bash specifier against one command string. `*` is the only wildcard; every
+ * other character, `?` included, stands for itself — an unescaped `?` made
+ * `Bash(curl https://x/?a=1)` a pattern that could not match its own command, and
+ * `Bash(?)` a regular expression that does not compile.
+ */
+function bashWildcardMatches(specifier: string, command: string): boolean {
+	const pattern = specifier.trim();
+	if (pattern === "*" || pattern === "") return true;
+	const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, "\\$&").replace(/\*/g, "[\\s\\S]*");
+	return new RegExp(`^${escaped}$`).test(command);
+}
+
+/** Stands in for the `&` of a redirection while a line is split, so `2>&1` is not read as a separator. */
+const REDIRECT_AMPERSAND = "\u0000";
+
+/**
+ * The commands a Bash line runs, as a rule sees them. `splitShellCommands` reads
+ * every `&` as a separator; the ones inside `2>&1`, `>&2` and `&>file` are
+ * redirections, and splitting there would turn `npm test 2>&1` into two commands
+ * and a single-command line into a compound one.
+ */
+function bashRuleCommands(command: string): string[] {
+	const masked = command.replace(/([<>])&|&(>)/g, (_, before?: string, after?: string) =>
+		before ? `${before}${REDIRECT_AMPERSAND}` : `${REDIRECT_AMPERSAND}${after}`,
+	);
+	return splitShellCommands(masked).map((part) => part.replaceAll(REDIRECT_AMPERSAND, "&"));
+}
+
+/**
+ * Does a Bash rule with a specifier cover this call?
+ *
+ * A line that chains commands (`a && b`, `a; b`, `a | b`) is several calls in one,
+ * and the three behaviors read that the way their direction needs:
+ *
+ *   - deny and ask match when the whole line does or when any one command in it
+ *     does. A prefix rule (`git push *`) is otherwise defeated by putting anything
+ *     in front of the command it names.
+ *   - allow matches only when the whole line does and, for a line of several
+ *     commands, each command does too. `git status*` says nothing about what
+ *     follows a `;`. A specifier that is itself a chain (`a && b`, typed that way
+ *     by a "don't ask again" answer) is an exact statement about the whole line and
+ *     is matched as one.
+ *
+ * A line of one command is matched exactly as it always was, by the whole line
+ * alone.
+ */
+function bashRuleMatches(behavior: PermissionRule["behavior"], specifier: string, input: unknown): boolean {
+	if (typeof input !== "object" || input === null) return false;
+	const command = String((input as Record<string, unknown>).command ?? "").trim();
+	const whole = bashWildcardMatches(specifier, command);
+	const parts = bashRuleCommands(command);
+	if (behavior !== "allow") return whole || parts.some((part) => bashWildcardMatches(specifier, part));
+	if (!whole || parts.length <= 1 || bashRuleCommands(specifier).length > 1) return whole;
+	return parts.every((part) => bashWildcardMatches(specifier, part));
+}
+
 /** Does a tool input match a specifier, per that tool's matching grammar? */
 export function inputMatchesSpecifier(toolName: string, specifier: string, input: unknown, cwd: string): boolean {
 	if (typeof input !== "object" || input === null) return false;
 	const record = input as Record<string, unknown>;
 
 	switch (toolName) {
-		case "Bash": {
+		case "Bash":
 			// Wildcard matching over the whole command line: "git *" matches any
 			// git invocation, "git push*" matches prefixed forms, plain text is
-			// an exact match.
-			const command = String(record.command ?? "").trim();
-			const pattern = specifier.trim();
-			if (pattern === "*" || pattern === "") return true;
-			const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[\\s\\S]*");
-			return new RegExp(`^${escaped}$`).test(command);
-		}
+			// an exact match. `evaluatePermissions` asks more than this of a
+			// compound line (see `bashRuleMatches`); this is the single-pattern test.
+			return bashWildcardMatches(specifier, String(record.command ?? "").trim());
 		case "Edit":
 		case "Write":
 		case "Read":
@@ -561,12 +633,66 @@ function mcpRuleMatches(ruleToolName: string, toolName: string): boolean {
 	return toolName.startsWith(`${ruleToolName}__`);
 }
 
+/** The tools that only read a file or a tree, which a `Read(...)` deny or ask rule also covers. */
+const READ_RULE_SIBLING_TOOLS: ReadonlySet<string> = new Set([
+	"Grep",
+	"Glob",
+	"LS",
+	"Digest",
+	"InspectSqlite",
+	"InspectArtifact",
+	"InspectBinary",
+	"InspectSourceMap",
+	"CompareArtifacts",
+	"InspectWebCapture",
+]);
+
+/** Of those, the ones handed a directory: a rule for what lies under it has to catch the directory itself. */
+const DIRECTORY_WALKING_TOOLS: ReadonlySet<string> = new Set(["Grep", "Glob", "LS"]);
+
+/** The path inputs of a sibling tool: the file tools' `file_path`/`notebook_path`, and the read tools' `path`, `paths`, `left` and `right`. */
+function siblingToolPaths(toolName: string, input: unknown): string[] {
+	if (typeof input !== "object" || input === null) return [];
+	const record = input as Record<string, unknown>;
+	const found: unknown[] = FILE_WRITE_TOOL_NAMES.has(toolName)
+		? [record.file_path ?? record.notebook_path]
+		: [record.path, record.left, record.right, ...(Array.isArray(record.paths) ? record.paths : [])];
+	return found.filter((value): value is string => typeof value === "string" && value !== "");
+}
+
+/**
+ * A path rule written for one tool, asked of another tool that opens the same
+ * files: `Read(secret/**)` also holds `Grep`, `Glob`, `LS` and the inspect tools,
+ * and `Edit(...)`, `Write(...)` and `NotebookEdit(...)` hold one another. Without
+ * this a rule is a statement about a tool's name rather than about the file, and
+ * `Grep` on a denied path reads it back.
+ *
+ * Only for deny and ask. An allow is one-directional by design — a grant for
+ * `Read` says nothing about `Grep` — so it keeps naming only its own tool, and
+ * nothing here makes any allow rule allow more than it did.
+ */
+function siblingRuleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd: string): boolean {
+	const specifier = rule.specifier;
+	if (rule.behavior === "allow" || specifier === undefined) return false;
+	const covered =
+		rule.toolName === "Read"
+			? READ_RULE_SIBLING_TOOLS.has(toolName)
+			: FILE_WRITE_TOOL_NAMES.has(rule.toolName) && FILE_WRITE_TOOL_NAMES.has(toolName);
+	if (!covered) return false;
+	return siblingToolPaths(toolName, input).some(
+		(path) =>
+			pathMatches(path, specifier, cwd) ||
+			(DIRECTORY_WALKING_TOOLS.has(toolName) && pathMatches(join(path, "x"), specifier, cwd)),
+	);
+}
+
 function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd: string): boolean {
 	if (rule.specifier === undefined && rule.toolName.startsWith("mcp__")) {
 		return mcpRuleMatches(rule.toolName, toolName);
 	}
-	if (rule.toolName !== toolName && rule.toolName !== "*") return false;
+	if (rule.toolName !== toolName && rule.toolName !== "*") return siblingRuleMatches(rule, toolName, input, cwd);
 	if (rule.specifier === undefined) return true; // bare tool rule
+	if (toolName === "Bash") return bashRuleMatches(rule.behavior, rule.specifier, input);
 	return inputMatchesSpecifier(toolName, rule.specifier, input, cwd);
 }
 

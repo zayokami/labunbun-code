@@ -684,6 +684,69 @@ describe("AgentSession loop", () => {
 		expect(results).toHaveLength(1);
 	});
 
+	/**
+	 * Source order across an unsafe call. The model listed the write first and the
+	 * read second; the read is concurrency-safe and used to start the moment its
+	 * block closed, while the write waited for the end of the stream — so the read
+	 * ran first and answered with the world as it was before the write.
+	 *
+	 * The control is the other order, which must keep its early start: a safe call
+	 * ahead of the unsafe one has nothing to jump over, and giving that up would fix
+	 * the ordering by switching the optimisation off.
+	 */
+	test("a safe call listed after an unsafe one does not start before it", async () => {
+		const run = async (order: Array<"writer" | "reader">) => {
+			let state = "old";
+			const writer = buildTool({
+				name: "writer",
+				description: "unsafe write",
+				inputSchema: z.object({}),
+				isConcurrencySafe: () => false,
+				call: async () => {
+					state = "new";
+					return { content: [{ type: "text", text: "wrote" }] };
+				},
+			});
+			const reader = buildTool({
+				name: "reader",
+				description: "safe read",
+				inputSchema: z.object({}),
+				isReadOnly: () => true,
+				isConcurrencySafe: () => true,
+				call: async () => ({ content: [{ type: "text", text: `read:${state}` }] }),
+			});
+			const faux = fauxProvider([{ toolCalls: order.map((name) => ({ name, arguments: {} })) }, { text: "done" }]);
+			const session = new AgentSession({
+				model: FAUX_MODEL,
+				tools: [writer, reader],
+				deps: { streamFn: faux.streamFn },
+			});
+			// The stream's own events and the tools' starts, in the order they were announced: a start that
+			// lands before the last stream event began while the model was still talking.
+			const seen: string[] = [];
+			let firstTurnOver = false;
+			session.on((event) => {
+				if (event.type === "turn_end") firstTurnOver = true;
+				if (firstTurnOver) return;
+				if (event.type === "message_update") seen.push("update");
+				if (event.type === "tool_execution_start") seen.push(`start:${event.toolName}`);
+			});
+			await session.prompt("go");
+			const texts = Object.fromEntries(
+				toolResultsOf(session.messages).map((r) => [r.toolName, (r.content[0] as { text: string }).text]),
+			);
+			return { texts, startedMidStream: seen.indexOf("start:reader") < seen.lastIndexOf("update") };
+		};
+
+		const writeFirst = await run(["writer", "reader"]);
+		expect(writeFirst.texts).toEqual({ writer: "wrote", reader: "read:new" });
+		expect(writeFirst.startedMidStream).toBe(false);
+
+		const readFirst = await run(["reader", "writer"]);
+		expect(readFirst.texts).toEqual({ reader: "read:old", writer: "wrote" });
+		expect(readFirst.startedMidStream).toBe(true);
+	});
+
 	test("early-start streaming path caps concurrency same as the post-stream batcher", async () => {
 		let active = 0;
 		let maxActive = 0;

@@ -169,4 +169,47 @@ describe("a session file whose writer was killed mid-append", () => {
 		const texts = loaded.messages().map((message) => (typeof message.content === "string" ? message.content : ""));
 		for (const [i, text_] of texts.entries()) expect(text_).toContain(`message ${i} `);
 	}, 60_000);
+
+	// The other half of the torn tail: the reader above survives it, and the writer
+	// that resumes the file has to as well. A file whose last line has no terminator
+	// used to take the next append onto the end of the fragment, so the first entry
+	// of the resumed session was written, kept in memory, and read back as nothing.
+	test("the first append after a torn tail is a line of its own", () => {
+		const cwd = scratch("lbb-crash-resume-cwd-");
+		const home = scratch("lbb-crash-resume-home-");
+		const store = SessionStore.startNew(cwd, home);
+		for (let i = 0; i < 3; i++) store.appendMessage({ role: "user", content: `message ${i}`, timestamp: 1 });
+		const whole = readFileSync(store.path, "utf8");
+		const lastLineStart = whole.lastIndexOf("\n", whole.length - 2) + 1;
+		const lastLine = whole.slice(lastLineStart);
+		writeFileSync(
+			store.path,
+			`${whole.slice(0, lastLineStart)}${lastLine.slice(0, Math.floor(lastLine.length / 2))}`,
+			"utf8",
+		);
+
+		const resumed = SessionStore.load(store.path);
+		resumed.appendMessage({ role: "user", content: "first after resume", timestamp: 2 });
+		resumed.appendMessage({ role: "user", content: "second after resume", timestamp: 3 });
+
+		const reloaded = SessionStore.load(store.path);
+		// The torn entry is the only loss; both entries written since are there.
+		expect(reloaded.skippedLines).toBe(1);
+		const texts = reloaded.messages().map((message) => (typeof message.content === "string" ? message.content : ""));
+		expect(texts).toEqual(["message 0", "message 1", "first after resume", "second after resume"]);
+		expect(reloaded.linearEntries()[0]?.type).toBe("header");
+	});
+
+	test("a file that ends on a line break gets no extra line on resume", () => {
+		const cwd = scratch("lbb-crash-clean-cwd-");
+		const home = scratch("lbb-crash-clean-home-");
+		const store = SessionStore.startNew(cwd, home);
+		store.appendMessage({ role: "user", content: "before", timestamp: 1 });
+
+		const resumed = SessionStore.load(store.path);
+		resumed.appendMessage({ role: "user", content: "after", timestamp: 2 });
+
+		expect(readFileSync(store.path, "utf8")).not.toContain("\n\n");
+		expect(SessionStore.load(store.path).skippedLines).toBe(0);
+	});
 });
