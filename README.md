@@ -493,7 +493,7 @@ A tap never holds a button. A gesture lasts one report. Buttons keep the hold.
 
 The hold on the confirm button is 600 ms of reports from the controller. The tool does not count wall-clock time. A controller that stops and starts reports does not keep the age of the press. The hold starts again.
 
-> **NOTE**: A gap of 250 ms with no reports means the controller is gone. The tool then forgets it.
+> **NOTE**: A gap of 250 ms with no reports restarts the hold. A gap of 2000 ms with no reports means the controller is gone. The tool then forgets it.
 
 > **NOTE**: A controller that is connected with USB and switched on appears twice. The tool reads one link and writes to both.
 
@@ -777,9 +777,10 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `theme` | A theme name, or `auto` | Any |
 | `vimMode` | A boolean | Any |
 | `emacsMode` | A boolean | Any |
-| `permissions.allow` | An array of rules | Any |
+| `permissions.allow` | An array of rules | User |
 | `permissions.deny` | An array of rules | Any |
-| `permissions.additionalDirectories` | An array of paths | Any |
+| `permissions.ask` | An array of rules | Any |
+| `permissions.additionalDirectories` | An array of paths | User |
 
 Each seat in `roles` can set `budgetUSD`. The budget is opt-in: a seat with no value has no ceiling. The tool compares the spend against the budget before each request and refuses the request when the spend is over the value. The refusal names the setting: `Budget reached: $2.5000 spent of the $2.0000 budget for roles.main. Raise roles.main.budgetUSD or switch models.`
 

@@ -3,6 +3,69 @@
 What changed in each release. Release pages carry the download links, install
 commands, and SHA-256 checksums.
 
+## Unreleased
+
+### Changed
+
+- **The PowerShell wrapper follows the last statement.** It no longer sets
+  `$ErrorActionPreference = 'Stop'`, which ended the script on the first native
+  program that wrote to stderr under `2>&1` (Windows PowerShell 5.1) and so
+  skipped everything after it. A cmdlet error no longer ends the script. The
+  exit code is the one of the last statement, as in a shell: a failed native
+  program returns its own code, and a later success exits 0 instead of
+  inheriting an earlier `$LASTEXITCODE`.
+- **A broken settings tier is skipped.** Each tier is checked on its own before
+  the merge. A project or local file with one bad value used to make the whole
+  merge fail and fall back to defaults, which dropped the user's and the
+  policy's `sandbox`, `networkAccess` and `permissionMode`. Now only the bad
+  tier is skipped, and the diagnostic names the file and the keys.
+- **Permission rules reach further.** A `Read(...)` deny or ask rule also
+  covers Grep, Glob, LS, Digest and the Inspect tools, and the deny and ask
+  rules of Edit, Write and NotebookEdit cover each other. Allow rules are not
+  widened. A `Bash(...)` rule is matched against each command of a chain: a
+  deny or ask rule fires when any command matches, and an allow rule holds
+  only when every command matches.
+
+### Fixed
+
+- **Tool calls on the Anthropic wire parse.** The empty `input: {}` that the
+  API sends in a tool call's start event was joined to the argument fragments,
+  giving `{}{"path":"a.ts"}`. An empty placeholder is now skipped. Chat
+  Completions tool calls that arrive without an `index`, or with a new id on a
+  reused slot, are no longer merged, and a name that arrives late is kept. The
+  Responses wire reports an `error` event instead of "ended without a terminal
+  event".
+- **`-p` text mode prints the final answer after a tool call.** The text of an
+  earlier turn was never reset, so only its first sentence, or a slice of the
+  answer, reached stdout. `-p` also applies the `sandbox` setting now.
+- **The `.git` guard resolves 8.3 short names.** A write through `GIT~1` on a
+  volume with short names reached `.git/hooks`.
+- **Edit and Write refuse non-UTF-8 files.** A GBK, Latin-1 or UTF-16 file was
+  rewritten with U+FFFD in place of the bytes that did not decode.
+- **A rule with `?` or `**/` matches what it says.** `?` in a Bash rule is a
+  literal, and `src/**/*.ts` matches `src/a.ts`.
+- **A session file with a torn last line keeps its next entry.** The first
+  append after a resume started on the fragment's line and was lost.
+- **Reads wait for an earlier write in the same message.** Once an unsafe call
+  appeared in a turn, a later read could still start early and see old state.
+- **The permission queue and dialog stay with their request.** A second answer
+  to the same dialog removed the next request without resolving it, and the
+  next dialog opened with the previous one's highlight and feedback text. The
+  "tell the model" sentence and the Edit and Write diff now reach the dialog.
+- **The Ctrl+O transcript is readable on a terminal.** The frame cap squashed
+  every entry to a few lines.
+- **A stick that switches controllers does not also press.** A silent DS4 no
+  longer closes a healthy Xbox pad, a blank `device` setting no longer pins,
+  and a failed first battery read no longer shows "low".
+- **MCP stdio servers no longer write onto the screen.** Their stderr is piped
+  and discarded. A wrongly shaped approval file is treated as damaged, and
+  error text no longer loses short numbers to the secret filter.
+- **The beetle ledger is written through a temp file.** A crash in the middle
+  of a write no longer empties the lifetime totals.
+- Vim `r<CR>` then `.` repeats the split, and Backspace or Delete on an empty
+  `/` line behaves as in vim. The caret on an emoji no longer splits the
+  surrogate pair.
+
 ## 0.1.0.2 (Alpha) — 2026-10-26
 
 A drop-in replacement for 0.1.0.1.
