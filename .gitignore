@@ -11,5 +11,9 @@ dist/
 # renames it into place; a run that is interrupted leaves a 120 MB one behind.
 *.bun-build
 
+# `bun run release:package` cross-compiles for the other platforms and keeps
+# the bun runtimes it downloads for them here: about 400 MB.
+.bun-cache/
+
 # labunbun local state
 .labunbun/settings.local.json
