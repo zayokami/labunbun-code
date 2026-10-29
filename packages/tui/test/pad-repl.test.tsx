@@ -109,6 +109,7 @@ function setup(options: { commands?: Array<[string, string]>; phrases?: string[]
 		streaming,
 		release,
 		stdin: view.stdin,
+		stdout: view.stdout,
 		frame: () => (view.lastFrame() ?? "").replace(/\s+/g, " "),
 		frames: view.frames,
 		unmount: () => {
@@ -462,10 +463,13 @@ describe("the buttons that are commands", () => {
 	 * Options is the transcript, and the way out is any of the ways out.
 	 *
 	 * The window it shows is 25 rows, so scrolling is only visible on a transcript
-	 * longer than that — which is the only case where it matters.
+	 * longer than that — which is the only case where it matters. On a tall console:
+	 * on a short one the window is what fits under the frame cap (repl-scrollback).
 	 */
 	test("Options opens the transcript, L1 pages it, and ○ leaves", async () => {
 		const h = setup();
+		(h.stdout as { rows?: number }).rows = 80;
+		h.stdout.emit("resize");
 		h.store.set((state) => ({
 			...state,
 			entries: Array.from({ length: 40 }, (_, i) => ({ kind: "user" as const, text: `line ${i + 1}` })),

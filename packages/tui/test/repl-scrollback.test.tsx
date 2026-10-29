@@ -177,3 +177,44 @@ describe("the scrollback gets each sealed row once", () => {
 		h.finish();
 	}, 20_000);
 });
+
+describe("the transcript screen under the frame cap", () => {
+	/** Every `E<entry>-L<line>` marker in what the console received, in order. */
+	const markers = (text: string) =>
+		[...text.matchAll(/E(\d+)-L(\d+)/g)].map((m) => ({ entry: Number(m[1]), line: Number(m[2]) }));
+
+	test("answers taller than a row apiece are clipped from the top, not squeezed to a few lines", async () => {
+		// Thirty answers of eight lines on a 24-row console: far more than fits. The
+		// cap used to squeeze every answer in the window to a line or two (the
+		// shrinkable box passed the squeeze down to its children), so the screen
+		// meant to show full output showed every third line of everything.
+		const entries = Array.from({ length: 30 }, (_, i) => ({
+			kind: "assistant",
+			text: Array.from({ length: 8 }, (_, line) => `E${i}-L${line}`).join("\n"),
+		})) as UiEntry[];
+		const h = setup(entries, 24);
+		await delay(60);
+		const before = h.stdout.frames.length;
+
+		h.stdin.send("\x0f"); // ctrl+o
+		await delay(80);
+		const shown = markers(h.stdout.frames.slice(before).join(""));
+
+		expect(shown.length).toBeGreaterThan(0);
+		// Whole lines only: the newest answer is complete, and every line that is
+		// on screen follows the one before it.
+		expect(shown.slice(-8)).toEqual(Array.from({ length: 8 }, (_, line) => ({ entry: 29, line })));
+		const unbroken: typeof shown = [];
+		let { entry, line } = shown[0];
+		for (let i = 0; i < shown.length; i++) {
+			unbroken.push({ entry, line });
+			if (line === 7) [entry, line] = [entry + 1, 0];
+			else line += 1;
+		}
+		expect(shown).toEqual(unbroken);
+		// The window is what fits under the cap (two rows an entry at the least),
+		// not the twenty-five that cannot.
+		expect(h.stdout.frames.slice(before).join("")).toContain("Transcript 20-30 of 30");
+		h.finish();
+	}, 20_000);
+});

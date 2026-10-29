@@ -12,6 +12,8 @@ import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider, type StreamFn } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import { connectSessionToStore, REPL } from "../src/components/REPL.tsx";
+import type { PermissionDiff } from "../src/permission-diff.ts";
+import { createPermissionQueue } from "../src/permission-queue.ts";
 import { createStore } from "../src/store.ts";
 import { initialUiState, type UiState } from "../src/ui-state.ts";
 
@@ -141,6 +143,94 @@ describe("a forwarded ask, through the real REPL", () => {
 			await delay(20);
 		}
 		expect(frame).toContain(wanted);
+		h.unmount();
+	}, 20_000);
+});
+
+describe("the permission dialog as the REPL runs it", () => {
+	const DOWN = "\x1b[B";
+
+	/** A REPL whose permission dialog is fed by the real queue, the way `mountRepl` wires it. */
+	function setupQueue() {
+		const faux = fauxProvider([{ text: "n/a" }]);
+		const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
+		const store = createStore<UiState>(initialUiState());
+		const unsubscribe = connectSessionToStore(session, store);
+		const queue = createPermissionQueue({
+			show: (dialog) => store.set((state) => ({ ...state, dialog })),
+			preview: (_tool, input) => (input as { command: string }).command,
+			diffPreview: (_tool, input) => (input as { diff?: PermissionDiff }).diff,
+		});
+		const view = render(<REPL getSession={() => session} store={store} modelName="test" onExit={() => {}} />);
+		return {
+			queue,
+			stdin: view.stdin,
+			frame: () => view.lastFrame() ?? "",
+			unmount: () => {
+				unsubscribe();
+				view.unmount();
+			},
+		};
+	}
+
+	test("the next queued request opens fresh, and the sentence typed for the last one reaches its caller", async () => {
+		const h = setupQueue();
+		const first = h.queue.request("Bash", { command: "git status" });
+		const second = h.queue.request("Bash", { command: "rm -rf build" });
+		await delay(60);
+
+		// Row 4 is the one that asks for a sentence; type one and send it.
+		for (let i = 0; i < 3; i++) {
+			h.stdin.write(DOWN);
+			await delay(20);
+		}
+		h.stdin.write("\r");
+		await delay(30);
+		for (const ch of "use git log") {
+			h.stdin.write(ch);
+			await delay(5);
+		}
+		h.stdin.write("\r");
+		await delay(80);
+
+		// The REPL used to forward three of the answer's four fields, so the
+		// sentence the model was meant to act on was dropped on the way.
+		expect(await first).toEqual({ allow: false, alwaysAllow: false, alwaysAsk: false, message: "use git log" });
+
+		// The same dialog component stood in the same place for the next request and
+		// kept its highlight, its open field and the sentence in it: Enter on the
+		// first screen would have denied `rm -rf build` with the other call's text.
+		const frame = h.frame();
+		expect(frame).toContain("rm -rf build");
+		expect(frame).not.toContain("Tell the model what to do differently:");
+		expect(frame).not.toContain("use git log");
+		expect(frame).toMatch(/❯ 1\. /);
+
+		h.stdin.write("n");
+		await delay(40);
+		expect(await second).toBe(false);
+		h.unmount();
+	}, 20_000);
+
+	test("an Edit's diff is drawn in the dialog instead of the one-line preview", async () => {
+		const h = setupQueue();
+		void h.queue.request("Edit", {
+			command: "Edit src/a.ts",
+			diff: {
+				lines: [
+					{ kind: "removed", text: "const a = 1;" },
+					{ kind: "added", text: "const a = 2;" },
+				],
+				notice: "1 line changed",
+			},
+		});
+		await delay(60);
+
+		const frame = h.frame();
+		expect(frame).toContain("-const a = 1;");
+		expect(frame).toContain("+const a = 2;");
+		expect(frame).toContain("1 line changed");
+		expect(frame).not.toContain("Edit src/a.ts");
 		h.unmount();
 	}, 20_000);
 });

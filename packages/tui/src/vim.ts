@@ -2663,17 +2663,22 @@ export class VimEngine {
 				this.#runSearchLine(pending);
 				return true; // Enter is the search's, not the host's (see the header)
 			}
-			if (key.backspace) {
+			if (key.backspace || key.delete) {
 				// vim edits the pattern with <BS>, one character at a time — a code
-				// point, so a surrogate pair or an accent goes as one.
+				// point, so a surrogate pair or an accent goes as one. <Del> with the
+				// caret at the end of the line, which is where it always is here, takes
+				// the character before it: the same key (measured: `/ba<Del>r<CR>`
+				// searches `br`). On an empty line either one leaves the command line
+				// — the search is abandoned and the next key is an ordinary command,
+				// where it used to be typed into a pattern that nothing drew.
 				const line = this.#search.line;
-				if (line !== "") this.#search.line = line.slice(0, prevChar(line, line.length));
+				if (line === "") this.#search = null;
+				else this.#search.line = line.slice(0, prevChar(line, line.length));
 				return true;
 			}
-			// Everything else belongs to the line. `<Del>` and the arrows land here
-			// and change nothing, which is what they do on vim's command line: the
-			// caret is at the end of the line as it is typed, so there is no
-			// character after it to delete.
+			// Everything else belongs to the line. The arrows land here and change
+			// nothing, which is what they do on vim's command line when it is being
+			// typed: the caret stays at the end of the line.
 			if (this.#search.line.length < MAX_SEARCH_PATTERN) this.#search.line += input;
 			return true;
 		}
@@ -3773,7 +3778,7 @@ export class VimEngine {
 			// changes nothing).
 			let splitAt = pos;
 			for (let i = 0; i < count; i++) splitAt = nextChar(text, splitAt);
-			const out = text.slice(0, pos) + "\n" + text.slice(splitAt);
+			const out = `${text.slice(0, pos)}\n${text.slice(splitAt)}`;
 			this.#ops.setAll(out, settleCursor(out, pos + 1));
 			this.#wantHere();
 			return;
@@ -4852,7 +4857,12 @@ export class VimEngine {
 	 * one that abandons the command it was part of, is not recorded at all.
 	 */
 	#logToken(input: string, key: VimKey): string | null {
-		if (key.escape || key.ctrl || key.meta || key.tab || key.return) return null;
+		// Enter is the host's and no part of a command, with the one exception the
+		// engine itself takes: an armed `r` reads it as the character to write, so
+		// `r<CR>` is a two-key command and its redo has to carry the second key.
+		// Without it the redo was a bare `r`, which `.` re-armed and left waiting.
+		if (key.return) return this.#pendingChar === "r" ? "\r" : null;
+		if (key.escape || key.ctrl || key.meta || key.tab) return null;
 		if (key.backspace) return "h"; // in NORMAL and in visual, vim's <BS> is `h`
 		if (key.delete) return "x";
 		if (key.upArrow) return "k";

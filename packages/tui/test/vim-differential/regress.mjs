@@ -920,6 +920,19 @@ const CASES = [
 	[["r", "\r"], "a\n\nb", 2],
 	[["r", "\r", "x"], "abcd", 1],
 	[["r", "\r", "u"], "abcd", 1],
+	// The redo of `r<CR>` carries the Enter: `.` splits again, and the key after it
+	// is a command. It used to repeat nothing and leave an `r` armed.
+	[["r", "\r", "."], "abcdefgh", 2],
+	[["r", "\r", ".", "x"], "abcdefgh", 2],
+	[["x", "l", "r", "\r", "."], "abcdefgh", 2],
+	[["2", "r", "\r", "."], "abcdefgh", 1],
+	[["r", "\r", "2", "."], "abcdefgh", 1],
+	// <BS> and <Del> on an empty `/` line abandon it (the next key is a command),
+	// and <Del> at the end of a typed pattern is a <BS>.
+	[["/", "\x7f", "G"], '"ab" "cd"', 5],
+	[["/", "\x1b[3~", "G"], '"ab" "cd"', 5],
+	[["/", "b", "a", "\x1b[3~", "r", "\r"], "foo bar foo baz", 0],
+	[["/", "b", "a", "\x7f", "\x7f", "\x7f", "x"], "foo bar foo baz", 0],
 	// `g*`/`g#` are the same search and `dg*` the same range: `nv_ident` reads
 	// `cap->cmdchar == 'g'` only to decide on the anchor, and never asks whether an
 	// operator is waiting. The glued runs are the two positions the spellings are

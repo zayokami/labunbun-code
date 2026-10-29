@@ -512,4 +512,60 @@ describe("a denial with a sentence", () => {
 		expect(await cleared).toBe(false);
 		expect(current()).toBeNull();
 	});
+	test("a second answer to the same dialog does not strand the request behind it", async () => {
+		// A held key, or two keys in one read, reach the dialog's handler before
+		// it has re-rendered onto the next request, so the first request's resolve
+		// is called twice. The second call used to shift the NEXT request off the
+		// queue unanswered: its tool call waited forever and clear() could not
+		// reach it.
+		const { queue, current } = harness();
+		const first = queue.request("Bash", { command: "ls" });
+		let secondSettled = false;
+		const second = queue.request("Bash", { command: "rm -rf build" }).then((reply) => {
+			secondSettled = true;
+			return reply;
+		});
+		const dialog = current();
+
+		dialog?.resolve(true, false);
+		dialog?.resolve(true, false);
+		expect(await first).toBe(true);
+		await Promise.resolve();
+
+		expect(secondSettled).toBe(false);
+		expect(current()?.inputPreview).toContain("rm -rf build");
+		current()?.resolve(false, false);
+		expect(await second).toBe(false);
+		expect(current()).toBeNull();
+	});
+
+	test("an answer to a dialog whose ask was withdrawn leaves the next request alone", async () => {
+		const { queue, current } = harness();
+		const controller = new AbortController();
+		const withdrawn = queue.request("Bash", { command: "ls" }, undefined, controller.signal);
+		const waiting = queue.request("Bash", { command: "pwd" });
+		const stale = current();
+
+		controller.abort();
+		expect(await withdrawn).toBe(false);
+		stale?.resolve(true, false); // the user's keypress lands on the dialog that just left
+
+		expect(current()?.inputPreview).toContain("pwd");
+		current()?.resolve(true, false);
+		expect(await waiting).toBe(true);
+	});
+
+	test("every request gets a dialog id of its own, even for the same tool", () => {
+		// The REPL keys the dialog on this: two asks for Bash in a row must remount it
+		// so the highlight and any half-typed feedback do not carry across.
+		const { queue, current } = harness();
+		queue.request("Bash", { command: "a" });
+		queue.request("Bash", { command: "b" });
+		const first = current()?.callId;
+
+		current()?.resolve(true, false);
+
+		expect(current()?.callId).toBeDefined();
+		expect(current()?.callId).not.toBe(first);
+	});
 });

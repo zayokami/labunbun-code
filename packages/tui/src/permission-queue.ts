@@ -91,11 +91,14 @@ interface PendingRequest {
 	input: unknown;
 	/** Who raised it, when that was not this session (see `request`). */
 	source?: string;
+	/** Tells this request from every other, including an earlier one for the same tool. */
+	id: number;
 	resolve: (reply: PermissionReply) => void;
 }
 
 export function createPermissionQueue(options: PermissionRequestQueueOptions): PermissionRequestQueue {
 	const pending: PendingRequest[] = [];
+	let nextId = 0;
 
 	const show = (): void => {
 		const next = pending[0];
@@ -104,7 +107,10 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			return;
 		}
 		options.show({
-			callId: `perm-${next.toolName}`,
+			// Unique per request, not per tool: the REPL keys the dialog on it, and two
+			// asks for the same tool back to back must not share a highlight, an open
+			// feedback field or its text.
+			callId: `perm-${next.toolName}-${next.id}`,
 			toolName: next.toolName,
 			inputPreview: options.preview(next.toolName, next.input),
 			inputFull: options.fullPreview?.(next.toolName, next.input),
@@ -113,6 +119,12 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			queueLength: pending.length,
 			source: next.source,
 			resolve: (allow, alwaysAllow, alwaysAsk, message) => {
+				// This dialog's own request must still be the one at the head. A second
+				// answer (a key repeat the handler heard before it re-rendered) or one
+				// that lands after an abort withdrew the ask would otherwise shift the
+				// *next* request off the queue unanswered, and its caller would wait
+				// forever.
+				if (pending[0] !== next) return;
 				pending.shift();
 				if (allow && alwaysAllow) {
 					options.onAlwaysAllow?.(next.toolName, next.input);
@@ -181,7 +193,7 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 					}
 					settle(false);
 				};
-				const entry: PendingRequest = { toolName, input, source, resolve: settle };
+				const entry: PendingRequest = { toolName, input, source, id: nextId++, resolve: settle };
 				pending.push(entry);
 				signal?.addEventListener("abort", onAbort, { once: true });
 				show();

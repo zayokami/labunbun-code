@@ -11,6 +11,7 @@ import { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize
 import { applyFileCompletion, currentAtWord, filterFiles } from "../prompt-files.ts";
 import { hintLine } from "../shortcuts.ts";
 import { type Theme, useTheme } from "../theme.ts";
+import { nextChar } from "../vim.ts";
 import { OnScreenKeyboard } from "./OnScreenKeyboard.tsx";
 
 /** Rows the slash list shows before it scrolls. */
@@ -990,8 +991,12 @@ function lineEndOf(text: string, lineIndex: number): number {
 	return offset;
 }
 
-/** Render one line with the vim selection range and cursor position highlighted. */
-function renderLineWithCursorAndSelection(
+/**
+ * Render one line with the vim selection range and cursor position highlighted.
+ * Exported for its own test: the escape codes around the caret are invisible in a
+ * non-TTY frame, and where they fall is the whole of what it has to get right.
+ */
+export function renderLineWithCursorAndSelection(
 	state: { text: string; cursor: number },
 	lineIndex: number,
 	cursorCol: number,
@@ -1012,11 +1017,16 @@ function renderLineWithCursorAndSelection(
 		// Cursor-only rendering.
 		if (state.cursor < lineStartPos || state.cursor > lineEndPos) return line;
 		const col = cursorCol;
+		// The whole character under the caret, not one code unit: an emoji is two
+		// of them, and highlighting the first alone puts the escape codes between
+		// the halves of the pair, which the terminal receives as two broken
+		// characters. `nextChar` is the engine's own boundary (pair, mark cluster).
+		const next = col < line.length ? Math.min(line.length, nextChar(line, col)) : col;
 		return (
 			<>
 				{line.slice(0, col)}
-				<Text inverse>{line.slice(col, col + 1) || " "}</Text>
-				{line.slice(col + 1)}
+				<Text inverse>{line.slice(col, next) || " "}</Text>
+				{line.slice(next)}
 			</>
 		);
 	}
@@ -1033,12 +1043,13 @@ function renderLineWithCursorAndSelection(
 	if (state.cursor >= lineStartPos && state.cursor <= lineEndPos && state.cursor >= selStart && state.cursor < selEnd) {
 		const relCursor = state.cursor - lineStartPos - midStart;
 		if (relCursor >= 0 && relCursor < middle.length) {
+			const nextCursor = Math.min(middle.length, nextChar(middle, relCursor));
 			pieces.push(
 				<Text inverse key="c">
-					{middle.slice(relCursor, relCursor + 1)}
+					{middle.slice(relCursor, nextCursor)}
 				</Text>,
 			);
-			pieces.push(middle.slice(relCursor + 1));
+			pieces.push(middle.slice(nextCursor));
 		} else {
 			pieces.push(middle);
 		}

@@ -361,6 +361,28 @@ describe("operators and edits", () => {
 		expect(run("abcd", 1, ["f", "CR", "x"])).toEqual({ text: "acd", cursor: 1 });
 	});
 
+	test("`.` repeats r<CR>, and leaves nothing armed behind it", () => {
+		// Measured on vim 9.1 (differential, 2026-10): `r<CR>.` on "abcdefgh" at 2
+		// gives "ab\n\nefgh" at 4, and `xlr<CR>.` on the same gives "abd\n\ngh" at 5.
+		// The log used to drop the Enter, so the redo was a bare `r`: `.` did
+		// nothing and left an `r` waiting, which turned the next key into the
+		// character to write.
+		const run = (text: string, cursor: number, keys: Array<string | "CR">) => {
+			const e = editor(text, cursor);
+			for (const k of keys) {
+				if (k === "CR") e.engine.handleKey("\r", e.key({ return: true }));
+				else e.engine.handleKey(k, e.key());
+			}
+			return { text: e.state.text, cursor: e.state.cursor };
+		};
+		expect(run("abcdefgh", 2, ["r", "CR", "."])).toEqual({ text: "ab\n\nefgh", cursor: 4 });
+		expect(run("abcdefgh", 2, ["x", "l", "r", "CR", "."])).toEqual({ text: "abd\n\ngh", cursor: 5 });
+		// Nothing is left waiting: the key after the `.` is a command, not a character.
+		expect(run("abcdefgh", 2, ["r", "CR", ".", "x"])).toEqual({ text: "ab\n\nfgh", cursor: 4 });
+		// The count rides along with the redo.
+		expect(run("abcdefgh", 1, ["2", "r", "CR", "."])).toEqual({ text: "a\n\nfgh", cursor: 3 });
+	});
+
 	test("~ toggles case and advances (a→A, B→b)", () => {
 		const e = editor("aBc", 0);
 		e.engine.handleKey("~", e.key());
@@ -1200,6 +1222,36 @@ describe("search", () => {
 		expect(back.engine.handleKey("", back.key({ escape: true }))).toBe(true);
 		expect(back.engine.searchLine).toBeNull();
 		expect(back.state.cursor).toBe(0);
+	});
+
+	test("<BS> or <Del> on an empty line leaves it, and <Del> at the end is a <BS>", () => {
+		// Measured on vim 9.1: `/<BS>G` abandons the command line and the `G` is a
+		// command (cursor 0 on a one-line buffer), and `/ba<Del>r<CR>` searches
+		// `br`. The line used to stay open with the keys typed into a pattern that
+		// nothing drew.
+		for (const exit of [{ backspace: true }, { delete: true }] as const) {
+			const e = editor('"ab" "cd"', 5);
+			e.engine.handleKey("/", e.key());
+			expect(e.engine.handleKey("", e.key(exit))).toBe(true);
+			expect(e.engine.searchLine).toBeNull();
+			e.engine.handleKey("G", e.key());
+			expect(e.state.cursor).toBe(0);
+		}
+
+		const del = editor("foo bar foo baz", 0);
+		for (const ch of "/ba") del.engine.handleKey(ch, del.key());
+		del.engine.handleKey("", del.key({ delete: true }));
+		expect(del.engine.searchLine).toEqual({ forward: true, text: "b" });
+		del.engine.handleKey("r", del.key());
+		expect(del.engine.searchLine).toEqual({ forward: true, text: "br" });
+		del.engine.handleKey("", del.key({ return: true }));
+		expect(del.state.cursor).toBe(0); // no `br` in the buffer: the caret stays
+
+		// A non-empty line takes one key per character and stays open until it is empty.
+		const two = editor("abc", 0);
+		for (const ch of "/x") two.engine.handleKey(ch, two.key());
+		two.engine.handleKey("", two.key({ backspace: true }));
+		expect(two.engine.searchLine).toEqual({ forward: true, text: "" });
 	});
 
 	test("a count steps over matches and wraps round them", () => {

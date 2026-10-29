@@ -542,7 +542,13 @@ export function REPL({
 	const [shortcutsOpen, setShortcutsOpen] = useState(false);
 	const [transcriptMode, setTranscriptMode] = useState(false);
 	const [transcriptOffset, setTranscriptOffset] = useState(0);
-	const TRANSCRIPT_PAGE = 10;
+	// Entries on the transcript screen, and entries a page key moves by. On a TTY
+	// the frame is capped (see `frameCap`), so the window is what fits under the
+	// cap at two rows an entry — the least one takes, margin included — and a
+	// page never moves further than the window shows: a step bigger than the
+	// window would skip entries that were never on screen.
+	const transcriptWindow = frameCap === undefined ? 25 : Math.max(1, Math.min(25, Math.floor((frameCap - 1) / 2)));
+	const TRANSCRIPT_PAGE = Math.min(10, transcriptWindow);
 	// The watch panel's open state, and only that: what it draws comes from the
 	// store's `backgroundShells`, so there is no second copy of the shells to keep
 	// in step. It is kept — not remounted — across a visit to the transcript, so a
@@ -893,7 +899,7 @@ export function REPL({
 	// <Static>, whose index is what stops it printing the sealed rows again; a
 	// remount would empty the index, and the rows would come back as a second
 	// copy in the terminal's scrollback every time the transcript was closed.
-	const windowSize = Math.min(entries.length, 25);
+	const windowSize = Math.min(entries.length, transcriptWindow);
 	const end = Math.max(windowSize, entries.length - transcriptOffset);
 	const start = end - windowSize;
 	const windowEntries = entries.slice(start, end);
@@ -964,13 +970,20 @@ export function REPL({
 				    sealed rows from being printed again. */}
 				{dialog && !transcriptMode ? (
 					<PermissionDialog
+						// Keyed on the request, not the slot: the next queued ask is a new
+						// dialog, and one that inherited this one's highlight, open feedback
+						// field or typed sentence would answer for the wrong call.
+						key={dialog.callId}
 						toolName={dialog.toolName}
 						inputPreview={dialog.inputPreview}
 						inputFull={dialog.inputFull}
+						diff={dialog.diff}
 						options={dialog.options}
 						queueLength={dialog.queueLength}
 						source={dialog.source}
-						onResolve={(allow, alwaysAllow, alwaysAsk) => dialog.resolve(allow, alwaysAllow, alwaysAsk)}
+						onResolve={(allow, alwaysAllow, alwaysAsk, message) =>
+							dialog.resolve(allow, alwaysAllow, alwaysAsk, message)
+						}
 						pad={pad}
 					/>
 				) : null}
@@ -1031,7 +1044,12 @@ export function REPL({
 			    replaces the live one: the live screen has to stay mounted (see
 			    above), and three children in the same order on both screens keep
 			    React matching the prompt by position. */}
-			<Box display={transcriptMode ? "flex" : "none"} flexDirection="column">
+			{/* `flexShrink={0}`: under the frame cap a shrinkable box is squeezed to
+			    the cap and then squeezes every entry in it, so each answer is cut to
+			    a handful of its lines. Kept at its natural height, the box overflows
+			    the cap instead and the bottom-anchored outer box clips whole rows off
+			    the top — the oldest lines go, the ones that stay are intact. */}
+			<Box display={transcriptMode ? "flex" : "none"} flexDirection="column" flexShrink={0}>
 				{transcriptMode ? (
 					<>
 						{/* full output here — reading back is exactly when truncation hurts */}

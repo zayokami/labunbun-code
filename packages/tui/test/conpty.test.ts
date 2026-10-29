@@ -193,10 +193,30 @@ describe("chunkWritesForConPTY", () => {
 		});
 	});
 
-	test("stripping happens before the cut, so the pieces join to the stripped data", () => {
+	test("stripping happens before the cut: an erase that straddles the budget is still removed", () => {
+		// No newline anywhere, so the cut can only fall at the budget, and the
+		// erase is placed so that a cut made first would land inside it: `\x1b[`
+		// ends the first piece and `3J` starts the second. Stripped after the cut,
+		// neither half is the sequence and both would go out, rejoining on the
+		// console as the very erase this exists to keep off it.
 		const { stream, calls } = fakeStream();
 		chunkWritesForConPTY(stream);
-		const data = `${"\x1b[3J" + "y".repeat(200)}\n`.repeat(100); // ~20 KB
+		const data = `${"y".repeat(MAX_CONPTY_WRITE - 2)}\x1b[3J${"z".repeat(100)}`;
+
+		stream.write(data);
+
+		const sent = calls.map(([chunk]) => chunk as string);
+		expect(sent.join("")).toBe(stripScrollbackErase(data));
+		expect(sent.join("")).not.toContain("\x1b[3J");
+		expect(sent.join("")).not.toContain("\x1b");
+		// Cut at the budget of what actually goes out, not of what came in.
+		expect(sent.map((chunk) => chunk.length)).toEqual([MAX_CONPTY_WRITE, 98]);
+	});
+
+	test("an erase on every line is stripped, and the pieces still cut at newlines", () => {
+		const { stream, calls } = fakeStream();
+		chunkWritesForConPTY(stream);
+		const data = `\x1b[3J${"y".repeat(200)}\n`.repeat(100); // ~20 KB
 
 		stream.write(data);
 

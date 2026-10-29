@@ -9,7 +9,13 @@ import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import type React from "react";
 import { MessageList, StreamingPreview } from "../src/components/MessageList.tsx";
-import { MODE_BADGE_COLOR, modeBadgeColor, PromptInput, placeholderCaret } from "../src/components/PromptInput.tsx";
+import {
+	MODE_BADGE_COLOR,
+	modeBadgeColor,
+	PromptInput,
+	placeholderCaret,
+	renderLineWithCursorAndSelection,
+} from "../src/components/PromptInput.tsx";
 import type { PadPromptRef } from "../src/pad.ts";
 import { DARK_THEME, type Theme, ThemeContext } from "../src/theme.ts";
 
@@ -1150,5 +1156,51 @@ describe("the permission mode badge", () => {
 		await delay(30);
 		expect(flat(lastFrame())).toContain("[Plan] Enter send");
 		unmount();
+	});
+});
+
+describe("the caret is one whole character", () => {
+	// Written as a code point: a combining mark typed into source is one save away from
+	// being folded into its letter by an editor.
+	const ACUTE = String.fromCharCode(0x301);
+	/** The pieces the line is drawn as: text before, the highlighted run, text after. */
+	function pieces(node: unknown): unknown[] {
+		return (node as { props: { children: unknown[] } }).props.children;
+	}
+	const inverse = (node: unknown) => (node as { props: { children: string } }).props.children;
+
+	test("an emoji under the caret is highlighted as a pair, never as its first half", () => {
+		// Highlighting one code unit put the escape codes between the halves of the
+		// pair, and the terminal received two broken characters in place of one.
+		const [before, caret, after] = pieces(renderLineWithCursorAndSelection({ text: "a😀b", cursor: 1 }, 0, 1, null));
+		expect(before).toBe("a");
+		expect(inverse(caret)).toBe("😀");
+		expect(after).toBe("b");
+	});
+
+	test("a base letter and its combining mark are one character", () => {
+		const [before, caret, after] = pieces(
+			renderLineWithCursorAndSelection({ text: `e${ACUTE}x`, cursor: 0 }, 0, 0, null),
+		);
+		expect(before).toBe("");
+		expect(inverse(caret)).toBe(`e${ACUTE}`);
+		expect(after).toBe("x");
+	});
+
+	test("past the last character the caret is still a blank cell", () => {
+		const [before, caret, after] = pieces(renderLineWithCursorAndSelection({ text: "ab", cursor: 2 }, 0, 2, null));
+		expect(before).toBe("ab");
+		expect(inverse(caret)).toBe(" ");
+		expect(after).toBe("");
+	});
+
+	test("inside a selection the caret keeps its whole character too", () => {
+		// A selection comes back as a flat list of pieces rather than a fragment. The
+		// emoji is selected whole and the caret stands on it, so everything
+		// highlighted is the pair and nothing of it is left outside.
+		const out = renderLineWithCursorAndSelection({ text: "a😀b", cursor: 1 }, 0, 1, { start: 1, end: 3 });
+		const highlighted = (out as unknown[]).filter((piece) => typeof piece === "object" && piece !== null);
+		expect(highlighted.map(inverse)).toEqual(["😀"]);
+		expect(out).toContain("b");
 	});
 });
