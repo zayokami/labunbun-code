@@ -1,4 +1,4 @@
-export const GAMEPAD_PACKAGE_VERSION = "0.1.0.2";
+export const GAMEPAD_PACKAGE_VERSION = "0.1.0.3";
 
 export { PAD_SWITCH_REPORTS, PAD_SWITCH_STICK, PAD_SWITCH_TRIGGER, padIsActive } from "./activity.ts";
 
