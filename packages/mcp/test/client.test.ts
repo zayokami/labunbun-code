@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { Readable } from "node:stream";
 import { type AgentDeps, type AnyTool, runToolPipeline, sanitizeCwd } from "@labunbun/agent";
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
@@ -653,6 +654,44 @@ describe("sanitizeMcpError", () => {
 		expect(out).toBe("token [redacted] leaked");
 	});
 
+	test("values too short to be credentials are left alone", () => {
+		// `VERBOSE=1` used to turn every "1" in the message into "[redacted]".
+		const flags = {
+			type: "stdio" as const,
+			command: "node",
+			args: [],
+			env: { VERBOSE: "1", MODE: "on", LEVEL: "dev" },
+		};
+		const message = "exited with code 1 after 1500ms in dev mode, on";
+		expect(sanitizeMcpError(message, flags)).toBe(message);
+	});
+
+	test("a middling value is redacted as a whole token, not inside a word or a number", () => {
+		const middling = {
+			type: "stdio" as const,
+			command: "node",
+			args: [],
+			env: { PORT: "3000", FLAG: "true", PASSWORD: "abc123" },
+		};
+		expect(sanitizeMcpError("timed out after 3000ms", middling)).toBe("timed out after 3000ms");
+		expect(sanitizeMcpError("an untrue statement", middling)).toBe("an untrue statement");
+		// Where it stands alone it is still the value, and it goes — every time.
+		expect(sanitizeMcpError("PASSWORD=abc123 rejected, then abc123 again", middling)).toBe(
+			"PASSWORD=[redacted] rejected, then [redacted] again",
+		);
+		expect(sanitizeMcpError("port 3000 refused", middling)).toBe("port [redacted] refused");
+	});
+
+	test("a long value is redacted wherever it appears, inside a longer string too", () => {
+		const out = sanitizeMcpError("GET /mcp?key=sk-secret-value-12345&x=1 and xsk-secret-value-12345y", stdioConfig);
+		expect(out).toBe("GET /mcp?key=[redacted]&x=1 and x[redacted]y");
+	});
+
+	test("a value with regex characters in it is matched literally", () => {
+		const odd = { type: "stdio" as const, command: "node", args: [], env: { PASS: "p.s+1" } };
+		expect(sanitizeMcpError("bad p.s+1, not pxs+1 or p.ss1", odd)).toBe("bad [redacted], not pxs+1 or p.ss1");
+	});
+
 	test("a config with no env or headers passes the message through untouched", () => {
 		expect(sanitizeMcpError("plain failure", { command: "node" } as never)).toBe("plain failure");
 	});
@@ -862,6 +901,49 @@ describe("loadApprovedMcpServers / approveMcpServer", () => {
 		expect(warnings.join("\n")).toContain("moved to");
 		expect(warnings.join("\n")).toContain("re-approved");
 	});
+
+	// Valid JSON is not the same as a valid store. `[]` and `7` read back as "nothing
+	// approved" with no warning, and approving over `[]` returned normally while
+	// persisting nothing (a property on an array does not survive JSON.stringify);
+	// `null` and `7` threw out of the approve command.
+	const WRONG_SHAPES = ["[]", "null", "7", '"alpha"', '{"approvedMcpServers":"alpha"}', '{"approvedMcpServers":[1]}'];
+
+	test("a store of the wrong shape is damaged, not an empty set", () => {
+		for (const body of WRONG_SHAPES) {
+			const { cwd, home } = dirs("lbb-mcp-approve-shape-");
+			const storePath = join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
+			mkdirSync(dirname(storePath), { recursive: true });
+			writeFileSync(storePath, body);
+
+			const status = loadApprovedMcpServersWithStatus(cwd, home);
+
+			expect(status.approved.size).toBe(0);
+			expect(status.warning).toContain("damaged");
+			expect(readFileSync(storePath, "utf8")).toBe(body);
+		}
+	});
+
+	test("approving over a store of the wrong shape moves it aside and keeps the approval", () => {
+		for (const body of WRONG_SHAPES) {
+			const { cwd, home } = dirs("lbb-mcp-approve-shape-write-");
+			const storePath = join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
+			mkdirSync(dirname(storePath), { recursive: true });
+			writeFileSync(storePath, body);
+
+			const original = console.error;
+			console.error = () => {};
+			try {
+				approveMcpServer(cwd, "alpha", home);
+			} finally {
+				console.error = original;
+			}
+
+			expect(loadApprovedMcpServers(cwd, home).has("alpha")).toBe(true);
+			const backups = readdirSync(dirname(storePath)).filter((name) => name.startsWith("mcp-approved.json.corrupt-"));
+			expect(backups).toHaveLength(1);
+			expect(readFileSync(join(dirname(storePath), backups[0]), "utf8")).toBe(body);
+		}
+	});
 });
 
 describe("disconnectAllMcpServers", () => {
@@ -1009,4 +1091,46 @@ describe("the confine hook over the stdio spawn", () => {
 		expect(connection.error).not.toContain("must not be asked");
 		expect(asked).toBe(0);
 	}, 20_000);
+});
+
+/**
+ * A stdio server's stderr belongs to the client, not to the terminal.
+ *
+ * The SDK's default hands the child this process's own stderr, so a server that
+ * logs (most do) wrote over the screen the TUI was drawing. Piped, the transport
+ * keeps the bytes in a stream of its own — and a stream nobody reads fills, and a
+ * server blocked writing a log line stops answering. So the pipe has to be there
+ * and has to be drained.
+ */
+describe("a stdio server's stderr", () => {
+	test("is piped into the transport and drained, and the server keeps answering", async () => {
+		const noise = 400_000;
+		const connection = await connectMcpServer(
+			"fixture",
+			{ command: process.execPath, args: [FIXTURE_SERVER, "stderr-noise", String(noise)] },
+			{ timeoutMs: 15_000 },
+		);
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+
+		// Inherited, the child's stderr is the terminal's and the transport has no
+		// stream for it at all.
+		const stderr = (connection.client.transport as StdioClientTransport).stderr as Readable | null;
+		expect(stderr).not.toBeNull();
+		if (stderr === null) throw new Error("unreachable");
+		expect(stderr.readableFlowing).toBe(true);
+
+		let seen = 0;
+		stderr.on("data", (chunk: Buffer) => {
+			seen += chunk.length;
+		});
+
+		// A second burst, on a call: the pipe is drained for the life of the connection.
+		const echo = connection.tools.find((t) => t.name === "mcp__fixture__echo");
+		if (!echo) throw new Error("fixture echo tool missing");
+		const result = await echo.call({ text: "hi" }, callCtx());
+		expect(resultText(result)).toBe("echo: hi");
+		await waitFor(() => seen >= noise, 10_000);
+		expect(stderr.readableLength).toBe(0);
+		await disconnectAllMcpServers([connection]);
+	}, 30_000);
 });

@@ -19,7 +19,9 @@
  * accepted and the first list refused — the connect-succeeds, discovery-fails
  * shape. `exit-marker <path>` writes that path when this server's stdin
  * reaches EOF: the server's own account of the client having let it go, which
- * is the only closure it can observe from outside.
+ * is the only closure it can observe from outside. `stderr-noise <bytes>`
+ * writes that many bytes of log lines to stderr at start-up and again on every
+ * `echo` — a server that logs where a terminal would be listening.
  */
 import { writeFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -53,6 +55,15 @@ if (exitMarker) {
 	process.stdin.on("end", markReleased);
 	process.on("exit", markReleased);
 }
+
+const noiseIndex = process.argv.indexOf("stderr-noise");
+const noiseBytes = noiseIndex === -1 ? 0 : Number(process.argv[noiseIndex + 1]);
+const NOISE_LINE = "fixture log line that nobody asked for\n";
+/** A burst of log lines on stderr, if the run asked for one. */
+function makeNoise(): void {
+	if (noiseBytes > 0) process.stderr.write(NOISE_LINE.repeat(Math.ceil(noiseBytes / NOISE_LINE.length)));
+}
+makeNoise();
 
 const BASE_TOOLS = [
 	{
@@ -189,6 +200,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
 	if (request.params.name === "echo") {
 		const text = String((request.params.arguments as { text?: string })?.text ?? "");
+		makeNoise();
 		return { content: [{ type: "text", text: `echo: ${text}` }] };
 	}
 	if (request.params.name === "sleep") {

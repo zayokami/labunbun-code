@@ -46,6 +46,17 @@ export const CONNECT_TIMEOUT_MS = 30_000;
  */
 export const CALL_TIMEOUT_MS = 60_000;
 
+/** An env or header value shorter than this is not treated as a secret at all. */
+const MIN_SECRET_LENGTH = 4;
+
+/** From this length a secret is redacted wherever it appears; below it, only as a whole token. */
+const ANYWHERE_SECRET_LENGTH = 8;
+
+/** `secret` where no letter or digit touches it on either side, every occurrence. */
+function wholeToken(secret: string): RegExp {
+	return new RegExp(`(?<![A-Za-z0-9])${secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "g");
+}
+
 /**
  * Strip secret *values* out of a message, keeping key names.
  *
@@ -58,17 +69,27 @@ export const CALL_TIMEOUT_MS = 60_000;
 export function sanitizeMcpError(message: string, config: McpServerConfig): string {
 	const secrets = new Set<string>();
 	const record = config as { env?: Record<string, string>; headers?: Record<string, string> };
+	// Values this short are flags, levels and ports (`1`, `on`, `dev`), not
+	// credentials, and redacting them garbles the message for nothing: with
+	// `VERBOSE=1` every "1" in "exited with code 1 after 1500ms" went.
 	for (const value of Object.values(record.env ?? {})) {
-		if (value) secrets.add(value);
+		if (value && value.length >= MIN_SECRET_LENGTH) secrets.add(value);
 	}
 	for (const value of Object.values(record.headers ?? {})) {
-		if (value) secrets.add(value);
+		if (value && value.length >= MIN_SECRET_LENGTH) secrets.add(value);
 	}
 
 	let out = message;
 	// Longest first, so a value that contains another is redacted whole.
 	for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
-		out = out.split(secret).join("[redacted]");
+		// A long value is a token or a key: it appears inside URLs and larger
+		// strings, and it goes wherever it is found. A middling one (a password, a
+		// word like `true`) goes only where it stands alone — not inside a
+		// longer word or number, where it is most likely just the same letters.
+		out =
+			secret.length >= ANYWHERE_SECRET_LENGTH
+				? out.split(secret).join("[redacted]")
+				: out.replace(wholeToken(secret), "[redacted]");
 	}
 	return out;
 }
@@ -666,7 +687,21 @@ async function stdioTransport(
 	const spawn: McpStdioSpawn = confine
 		? await confine({ command: params.command, args: params.args, env: params.env, cwd: params.cwd })
 		: { command: params.command, args: params.args, env: params.env, cwd: params.cwd };
-	return new StdioClientTransport({ command: spawn.command, args: spawn.args, env: spawn.env, cwd: spawn.cwd });
+	// The SDK hands the child this process's own stderr unless told otherwise, and
+	// a server that logs there (most do) would write straight over the screen the
+	// TUI is drawing. Piped, the transport copies it into a stream of its own,
+	// which nobody reads — so it is drained here: an unread pipe fills, and a
+	// server that blocks writing a log line stops answering requests.
+	const transport = new StdioClientTransport({
+		command: spawn.command,
+		args: spawn.args,
+		env: spawn.env,
+		cwd: spawn.cwd,
+		stderr: "pipe",
+	});
+	// A `data` listener is what puts the stream into flowing mode; the chunks go nowhere.
+	transport.stderr?.on("data", () => {});
+	return transport;
 }
 
 /** Connect to one MCP server and adapt its tools. Never throws. */
@@ -985,6 +1020,23 @@ function approvalStorePath(cwd: string, home: string): string {
 	return join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
 }
 
+/**
+ * Why a parsed approval store is not the `{ "approvedMcpServers": [names] }`
+ * record it should be, or `undefined` when it is.
+ *
+ * Valid JSON of another shape is damage like any other: `[]` or `7` read as "no
+ * approvals" without a word, and writing over one lost the new approval — a
+ * property set on an array does not survive `JSON.stringify`.
+ */
+function approvalShapeProblem(parsed: unknown): string | undefined {
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return "not a JSON object";
+	const names = (parsed as { approvedMcpServers?: unknown }).approvedMcpServers;
+	if (names !== undefined && (!Array.isArray(names) || names.some((name) => typeof name !== "string"))) {
+		return "approvedMcpServers is not a list of names";
+	}
+	return undefined;
+}
+
 /** What reading the approval store produced, and why an empty answer is empty. */
 export interface McpApprovalStatus {
 	approved: Set<string>;
@@ -1020,8 +1072,10 @@ export function loadApprovedMcpServersWithStatus(cwd: string, home: string = hom
 		};
 	}
 	try {
-		const parsed = JSON.parse(text) as { approvedMcpServers?: string[] };
-		return { approved: new Set(parsed.approvedMcpServers ?? []) };
+		const parsed: unknown = JSON.parse(text);
+		const problem = approvalShapeProblem(parsed);
+		if (problem !== undefined) throw new Error(problem);
+		return { approved: new Set((parsed as { approvedMcpServers?: string[] }).approvedMcpServers ?? []) };
 	} catch (error) {
 		return {
 			approved: new Set(),
@@ -1077,7 +1131,12 @@ export function approveMcpServer(cwd: string, serverName: string, home: string =
 	let existing: Record<string, unknown> = {};
 	let parseFailure: unknown;
 	try {
-		if (existsSync(path)) existing = JSON.parse(readFileSync(path, "utf8"));
+		if (existsSync(path)) {
+			const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+			const problem = approvalShapeProblem(parsed);
+			if (problem !== undefined) throw new Error(problem);
+			existing = parsed as Record<string, unknown>;
+		}
 	} catch (error) {
 		parseFailure = error;
 	}
