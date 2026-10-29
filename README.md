@@ -309,6 +309,7 @@ The tool restores the two axes that were in force before you entered plan mode.
 | `tritanopia-dark` | Blue and yellow color blindness. |
 | `spiderman` | Red and blue. |
 | `splatoon` | Green and magenta. |
+| `halloween` | Pumpkin orange and witch purple. |
 
 The key `theme` in the settings file selects a theme. The value `auto` asks your terminal for its background color. The tool asks for the OSC 11 color first. The tool then asks for `COLORFGBG`. A terminal that does not answer uses `dark`.
 

@@ -18,9 +18,9 @@ const ALL = [...BUILT_IN_THEMES.values()];
 const STATE_TOKENS = ["success", "warning", "error", "permission", "accent"] as const;
 
 describe("built-in theme registry", () => {
-	test("registers all eight themes, addressable by name", () => {
-		expect(ALL).toHaveLength(8);
-		expect(BUILT_IN_THEME_NAMES).toHaveLength(8);
+	test("registers all nine themes, addressable by name", () => {
+		expect(ALL).toHaveLength(9);
+		expect(BUILT_IN_THEME_NAMES).toHaveLength(9);
 		for (const name of BUILT_IN_THEME_NAMES) {
 			expect(resolveBuiltInTheme(name)?.name).toBe(name);
 		}

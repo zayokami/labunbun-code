@@ -5,6 +5,7 @@
  */
 import { DEUTERANOPIA_DARK, TRITANOPIA_DARK } from "./colorblind.ts";
 import { DARK_THEME } from "./dark.ts";
+import { HALLOWEEN } from "./halloween.ts";
 import { HIGH_CONTRAST_DARK, HIGH_CONTRAST_LIGHT } from "./high-contrast.ts";
 import { LIGHT_THEME } from "./light.ts";
 import { SPIDERMAN } from "./spiderman.ts";
@@ -29,6 +30,7 @@ const THEMES: readonly Theme[] = [
 	TRITANOPIA_DARK,
 	SPIDERMAN,
 	SPLATOON,
+	HALLOWEEN,
 ];
 
 export const BUILT_IN_THEMES: ReadonlyMap<string, Theme> = new Map(THEMES.map((theme) => [theme.name, theme]));
@@ -57,6 +59,7 @@ export {
 export {
 	DARK_THEME,
 	DEUTERANOPIA_DARK,
+	HALLOWEEN,
 	HIGH_CONTRAST_DARK,
 	HIGH_CONTRAST_LIGHT,
 	LIGHT_THEME,
