@@ -104,15 +104,24 @@ export function filesystemFoldsCase(anchor: string): boolean {
 }
 
 // Long-form design notes: docs/dev/tools.md
-/** Resolve the links in the part of `absolutePath` that exists, and keep the rest verbatim. */
-function resolveSymlinks(absolutePath: string): string {
+/**
+ * Resolve the links in the part of `absolutePath` that exists, and keep the rest verbatim.
+ *
+ * `realpath` is the resolver to use. The default is Node's JavaScript one, which
+ * leaves a Windows 8.3 short name as it was handed; {@link expandShortNames}
+ * passes the native one, which expands them.
+ */
+function resolveSymlinks(
+	absolutePath: string,
+	realpath: (path: string) => string = (path) => realpathSync(path),
+): string {
 	const missing: string[] = [];
 	let current = absolutePath;
 	for (;;) {
 		try {
 			// A Windows realpath can come back extended-length prefixed; strip it
 			// so the result still compares equal to the paths callers pass in.
-			const real = realpathSync(current).replace(/^\\\\\?\\/, "");
+			const real = realpath(current).replace(/^\\\\\?\\/, "");
 			return missing.length > 0 ? join(real, ...missing.reverse()) : real;
 		} catch {
 			const parent = dirname(current);
@@ -170,18 +179,17 @@ export function guardPathContainment(inputPath: string, cwd: string, operation: 
 /** Directories the agent must not rewrite, whatever the permission mode says. */
 const PROTECTED_SEGMENTS = [".git"] as const;
 
-// Long-form design notes: docs/dev/tools.md
-/** Verify a path the agent intends to write: contained in cwd, and not inside version-control metadata. */
-export function guardWritablePath(inputPath: string, cwd: string, operation: string): string {
-	const resolved = guardPathContainment(inputPath, cwd, operation);
-	const canonicalRoot = resolveCanonical(cwd, cwd);
-	const fold = filesystemFoldsCase(canonicalRoot) ? (value: string) => value.toLowerCase() : (value: string) => value;
-	const root = fold(canonicalRoot.replace(/\/$/, ""));
-	const folded = fold(resolved);
-	// Containment above guarantees the prefix, so the slice is the workspace-
-	// relative path — including any nested repository's own .git.
-	const relative = folded === root ? "" : folded.slice(root.length + 1);
-	const protectedSegment = relative.split("/").find((segment) => {
+/**
+ * The first protected segment of `path` below `root`, or `undefined`. Both are
+ * canonical, and `fold` is the case rule the volume asks for. Containment is the
+ * caller's to have established, so the slice is the workspace-relative path —
+ * including any nested repository's own .git.
+ */
+function protectedSegmentBelow(root: string, path: string, fold: (value: string) => string): string | undefined {
+	const foldedRoot = fold(root.replace(/\/$/, ""));
+	const folded = fold(path);
+	const relative = folded === foldedRoot ? "" : folded.slice(foldedRoot.length + 1);
+	return relative.split("/").find((segment) => {
 		if ((PROTECTED_SEGMENTS as readonly string[]).includes(segment)) return true;
 		// The trimmed spelling counts too: a segment that is `.git` once the
 		// dots and spaces at its end are removed is refused as well.
@@ -189,6 +197,50 @@ export function guardWritablePath(inputPath: string, cwd: string, operation: str
 		const trimmed = segment.replace(/[. ]+$/, "");
 		return trimmed !== segment && (PROTECTED_SEGMENTS as readonly string[]).includes(trimmed);
 	});
+}
+
+// Long-form design notes: docs/dev/tools.md
+/**
+ * A canonical path with the Windows 8.3 short names in its existing part
+ * expanded to the long names the directory entries carry. `.git` has the alias
+ * `GIT~1` on a volume that generates short names, and a name-based guard that
+ * only sees the alias lets a write into the real `.git` through. Everywhere
+ * else the answer is the path itself: no other platform has the aliases.
+ */
+function expandShortNames(canonicalPath: string): string {
+	if (process.platform !== "win32") return canonicalPath;
+	return normalizePathSeparators(resolveSymlinks(canonicalPath, (path) => realpathSync.native(path)));
+}
+
+// Long-form design notes: docs/dev/tools.md
+/**
+ * Verify a path the agent intends to write: contained in cwd, and not inside version-control metadata.
+ *
+ * `expandAlias` is the long-name resolver for the second look at the path, and
+ * exists for tests: only Windows has aliases to expand, so a test elsewhere
+ * supplies the mapping a Windows volume would.
+ */
+export function guardWritablePath(
+	inputPath: string,
+	cwd: string,
+	operation: string,
+	expandAlias: (canonicalPath: string) => string = expandShortNames,
+): string {
+	const resolved = guardPathContainment(inputPath, cwd, operation);
+	const canonicalRoot = resolveCanonical(cwd, cwd);
+	const fold = filesystemFoldsCase(canonicalRoot) ? (value: string) => value.toLowerCase() : (value: string) => value;
+	let protectedSegment = protectedSegmentBelow(canonicalRoot, resolved, fold);
+	if (protectedSegment === undefined) {
+		// The spelling the path was given in is not the only one the filesystem
+		// answers to. Looked at again in its long-name form, an alias of `.git`
+		// shows up under its real name. A path that is not under the root in
+		// that form is left to the containment check, which has already passed.
+		const longRoot = expandAlias(canonicalRoot);
+		const longPath = expandAlias(resolved);
+		if (longPath !== resolved && isContainedIn(longPath, longRoot)) {
+			protectedSegment = protectedSegmentBelow(longRoot, longPath, fold);
+		}
+	}
 
 	if (protectedSegment !== undefined) {
 		// The *canonical* name in the message, not the spelling that was refused:

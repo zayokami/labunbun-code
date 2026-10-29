@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -371,6 +371,39 @@ describe("Write + Edit tools", () => {
 			expect(result.isError).toBe(true);
 			expect((result.content[0] as any).text).toContain("version-control metadata");
 			expect(await Bun.file(config).text()).toBe("[core]\n");
+		});
+
+		test("a .git reached through its 8.3 alias GIT~1 is refused by Write and by Edit", async () => {
+			// Windows volumes that generate short names give `.git` a second name.
+			// The policy's `protected` holds the long spelling and the guard used to
+			// compare names as typed, so `GIT~1\hooks\pre-commit` was a free write
+			// into the real hooks directory. A volume without short names has no
+			// alias to refuse, and the test says nothing there.
+			if (process.platform !== "win32") return;
+			const dir = tempDir();
+			const hooks = join(dir, ".git", "hooks");
+			mkdirSync(hooks, { recursive: true });
+			const alias = join(dir, "GIT~1");
+			if (!existsSync(alias)) return;
+			const hook = join(alias, "hooks", "pre-commit");
+
+			const write = createWriteTool(dir, defaultOperations());
+			const wrote = await call(write, { file_path: hook, content: "#!/bin/sh\necho pwned\n" });
+			expect(wrote.isError).toBe(true);
+			expect((wrote.content[0] as any).text).toContain("version-control metadata");
+			expect(existsSync(join(hooks, "pre-commit"))).toBe(false);
+
+			// Read first, through the same alias, so the Edit gate would pass: a refusal
+			// for "not read this session" would hide a guard that let the path by.
+			const sample = join(alias, "hooks", "pre-commit.sample");
+			writeFileSync(join(hooks, "pre-commit.sample"), "# sample\n");
+			const state = new ReadFileState();
+			await call(createReadTool(dir, defaultOperations(), [], state), { file_path: sample });
+			const edit = createEditTool(dir, defaultOperations(), state);
+			const edited = await call(edit, { file_path: sample, old_string: "sample", new_string: "pwned" });
+			expect(edited.isError).toBe(true);
+			expect((edited.content[0] as any).text).toContain("version-control metadata");
+			expect(await Bun.file(join(hooks, "pre-commit.sample")).text()).toBe("# sample\n");
 		});
 
 		test("and a directory that merely starts with .git is still writable", async () => {

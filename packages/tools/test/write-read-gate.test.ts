@@ -227,6 +227,35 @@ describe("Write's read gate", () => {
 		expect(edited.isError, edited.isError ? textOf(edited) : undefined).toBeUndefined();
 	});
 
+	test("a file that is not valid UTF-8 is not overwritten, even after a full read", async () => {
+		// Read showed U+FFFD where the file has other bytes, so nothing the model
+		// writes can carry them; the overwrite would be the end of the original.
+		const dir = tempDir();
+		const bytes = Buffer.concat([Buffer.from("/* "), Buffer.from([0xc4, 0xe3, 0xba, 0xc3]), Buffer.from(" */\n")]);
+		const file = join(dir, "legacy.c");
+		writeFileSync(file, bytes);
+		const { read, write } = toolsFor(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(write, { file_path: file, content: "/* hello */\n" });
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("not valid UTF-8");
+		expect(readFileSync(file).equals(bytes)).toBe(true);
+	});
+
+	test("a file that really contains U+FFFD is valid UTF-8 and is overwritten as before", async () => {
+		const dir = tempDir();
+		const file = existingFile(dir, "literal.txt", "marker �\n");
+		const { read, write } = toolsFor(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(write, { file_path: file, content: "replaced\n" });
+
+		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe("replaced\n");
+	});
+
 	test("without a readState, Write keeps its old behavior", async () => {
 		// The two-argument factory is what a bare embedder or a unit test builds.
 		// The gate is opt-in through the store, so this call must overwrite an

@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
 import { guardWritablePath } from "./containment.ts";
-import { stalenessOf } from "./edit.ts";
+import { decodedLossily, notUtf8, stalenessOf } from "./edit.ts";
 import type { FileStat, Operations } from "./operations.ts";
 import type { ReadFileState } from "./read-file-state.ts";
 import { decideWrite } from "./sandbox/simulated.ts";
@@ -161,6 +161,9 @@ async function readGate(path: string, ops: Operations, readState: ReadFileState)
 		if (isMissing(error)) return null;
 		return `Write: could not read ${path} to confirm it is unchanged since your read (${message(error)}). Nothing was written; read it again and retry.`;
 	}
+	// The model was shown replacement characters where the file has other bytes,
+	// so what it writes cannot carry them: the overwrite would destroy them.
+	if (await decodedLossily(path, ops, content)) return `Write: ${notUtf8(path)}`;
 	const stale = await stalenessOf(path, ops, seen, content);
 	if (stale) {
 		return `Write: ${path} changed since you read it (${stale}). Read it again and retry — Write will not overwrite content that no longer matches what you were shown.`;

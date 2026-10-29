@@ -283,6 +283,89 @@ describe("guardWritablePath", () => {
 	});
 });
 
+/**
+ * `.git` has a second name on a Windows volume that generates 8.3 short names:
+ * `GIT~1`. The guard works on names, so a path spelled through the alias used to
+ * walk straight past it, into the real repository's hooks and config. The
+ * expander the guard looks the path up with is injectable, so the rule is pinned
+ * on every platform with the mapping a Windows volume would supply; the second
+ * block asks a real volume.
+ */
+describe("guardWritablePath and the 8.3 alias of .git", () => {
+	/** What a volume with short names does: `GIT~1` is the directory entry `.git`, and nothing else changes. */
+	const volume = (path: string): string => path.replace(/\/GIT~1(?=\/|$)/i, "/.git");
+
+	test("refuses a path spelled through GIT~1, in the places .git is refused", () => {
+		for (const path of ["GIT~1/hooks/pre-commit", "git~1/config", "GIT~1", "vendor/lib/GIT~1/HEAD"]) {
+			expect(() => guardWritablePath(path, CWD, "Write", volume)).toThrow(/inside \.git\/ — version-control metadata/);
+		}
+	});
+
+	test("names .git in the message, not the alias that was typed", () => {
+		let message = "";
+		try {
+			guardWritablePath("GIT~1/config", CWD, "Edit", volume);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("Edit");
+		expect(message).toContain("'GIT~1/config'");
+		expect(message).toContain("inside .git/");
+	});
+
+	test("keeps writable what only resembles git", () => {
+		for (const path of [
+			"gitignore-notes/todo.md",
+			".github/workflows/ci.yml",
+			".gitignore",
+			"GITHUB~1/x.yml",
+			"src/x.git/config.ts",
+			"git~1x/a.ts",
+		]) {
+			expect(guardWritablePath(path, CWD, "Write", volume)).toBe(`${CWD}/${path}`);
+		}
+	});
+
+	test("a directory that is really called GIT~1, with no alias behind it, stays writable", () => {
+		// The identity expander is a volume where `GIT~1` is an entry in its own
+		// right: refusing it would be a false positive on a legal directory name.
+		expect(guardWritablePath("GIT~1/notes.txt", CWD, "Write", (path) => path)).toBe(`${CWD}/GIT~1/notes.txt`);
+	});
+
+	test("a workspace reached through a short-name spelling is compared in long form", () => {
+		// RUNNER~1 for a long user name: root and path both expand, and the
+		// `.git` below them still shows once they do.
+		const expand = (path: string): string => volume(path).replace("/RUNNER~1/", "/runneradmin/");
+		const cwd = `${CWD.replace(/\/work\/project$/, "")}/Users/RUNNER~1/ws`;
+		expect(() => guardWritablePath("GIT~1/config", cwd, "Write", expand)).toThrow(/version-control metadata/);
+		expect(guardWritablePath("src/a.ts", cwd, "Write", expand)).toBe(`${cwd}/src/a.ts`);
+	});
+
+	test("a real volume: the alias of an existing .git is refused, and its neighbours are not", () => {
+		if (process.platform !== "win32") return;
+		const root = mkdtempSync(join(tmpdir(), "lbb-short-git-"));
+		try {
+			mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+			mkdirSync(join(root, "gitignore-notes"), { recursive: true });
+			mkdirSync(join(root, ".github"), { recursive: true });
+			const alias = join(root, "GIT~1");
+			// A volume that generates no short names has no alias to refuse. That is
+			// a fact about the volume, and there is nothing to assert on it.
+			if (!existsSync(alias)) return;
+
+			// The default expander, not an injected one: this is the path a tool takes.
+			expect(() => guardWritablePath(join(alias, "hooks", "pre-commit"), root, "Write")).toThrow(
+				/version-control metadata/,
+			);
+			expect(() => guardWritablePath(join(alias, "config"), root, "Edit")).toThrow(/version-control metadata/);
+			expect(guardWritablePath(join(root, "gitignore-notes", "a.md"), root, "Write")).toContain("gitignore-notes");
+			expect(guardWritablePath(join(root, ".github", "ci.yml"), root, "Write")).toContain(".github");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("filesystemFoldsCase", () => {
 	test("reports what the volume does with a case-variant lookup", () => {
 		const root = mkdtempSync(join(tmpdir(), "lbb-case-probe-"));

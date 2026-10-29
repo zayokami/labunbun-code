@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundShellManager } from "../src/background.ts";
 import { createBashTool, defaultOperations } from "../src/index.ts";
-import { bashFromGitOnPath, ChildProcessExecOperations, detectShell } from "../src/operations.ts";
+import { bashFromGitOnPath, ChildProcessExecOperations, detectShell, resolveShell } from "../src/operations.ts";
 
 const win32 = process.platform === "win32";
 
@@ -205,6 +205,69 @@ describe("PowerShell is the Windows default", () => {
 			expect(shell.kind).toBe("powershell");
 		});
 	});
+});
+
+/**
+ * The PowerShells this machine has, by path: Windows PowerShell from System32
+ * (always there) and PowerShell 7 when PATH carries it. The wrapper's exit
+ * codes were measured on both, and the 5.1 behaviours it works around do not
+ * exist on 7, so each assertion has to hold on each.
+ */
+function installedPowerShells(): Array<[string, string]> {
+	if (!win32) return [];
+	const found: Array<[string, string]> = [];
+	const root = process.env.SystemRoot ?? process.env.windir;
+	if (root) found.push(["Windows PowerShell", join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")]);
+	const pwsh = Bun.which("pwsh.exe");
+	if (pwsh) found.push(["PowerShell 7", pwsh]);
+	return found;
+}
+
+describe.each(installedPowerShells())("the wrapper's exit code in %s follows the last statement", (_name, program) => {
+	const run = (command: string) =>
+		new ChildProcessExecOperations(undefined, resolveShell(program)).exec({
+			command,
+			cwd: tempDir("lbb-ps-code-"),
+			timeoutMs: 30_000,
+		});
+
+	test("a native program that writes to stderr under 2>&1 does not end the script", async () => {
+		// Under `$ErrorActionPreference = 'Stop'` Windows PowerShell 5.1 raised
+		// NativeCommandError on the first stderr line, so `after` never ran and a
+		// command as ordinary as `git push 2>&1` failed.
+		const result = await run('cmd /c "echo err 1>&2 & exit 0" 2>&1; Write-Output after');
+		expect(result.stdout).toContain("after");
+		expect(result.exitCode).toBe(0);
+	}, 40_000);
+
+	test("a program that exits 0 after writing to stderr is a success, redirected or not", async () => {
+		expect((await run('cmd /c "echo err 1>&2" 2>&1')).exitCode).toBe(0);
+		expect((await run('cmd /c "echo err 1>&2"')).exitCode).toBe(0);
+	}, 40_000);
+
+	test("a failing native program as the last statement returns its own code", async () => {
+		expect((await run('cmd /c "exit 3"')).exitCode).toBe(3);
+		expect((await run('cmd /c "echo err 1>&2 & exit 4" 2>&1')).exitCode).toBe(4);
+		expect((await run('cmd /c "exit 3"; cmd /c "exit 5"')).exitCode).toBe(5);
+		expect((await run('if ($true) { cmd /c "exit 6" }')).exitCode).toBe(6);
+	}, 60_000);
+
+	test("an earlier failure does not decide the code once a later statement succeeded", async () => {
+		// What bash reports: the last command's status. The `$LASTEXITCODE` the
+		// earlier program left behind used to be returned whatever came after it.
+		const afterNative = await run('cmd /c "exit 3"; Write-Output done');
+		expect(afterNative.stdout).toContain("done");
+		expect(afterNative.exitCode).toBe(0);
+		expect((await run('cmd /c "exit 3"; cmd /c "exit 0"')).exitCode).toBe(0);
+	}, 40_000);
+
+	test("a cmdlet that fails as the last statement still fails the call", async () => {
+		const missing = join(tempDir("lbb-ps-missing-"), "not-here");
+		expect((await run(`Get-Item "${missing}"`)).exitCode).toBe(1);
+		// Not even a stale 0 from a native program that ran before it hides the failure.
+		expect((await run(`cmd /c "exit 0"; Get-Item "${missing}"`)).exitCode).toBe(1);
+		expect((await run('throw "boom"')).exitCode).toBe(1);
+	}, 60_000);
 });
 
 describe("the Bash tool describes the shell it runs", () => {

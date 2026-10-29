@@ -113,6 +113,10 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 				return errorResult(`File not found: ${path}. Read it first.`);
 			}
 
+			// A file whose bytes are not UTF-8 cannot be edited as text: the part the
+			// edit never touches would be rewritten as U+FFFD along with the rest.
+			if (await decodedLossily(path, ops, content)) return errorResult(`Edit: ${notUtf8(path)}`);
+
 			// --- Gate 2: it has not changed since. -------------------------------
 			const stale = await stalenessOf(path, ops, seen, content);
 			if (stale) {
@@ -275,6 +279,34 @@ export async function stalenessOf(
 	const stat = await ops.stat(path);
 	if (seen.mtime !== undefined) return stat.mtimeMs === seen.mtime ? null : "mtime no longer matches your read";
 	return stat.mtimeMs > seen.timestamp + MTIME_TOLERANCE_MS ? "mtime no longer matches your read" : null;
+}
+
+// Long-form design notes: docs/dev/tools.md
+/**
+ * Whether `content` lost something decoding `path`: the file holds bytes that
+ * are not UTF-8 (GBK, Latin-1, UTF-16), which `readTextFile` turns into U+FFFD.
+ * Writing that text back replaces every such byte for good. Exported for
+ * Write's read gate, which meets the same file when it overwrites one.
+ *
+ * Decoding without a U+FFFD is lossless, so most files answer without a second
+ * read. A U+FFFD can also be the file's own character (`EF BF BD`), so the
+ * bytes decide: the file read one byte to a character has to be what the text
+ * encodes back to. A read that fails here cannot confirm the file, and the
+ * answer is the cautious one.
+ */
+export async function decodedLossily(path: string, ops: Operations, content: string): Promise<boolean> {
+	if (!content.includes("�")) return false;
+	try {
+		const bytes = await ops.readTextFile(path, "latin1");
+		return Buffer.from(content, "utf8").toString("latin1") !== bytes;
+	} catch {
+		return true;
+	}
+}
+
+/** The refusal for a file {@link decodedLossily} flagged, in the voice of both tools. */
+export function notUtf8(path: string): string {
+	return `${path} is not valid UTF-8 text (a legacy encoding such as GBK or Latin-1, or UTF-16), so Read showed it with replacement characters and a write would replace the bytes it could not decode for good. Nothing was written. Convert the file to UTF-8 first, or change it with a command that keeps its encoding.`;
 }
 
 // ---------------------------------------------------------------------------

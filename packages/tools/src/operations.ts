@@ -352,18 +352,32 @@ function underRoot(root: string, rest: string): string {
  * leaves backslashes and quotes alone there, unlike cmd's (measured on Windows
  * PowerShell 5.1 and PowerShell 7.4). The prefix fixes what the shell would
  * otherwise decide from the machine: output is UTF-8 whatever the console code
- * page is, a cmdlet error fails the call instead of exiting 0 after printing an
- * error, and progress records stay off stderr. The suffix returns a native
- * program's own exit code — `powershell -Command "cmd /c exit 3"` alone answers
- * 1, and a test runner's code is information the model needs.
+ * page is, and progress records stay off stderr.
+ *
+ * The error preference stays at its default (`Continue`). `Stop` was tried and
+ * measured: on Windows PowerShell 5.1 it turns the first stderr line of any
+ * native program run with `2>&1` into a terminating `NativeCommandError`, so
+ * `git push 2>&1; echo after` died before `after` and a successful `git fetch
+ * 2>&1` failed. The exit code follows the last statement instead, the way a
+ * shell's does. `$?` is false for a failed last statement. A native program's
+ * own code is returned then — `powershell -Command "cmd /c exit 3"` alone
+ * answers 1, and a test runner's code is information the model needs — but only
+ * when that statement failed: a `$LASTEXITCODE` left by an earlier command is
+ * not the answer for a later one that succeeded. A failed statement with no
+ * native code to return is a cmdlet error and exits 1, except on 5.1, where
+ * `native 2>&1` leaves `$?` false for a program that exited 0 after writing to
+ * stderr; the newest error record names that case (`NativeCommandError*`).
  */
 function powershellScript(command: string): string {
 	return [
 		"$ProgressPreference = 'SilentlyContinue'",
-		"$ErrorActionPreference = 'Stop'",
 		"try { $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}",
 		command,
-		"if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }",
+		"if (-not $?) {",
+		"if ($LASTEXITCODE) { exit $LASTEXITCODE }",
+		"if ($Error.Count -eq 0 -or $Error[0].FullyQualifiedErrorId -notlike 'NativeCommandError*') { exit 1 }",
+		"}",
+		"exit 0",
 	].join("\n");
 }
 

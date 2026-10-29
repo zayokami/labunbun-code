@@ -1092,6 +1092,68 @@ describe("reporting what happened", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bytes that are not UTF-8
+// ---------------------------------------------------------------------------
+
+describe("a file that is not valid UTF-8", () => {
+	const asciiTail = Buffer.from(" */\nint x = 1;\n");
+
+	// Each body is a legacy-encoded comment followed by ASCII code. The edit
+	// below touches only the code, so every other byte has to come back exactly.
+	const encodings: Array<[string, Buffer]> = [
+		["GBK", Buffer.concat([Buffer.from("/* "), Buffer.from([0xc4, 0xe3, 0xba, 0xc3]), asciiTail])],
+		["Latin-1", Buffer.concat([Buffer.from("/* caf"), Buffer.from([0xe9]), asciiTail])],
+		[
+			"UTF-16LE with a BOM",
+			Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("/* hi */\nint x = 1;\n", "utf16le")]),
+		],
+	];
+
+	test.each(encodings)("%s: Edit refuses, and every byte of the file survives", async (_name, bytes) => {
+		const dir = tempDir();
+		const file = join(dir, "legacy.c");
+		writeFileSync(file, bytes);
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(edit, { file_path: file, old_string: "int x = 1;", new_string: "int x = 2;" });
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("not valid UTF-8");
+		expect(textOf(result)).toContain("Nothing was written");
+		expect(readFileSync(file).equals(bytes)).toBe(true);
+	});
+
+	test("a file whose text really contains U+FFFD is valid UTF-8 and stays editable", async () => {
+		// The replacement character is not proof of damage: `EF BF BD` is a
+		// legal encoding of it, and a literal one in a source file is ordinary.
+		const dir = tempDir();
+		const file = write(dir, "literal.ts", 'const marker = "�";\nconst a = 1;\n');
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(edit, { file_path: file, old_string: "const a = 1;", new_string: "const a = 2;" });
+
+		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe('const marker = "�";\nconst a = 2;\n');
+	});
+
+	test("valid UTF-8 beyond ASCII, with or without a BOM, is untouched by the check", async () => {
+		const dir = tempDir();
+		const plain = write(dir, "plain.ts", "// 你好 café\nconst a = 1;\n");
+		const bom = write(dir, "bom.ts", "﻿// 你好\nconst a = 1;\n");
+		const { edit, read } = readEditPair(dir);
+		for (const file of [plain, bom]) {
+			await call(read, { file_path: file });
+			const result = await call(edit, { file_path: file, old_string: "const a = 1;", new_string: "const a = 2;" });
+			expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
+		}
+		expect(readFileSync(plain, "utf8")).toBe("// 你好 café\nconst a = 2;\n");
+		expect(readFileSync(bom, "utf8")).toBe("﻿// 你好\nconst a = 2;\n");
+	});
+});
+
+// ---------------------------------------------------------------------------
 // The input guards
 // ---------------------------------------------------------------------------
 
