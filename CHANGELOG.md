@@ -3,7 +3,10 @@
 What changed in each release. Release pages carry the download links, install
 commands, and SHA-256 checksums.
 
-## Unreleased
+## 0.1.0.3 (Alpha) — 2026-10-29
+
+A drop-in replacement for 0.1.0.2, with fixes to permission matching, the
+Anthropic tool-call parser, `-p` output, and the `.git` write guard.
 
 ### Changed
 
