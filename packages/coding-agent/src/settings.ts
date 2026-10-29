@@ -680,6 +680,16 @@ function issueSummary(error: z.ZodError): string {
 	return `${where}${first?.message ?? "no detail"}${more}`;
 }
 
+/** The top-level keys zod objected to, each once, in the order it first did — what a diagnostic names. */
+function issueKeys(error: z.ZodError): string[] {
+	return [...new Set(error.issues.map((issue) => String(issue.path[0] ?? "(whole file)")))];
+}
+
+/** The sentence for a tier that did not parse and was left out of the merge. */
+function invalidTierMessage(error: z.ZodError): string {
+	return `has invalid settings (${issueKeys(error).join(", ")}), so none of its values apply: ${issueSummary(error)}`;
+}
+
 /** Top-level keys this release knows; a key outside the set is reported, not silently dropped by zod. */
 const KNOWN_SETTINGS_KEYS: ReadonlySet<string> = new Set(Object.keys(SettingsSchema.shape));
 
@@ -756,45 +766,56 @@ export function loadSettings(cwd: string, flagSettings?: RawSettingsInput, home:
 			data = stripped.data;
 			ignoredKeys.push(...stripped.ignored);
 		}
-		merged = mergeSettings(merged, data);
-		sources[source] = path;
-		// Keep the tier's own view too. Parsed leniently: a malformed tier must
-		// not take down rule attribution for the tiers that are well-formed.
+		// Every tier is checked on its own, before it is merged. A tier that does
+		// not parse contributes nothing and the others apply in full. It used to be
+		// merged first and the whole result thrown away when the sum failed to
+		// parse, so a repo-controlled file holding one badly typed `theme` (a key it
+		// may carry) reset the user's `sandbox`/`networkAccess` and the managed
+		// policy's to the defaults. A broken user, policy or `--settings` tier is
+		// skipped the same way rather than voiding the rest: its own values are lost
+		// for the session and the diagnostic names the file and the keys, while the
+		// policy tier keeps standing where a typo in another file cannot lift it.
 		const tierParsed = SettingsSchema.safeParse(data);
-		if (tierParsed.success) perSource[source] = tierParsed.data;
-		else
+		if (!tierParsed.success) {
 			diagnostics.push({
 				source,
 				path,
 				kind: "invalid-shape",
-				message: `has invalid settings: ${issueSummary(tierParsed.error)}`,
+				message: invalidTierMessage(tierParsed.error),
 			});
+			continue;
+		}
+		merged = mergeSettings(merged, data);
+		sources[source] = path;
+		// Keep the tier's own view too, for rule attribution and the policy lockdowns.
+		perSource[source] = tierParsed.data;
 	}
 	if (flagSettings !== undefined) {
-		merged = mergeSettings(merged, flagSettings);
-		sources.flag = "--settings";
 		collectUnknownSettingsKeys(diagnostics, "flag", "--settings", flagSettings);
 		const flagParsed = SettingsSchema.safeParse(flagSettings);
-		if (flagParsed.success) perSource.flag = flagParsed.data;
-		else
+		if (flagParsed.success) {
+			merged = mergeSettings(merged, flagSettings);
+			sources.flag = "--settings";
+			perSource.flag = flagParsed.data;
+		} else {
 			diagnostics.push({
 				source: "flag",
 				path: "--settings",
 				kind: "invalid-shape",
-				message: `has invalid settings: ${issueSummary(flagParsed.error)}`,
+				message: invalidTierMessage(flagParsed.error),
 			});
+		}
 	}
 
+	// Each tier parsed on its own and the merge only replaces or unions their
+	// values, so this should always succeed; it stays as the net under that
+	// reasoning. Fail closed to the defaults if it ever does not: a partially
+	// applied merge is a session running settings nobody wrote.
 	const parsed = SettingsSchema.safeParse(merged);
 	if (!parsed.success) {
-		// Fail closed, as before: a partially applied file is a session running
-		// settings nobody wrote. The difference is that the reason now survives
-		// the load; a broken file used to be a `console.error` in a TUI that
-		// never shows stderr, which is the same as saying nothing.
-		const culprit = diagnostics.find((diagnostic) => diagnostic.kind === "invalid-shape");
 		diagnostics.push({
-			source: culprit?.source ?? "user",
-			path: culprit?.path ?? "(merged settings)",
+			source: "user",
+			path: "(merged settings)",
 			kind: "invalid-shape",
 			message: `has invalid settings, so the defaults are in effect: ${issueSummary(parsed.error)}`,
 		});

@@ -7,7 +7,7 @@
  * the next write replaces it. The sanitizers exist so `/beetle status`, which
  * prints these numbers straight into a line, can never say NaN.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -119,9 +119,29 @@ export function readBeetleState(home = homedir()): BeetleState {
 	}
 }
 
-/** Failures are the caller's to report — the write itself only writes. */
+/**
+ * Failures are the caller's to report — the write itself only writes.
+ *
+ * Written by replacement, the way the trust ledger and the cost ledger are: the
+ * bytes land in a sibling file and are renamed over the target, so a process that
+ * dies mid-write leaves the previous complete ledger. A torn file would read back
+ * as an empty ledger (see {@link readBeetleState}) and the next write would
+ * replace it, which loses the lifetime totals this file exists to keep. The temp
+ * name carries the pid so two REPLs on one home do not write through one file.
+ */
 export function writeBeetleState(state: BeetleState, home = homedir()): void {
 	const path = beetleStatePath(home);
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
+	const tmp = `${path}.${process.pid}.tmp`;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
+		renameSync(tmp, path);
+	} catch (error) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// No temp file to remove (the write failed before it existed).
+		}
+		throw error;
+	}
 }

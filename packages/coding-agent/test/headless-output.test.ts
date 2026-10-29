@@ -8,11 +8,12 @@
  * and whether the file the caller named is written.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SandboxMode } from "@labunbun/agent";
 import { clearCustomModels, clearPricingOverrides, fauxProvider, type StreamFn } from "@labunbun/ai";
-import { runHeadless } from "../src/headless.ts";
+import { type OutputFormat, runHeadless } from "../src/headless.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -42,6 +43,8 @@ async function run(
 		modelRef?: string;
 		outputSchemaPath?: string;
 		outputLastMessagePath?: string;
+		outputFormat?: OutputFormat;
+		sandbox?: SandboxMode;
 	},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
 	const out: string[] = [];
@@ -61,7 +64,8 @@ async function run(
 			modelRef: options.modelRef ?? "anthropic/claude-haiku-4-5",
 			cwd: harness.cwd,
 			noSession: true,
-			outputFormat: "json",
+			outputFormat: options.outputFormat ?? "json",
+			sandbox: options.sandbox,
 			outputSchemaPath: options.outputSchemaPath,
 			outputLastMessagePath: options.outputLastMessagePath,
 			streamFn: options.streamFn,
@@ -177,5 +181,99 @@ describe("--output-last-message", () => {
 		expect(result.code).toBe(1);
 		expect(result.stderr).toContain("the run produced no assistant message");
 		expect(() => readFileSync(target, "utf8")).toThrow();
+	});
+});
+
+describe("text output across turns", () => {
+	test("a later turn's answer is not sliced by the length of an earlier turn's text", async () => {
+		const harness = makeHarness();
+		// The second message is shorter than the first: before the per-turn reset,
+		// its whole text was swallowed and stdout held only the preamble.
+		const faux = fauxProvider([
+			{ text: "Let me look at the directory first.", toolCalls: [{ name: "Glob", arguments: { pattern: "*" } }] },
+			{ text: "Done: 42" },
+		]);
+
+		const result = await run(harness, { streamFn: faux.streamFn, outputFormat: "text" });
+		expect(result.code).toBe(0);
+		expect(result.stdout).toBe("Let me look at the directory first.\nDone: 42\n");
+	});
+
+	test("a longer later turn keeps its first characters", async () => {
+		const harness = makeHarness();
+		const answer = "The directory is empty, so there is nothing to change.";
+		const faux = fauxProvider([
+			{ text: "Looking.", toolCalls: [{ name: "Glob", arguments: { pattern: "*" } }] },
+			{ text: answer },
+		]);
+
+		const result = await run(harness, { streamFn: faux.streamFn, outputFormat: "text" });
+		expect(result.stdout).toBe(`Looking.\n${answer}\n`);
+	});
+
+	test("a turn with no text adds no blank line", async () => {
+		const harness = makeHarness();
+		const faux = fauxProvider([{ toolCalls: [{ name: "Glob", arguments: { pattern: "*" } }] }, { text: "Done: 42" }]);
+
+		const result = await run(harness, { streamFn: faux.streamFn, outputFormat: "text" });
+		expect(result.stdout).toBe("Done: 42\n");
+	});
+});
+
+describe("the sandbox setting in a -p run", () => {
+	/** A turn that asks to write a file, then a closing turn; the file's path is returned. */
+	function writeTurns(harness: Harness): { target: string; faux: ReturnType<typeof fauxProvider> } {
+		const target = join(harness.cwd, "out.txt");
+		const faux = fauxProvider([
+			{ toolCalls: [{ name: "Write", arguments: { file_path: target, content: "written" } }] },
+			{ text: "done" },
+		]);
+		return { target, faux };
+	}
+
+	function writeSettings(dir: string, settings: unknown): void {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
+	}
+
+	test("with no setting and no flag the run writes, as it always did", async () => {
+		const harness = makeHarness();
+		const { target, faux } = writeTurns(harness);
+
+		const result = await run(harness, { streamFn: faux.streamFn });
+		expect(result.code).toBe(0);
+		expect(existsSync(target)).toBe(true);
+	});
+
+	test("the user's read-only setting confines the run", async () => {
+		const harness = makeHarness();
+		writeSettings(join(harness.home, ".labunbun"), { sandbox: "read-only" });
+		const { target, faux } = writeTurns(harness);
+
+		const result = await run(harness, { streamFn: faux.streamFn });
+		expect(result.code).toBe(0);
+		expect(existsSync(target)).toBe(false);
+	});
+
+	test("--sandbox wins over the setting", async () => {
+		const harness = makeHarness();
+		writeSettings(join(harness.home, ".labunbun"), { sandbox: "read-only" });
+		const { target, faux } = writeTurns(harness);
+
+		const result = await run(harness, { streamFn: faux.streamFn, sandbox: "workspace-write" });
+		expect(result.code).toBe(0);
+		expect(existsSync(target)).toBe(true);
+	});
+
+	test("a project file cannot set it: the key is dropped and reported", async () => {
+		const harness = makeHarness();
+		// A repository naming its own confinement would be choosing the widest one,
+		// so `-p` must read the value only from the tiers that may carry it.
+		writeSettings(join(harness.cwd, ".labunbun"), { sandbox: "read-only" });
+		const { target, faux } = writeTurns(harness);
+
+		const result = await run(harness, { streamFn: faux.streamFn });
+		expect(result.stderr).toContain("project:sandbox");
+		expect(existsSync(target)).toBe(true);
 	});
 });

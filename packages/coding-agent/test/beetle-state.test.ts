@@ -7,9 +7,9 @@
  * `/beetle status` from ever printing NaN out of a hand-edited file.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
 	type BeetleBandRecord,
 	type BeetleState,
@@ -46,6 +46,27 @@ describe("the beetle ledger file", () => {
 		const state: BeetleState = { lastBand: BAND, lifetime: { bands: 3, costUSD: 1.25, turns: 9 } };
 		writeBeetleState(state, home);
 		expect(readBeetleState(home)).toEqual(state);
+	});
+
+	test("a write replaces the file through a sibling and leaves nothing behind", () => {
+		const home = freshHome();
+		writeBeetleState({ lastBand: BAND, lifetime: { bands: 1, costUSD: 0.5, turns: 2 } }, home);
+		writeBeetleState({ lastBand: null, lifetime: { bands: 2, costUSD: 1, turns: 4 } }, home);
+		expect(readdirSync(dirname(beetleStatePath(home)))).toEqual(["beetle-state.json"]);
+	});
+
+	test("a write that cannot finish leaves the previous ledger whole", () => {
+		const home = freshHome();
+		const before: BeetleState = { lastBand: BAND, lifetime: { bands: 3, costUSD: 1.25, turns: 9 } };
+		writeBeetleState(before, home);
+		// The replacement is written beside the ledger and renamed over it, so a write
+		// that dies on the way (here: the sibling's name is taken by a directory)
+		// never touched the ledger itself. Writing the ledger in place would have
+		// gone through, which is exactly the shape a crash mid-write leaves torn —
+		// and a torn ledger reads back as an empty one, taking the lifetime totals.
+		mkdirSync(`${beetleStatePath(home)}.${process.pid}.tmp`);
+		expect(() => writeBeetleState({ lastBand: null, lifetime: { bands: 9, costUSD: 9, turns: 9 } }, home)).toThrow();
+		expect(readBeetleState(home)).toEqual(before);
 	});
 
 	test("a missing file reads as an empty ledger", () => {

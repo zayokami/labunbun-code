@@ -528,7 +528,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// policy tier, so a managed machine can take the confinement back.
 	// Note `settings.permissionMode` is deliberately not consulted here — it
 	// governs the interactive default, and honouring it would change what
-	// existing scripted `-p` runs are allowed to do.
+	// existing scripted `-p` runs are allowed to do. `settings.sandbox` is
+	// consulted: it only narrows or names a confinement the user wrote down
+	// (README: "set it with `--sandbox read-only` or the `sandbox` setting"), and a
+	// project or local file cannot set it — `stripUntrustedKeys` drops the key — so
+	// it can only come from the user, the policy file or `--settings`.
 	const {
 		mode: effectiveMode,
 		sandbox: effectiveSandbox,
@@ -536,7 +540,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	} = resolveMode(
 		{
 			mode: options.permissionMode ?? "agent",
-			sandbox: options.sandbox ?? "danger-full-access",
+			sandbox: options.sandbox ?? settings.sandbox ?? "danger-full-access",
 		},
 		loadedSettings,
 	);
@@ -985,7 +989,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	if (store) session.messages.push(...(resumedMessages ?? store.contextMessages()));
 
 	const startedAt = Date.now();
+	/**
+	 * The part of the *current* turn's assistant text already on stdout. Each turn
+	 * streams a fresh partial message, so it restarts at every `turn_start`: a
+	 * count carried over from the previous turn would slice that many characters
+	 * off the front of the next one — all of it, when the next is the shorter.
+	 */
 	let lastAssistantText = "";
+	/** Text-mode stdout already carries an earlier turn's text, so the next turn's starts on a new line. */
+	let textPrinted = false;
+	let breakBeforeNextText = false;
 	let turns = 0;
 	/**
 	 * The loop's own verdict on why the run ended.
@@ -1007,7 +1020,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	};
 
 	session.on((event: AgentEvent) => {
-		if (event.type === "turn_start") turns++;
+		if (event.type === "turn_start") {
+			turns++;
+			lastAssistantText = "";
+			breakBeforeNextText = textPrinted;
+		}
 		if (event.type === "agent_end") {
 			endErrorMessage = event.errorMessage;
 			endErrorKind = event.errorKind;
@@ -1054,8 +1071,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			if (format === "text") {
 				const delta = text.slice(lastAssistantText.length);
 				if (delta) {
+					if (breakBeforeNextText) process.stdout.write("\n");
+					breakBeforeNextText = false;
 					process.stdout.write(delta);
 					lastAssistantText = text;
+					textPrinted = true;
 				}
 			} else if (format === "stream-json") {
 				emitStreamJson({

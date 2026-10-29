@@ -736,41 +736,131 @@ describe("settings diagnostics", () => {
 		});
 	});
 
-	test("a tier that does not match the schema is named, and the load fails closed to the defaults", () => {
+	test("a tier that does not match the schema is named and left out; the other tiers still apply", () => {
 		withSettingsTiers({ user: { theme: 42 }, project: { vimMode: true } }, (cwd, home) => {
 			const loaded = loadSettings(cwd, undefined, home);
-			// The broken tier contributes no view of its own. Its value was still
-			// merged, so the whole-file parse fails and the defaults are what the
-			// session runs — the existing fail-closed rule, now with the reason
-			// attached instead of a stderr line nobody reads.
+			// The broken tier contributes nothing — no merged value, no view of its
+			// own, no entry in `sources` — and the project tier beside it is not
+			// dragged down with it. This test used to pin the opposite: the broken
+			// value was merged first, the whole-file parse failed, and the defaults
+			// (the project's `vimMode` included) were what the session ran.
 			expect(loaded.perSource.user).toBeUndefined();
-			expect(loaded.settings.vimMode).toBeUndefined();
-			expect(loaded.diagnostics[0]).toMatchObject({ source: "user", kind: "invalid-shape" });
-			expect(loaded.diagnostics[0]?.message).toMatch(/^has invalid settings: theme: /);
-			expect(loaded.diagnostics[1]).toMatchObject({
+			expect(loaded.sources.user).toBeUndefined();
+			expect(loaded.settings.theme).toBeUndefined();
+			expect(loaded.settings.vimMode).toBe(true);
+			expect(loaded.diagnostics).toHaveLength(1);
+			expect(loaded.diagnostics[0]).toMatchObject({
 				source: "user",
 				path: join(home, ".labunbun", "settings.json"),
 				kind: "invalid-shape",
 			});
-			expect(loaded.diagnostics[1]?.message).toContain("defaults are in effect");
+			expect(loaded.diagnostics[0]?.message).toMatch(
+				/^has invalid settings \(theme\), so none of its values apply: theme: /,
+			);
 		});
 	});
 
-	test("an invalid --settings falls back to whole-file defaults, and says so instead of silently ignoring the files", () => {
-		// Fail closed is the existing rule: a partially applied merge is a session
-		// running settings nobody wrote. What is new is that the user is told the
-		// defaults are what they are getting.
+	test("an invalid project file cannot reset the user's or the policy's settings", () => {
+		// The key is one a repository may carry (`vimMode`) with a value of the wrong
+		// type. Merged before it was checked, it failed the whole parse and every
+		// tier fell back to the defaults — the user's confinement and the managed
+		// policy's included.
+		withSettingsTiers(
+			{
+				user: { sandbox: "read-only", networkAccess: "restricted", permissionMode: "ask", theme: "dark" },
+				policy: { networkDomains: ["registry.npmjs.org"], disableBypassPermissionsMode: true },
+				project: { vimMode: "yes", theme: "light" },
+			},
+			(cwd, home) => {
+				const loaded = loadSettings(cwd, undefined, home);
+				expect(loaded.settings.sandbox).toBe("read-only");
+				expect(loaded.settings.networkAccess).toBe("restricted");
+				expect(loaded.settings.permissionMode).toBe("ask");
+				expect(loaded.settings.networkDomains).toEqual(["registry.npmjs.org"]);
+				expect(loaded.perSource.policy?.disableBypassPermissionsMode).toBe(true);
+				// The bad file is skipped whole: its valid `theme` does not apply either.
+				expect(loaded.settings.theme).toBe("dark");
+				expect(loaded.settings.vimMode).toBeUndefined();
+				expect(loaded.perSource.project).toBeUndefined();
+				expect(loaded.sources.project).toBeUndefined();
+				const projectPath = join(cwd, ".labunbun", "settings.json");
+				expect(loaded.diagnostics).toEqual([
+					{
+						source: "project",
+						path: projectPath,
+						kind: "invalid-shape",
+						message: expect.stringMatching(/^has invalid settings \(vimMode\), so none of its values apply: vimMode: /),
+					},
+				]);
+				expect(formatSettingsDiagnostics(loaded)).toEqual([
+					`Settings ${projectPath} ${loaded.diagnostics[0]?.message}`,
+				]);
+			},
+		);
+	});
+
+	test("an invalid local file is skipped on its own, and every key it got wrong is named", () => {
+		withSettingsTiers(
+			{
+				user: { sandbox: "read-only" },
+				local: { permissions: { deny: 5 }, emacsMode: "on", theme: "light" },
+			},
+			(cwd, home) => {
+				const loaded = loadSettings(cwd, undefined, home);
+				expect(loaded.settings.sandbox).toBe("read-only");
+				expect(loaded.settings.theme).toBeUndefined();
+				expect(loaded.sources.local).toBeUndefined();
+				expect(loaded.diagnostics).toHaveLength(1);
+				expect(loaded.diagnostics[0]).toMatchObject({
+					source: "local",
+					path: join(cwd, ".labunbun", "settings.local.json"),
+					kind: "invalid-shape",
+				});
+				// In the schema's order, not the file's; `theme` was fine and is not named.
+				expect(loaded.diagnostics[0]?.message).toContain("(emacsMode, permissions)");
+			},
+		);
+	});
+
+	test("a repo key that is stripped is not validated: only what the tier is allowed to say can invalidate it", () => {
+		withSettingsTiers({ project: { model: 5, sandbox: "nonsense", theme: "light" } }, (cwd, home) => {
+			const loaded = loadSettings(cwd, undefined, home);
+			expect(loaded.settings.theme).toBe("light");
+			expect(loaded.ignoredKeys.map((entry) => entry.key).sort()).toEqual(["model", "sandbox"]);
+			expect(loaded.diagnostics).toEqual([]);
+		});
+	});
+
+	test("an invalid policy file does not take the user's settings down with it", () => {
+		withSettingsTiers({ user: { sandbox: "read-only", theme: "dark" }, policy: { sandbox: 5 } }, (cwd, home) => {
+			const loaded = loadSettings(cwd, undefined, home);
+			expect(loaded.settings.sandbox).toBe("read-only");
+			expect(loaded.settings.theme).toBe("dark");
+			expect(loaded.perSource.policy).toBeUndefined();
+			expect(loaded.diagnostics).toHaveLength(1);
+			expect(loaded.diagnostics[0]).toMatchObject({
+				source: "policy",
+				path: join(home, ".labunbun", "managed-settings.json"),
+				kind: "invalid-shape",
+			});
+			expect(loaded.diagnostics[0]?.message).toContain("(sandbox)");
+		});
+	});
+
+	test("an invalid --settings is left out and named; the files still apply", () => {
+		// What is kept from the old rule is that the user is told. What changed is the
+		// consequence: the flag tier alone is dropped, instead of the files and the
+		// policy with it.
 		withSettingsTiers({ user: { theme: "light" } }, (cwd, home) => {
 			const loaded = loadSettings(cwd, { theme: 42 } as unknown as RawSettingsInput, home);
-			expect(loaded.settings.theme).toBeUndefined();
-			const rollback = loaded.diagnostics.filter((diagnostic) => diagnostic.message.includes("defaults are in effect"));
-			expect(rollback).toHaveLength(1);
-			expect(rollback[0]?.kind).toBe("invalid-shape");
-			expect(rollback[0]?.source).toBe("flag");
-			expect(rollback[0]?.path).toBe("--settings");
+			expect(loaded.settings.theme).toBe("light");
+			expect(loaded.sources.flag).toBeUndefined();
+			expect(loaded.perSource.flag).toBeUndefined();
+			expect(loaded.diagnostics).toHaveLength(1);
+			expect(loaded.diagnostics[0]).toMatchObject({ source: "flag", path: "--settings", kind: "invalid-shape" });
 			const lines = formatSettingsDiagnostics(loaded);
-			expect(lines).toContain(`Settings --settings ${rollback[0]?.message}`);
-			expect(lines.filter((line) => line.includes("defaults are in effect"))).toHaveLength(1);
+			expect(lines).toEqual([`Settings --settings ${loaded.diagnostics[0]?.message}`]);
+			expect(lines[0]).toContain("(theme)");
 		});
 	});
 });
