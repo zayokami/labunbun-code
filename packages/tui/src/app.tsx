@@ -24,6 +24,7 @@ import { createPermissionQueue } from "./permission-queue.ts";
 import { createPlanReviewSlot } from "./plan-review-slot.ts";
 import { createQuestionSlot } from "./question-slot.ts";
 import { createStore, type Store, useStore } from "./store.ts";
+import { enterRawModeEarly } from "./terminal-input.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
 import {
 	initialUiState,
@@ -490,6 +491,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	// terminal without support keeps the old bytes, where the promise cannot be
 	// kept. Ink re-enables the protocol after a child process has held the
 	// terminal and pops it on unmount, so the shell is left as it was found.
+	//
+	// The query goes out from Ink's constructor, before raw mode is on. A terminal
+	// that answers at once (iTerm2) would have the answer echoed as `^[[?0u`.
+	enterRawModeEarly(process.stdin);
 	const instance = render(
 		<ThemedTree store={store}>
 			<REPL
