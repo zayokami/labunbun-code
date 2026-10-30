@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { isAimedAt, usePadAction } from "../pad.ts";
 import type { DiffLineKind, PermissionDiff } from "../permission-diff.ts";
 import { type PermissionOption, permissionOptions } from "../permission-options.ts";
+import { dropLastChar } from "../terminal-input.ts";
 import { type Theme, useTheme } from "../theme.ts";
 
 export interface PermissionDialogProps {
@@ -186,7 +187,7 @@ export function PermissionDialog({
 				return;
 			}
 			if (key.backspace || key.delete) {
-				setFeedback((text) => (text ?? "").slice(0, -1));
+				setFeedback((text) => dropLastChar(text ?? ""));
 				return;
 			}
 			// Modifiers are commands, not text. Control characters (Tab included)

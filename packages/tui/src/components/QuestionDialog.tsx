@@ -2,6 +2,7 @@ import type { PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
 import { isAimedAt, usePadAction } from "../pad.ts";
+import { dropLastChar } from "../terminal-input.ts";
 import { useTheme } from "../theme.ts";
 import type { QuestionDialogState } from "../ui-state.ts";
 
@@ -167,7 +168,7 @@ export function QuestionDialog({ questions, resolve, pad }: QuestionDialogState 
 				return;
 			}
 			if (key.backspace || key.delete) {
-				setOther((text) => (text ?? "").slice(0, -1));
+				setOther((text) => dropLastChar(text ?? ""));
 				return;
 			}
 			if (key.ctrl || key.meta) return;

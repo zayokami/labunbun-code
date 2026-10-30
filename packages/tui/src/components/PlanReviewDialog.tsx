@@ -2,6 +2,7 @@ import type { PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
 import { isAimedAt, usePadAction } from "../pad.ts";
+import { dropLastChar } from "../terminal-input.ts";
 import { useTheme } from "../theme.ts";
 import type { PlanReviewDialogState, PlanReviewResult } from "../ui-state.ts";
 
@@ -126,7 +127,7 @@ export function PlanReviewDialog({ plan, resolve, pad }: PlanReviewDialogState &
 				return;
 			}
 			if (key.backspace || key.delete) {
-				setFeedback((text) => text.slice(0, -1));
+				setFeedback((text) => dropLastChar(text));
 				return;
 			}
 			// Modifiers are commands, not text. Control characters (Tab included)

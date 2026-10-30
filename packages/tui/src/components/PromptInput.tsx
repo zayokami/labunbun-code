@@ -10,6 +10,7 @@ import { type PadPromptRef, usePadAction } from "../pad.ts";
 import { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "../paste.ts";
 import { applyFileCompletion, currentAtWord, filterFiles } from "../prompt-files.ts";
 import { hintLine } from "../shortcuts.ts";
+import { dropLastChar } from "../terminal-input.ts";
 import { type Theme, useTheme } from "../theme.ts";
 import { nextChar } from "../vim.ts";
 import { OnScreenKeyboard } from "./OnScreenKeyboard.tsx";
@@ -463,19 +464,28 @@ export function PromptInput({
 
 	useEffect(() => {
 		if (!completeFiles || atQuery === null) return;
+		// Cleared with the timer: a listing already asked for still resolves, and
+		// without this a slow answer for an earlier query overwrites the list for
+		// the current one, or brings a list back after the caret left the at-word.
+		let superseded = false;
 		const timer = setTimeout(() => {
 			completeFiles(atQuery)
 				.then((files) => {
+					if (superseded) return;
 					setFileSuggestions(filterFiles(files, atQuery));
 					setFileIndex(0);
 					setFileListingFailed(false);
 				})
 				.catch(() => {
+					if (superseded) return;
 					setFileSuggestions([]);
 					setFileListingFailed(true);
 				});
 		}, 120);
-		return () => clearTimeout(timer);
+		return () => {
+			superseded = true;
+			clearTimeout(timer);
+		};
 	}, [atQuery, completeFiles]);
 
 	// A stale list must not linger once the caret leaves the at-word.
@@ -609,7 +619,7 @@ export function PromptInput({
 					return;
 				}
 				if (key.backspace || key.delete) {
-					setSearch((s) => (s ? { ...s, query: s.query.slice(0, -1), index: 0 } : s));
+					setSearch((s) => (s ? { ...s, query: dropLastChar(s.query), index: 0 } : s));
 					return;
 				}
 				if (input && !key.ctrl && !key.meta && input !== "\r") {

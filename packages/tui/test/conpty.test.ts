@@ -79,6 +79,21 @@ describe("chunkForConPTY", () => {
 		expect(chunks[0]).toBe("\n");
 		expect(chunks.join("")).toBe(data);
 	});
+
+	test("a budget cut never parts a surrogate pair", () => {
+		// With no newline to cut at, the cut falls at the budget: put an emoji
+		// across that boundary, so its high half is the last unit that fits.
+		const data = `${"y".repeat(99)}😀${"z".repeat(50)}`;
+		const chunks = chunkForConPTY(data, 100);
+
+		expect(chunks.join("")).toBe(data);
+		for (const chunk of chunks) {
+			const last = chunk.charCodeAt(chunk.length - 1);
+			expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+			// Each piece survives a UTF-8 round trip, which a lone half would not.
+			expect(new TextDecoder().decode(new TextEncoder().encode(chunk))).toBe(chunk);
+		}
+	});
 });
 
 describe("stripScrollbackErase", () => {
@@ -114,6 +129,15 @@ describe("chunkWritesForConPTY", () => {
 		stream.write("small\n");
 
 		expect(calls).toEqual([["small\n"]]);
+	});
+
+	test("a write that is not a string passes through instead of throwing", () => {
+		const { stream, calls } = fakeStream();
+		chunkWritesForConPTY(stream);
+		const bytes = new Uint8Array([0x1b, 0x5b, 0x48]);
+
+		expect(() => stream.write(bytes as unknown as string)).not.toThrow();
+		expect(calls).toEqual([[bytes]]);
 	});
 
 	test("an oversized write leaves as capped pieces that still join up", () => {

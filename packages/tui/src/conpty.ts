@@ -44,7 +44,13 @@ export function chunkForConPTY(data: string, max = MAX_CONPTY_WRITE): string[] {
 	let start = 0;
 	while (data.length - start > max) {
 		const cut = data.lastIndexOf("\n", start + max - 1);
-		const end = cut >= start ? cut + 1 : start + max;
+		let end = cut >= start ? cut + 1 : start + max;
+		// A budget cut must not part a surrogate pair: each half would be encoded
+		// alone, as U+FFFD, and the character would reach the screen as two boxes.
+		if (cut < start && end - start > 1) {
+			const last = data.charCodeAt(end - 1);
+			if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+		}
 		chunks.push(data.slice(start, end));
 		start = end;
 	}
@@ -83,7 +89,8 @@ export function chunkWritesForConPTY(stream: { write: (...args: any[]) => unknow
 	chunked.add(stream);
 	const write = stream.write.bind(stream);
 	stream.write = (data: string, ...rest: unknown[]) => {
-		if (rest.length > 0) return write(data, ...rest);
+		// A Buffer or Uint8Array has no `replaceAll` and no escape sequence to strip.
+		if (rest.length > 0 || typeof data !== "string") return write(data, ...rest);
 		// Stripped first, so the cut sees the bytes that will land: a chunk
 		// boundary never falls inside a sequence that no longer exists.
 		const cleaned = stripScrollbackErase(data);
