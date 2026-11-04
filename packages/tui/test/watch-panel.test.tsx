@@ -70,6 +70,29 @@ async function withTerminalRows<T>(rowsWanted: number, run: () => T | Promise<T>
 	}
 }
 
+/**
+ * Run a body against a terminal of both dimensions. The split is a decision
+ * about width *and* height, so a test that fixes only one cannot tell the
+ * split from the inline panel.
+ */
+async function withTerminalSize<T>(columns: number, rowsWanted: number, run: () => T | Promise<T>): Promise<T> {
+	const probe = render(<WatchPanel shells={[]} />);
+	const proto = Object.getPrototypeOf(probe.stdout) as object;
+	const originalColumns = Object.getOwnPropertyDescriptor(proto, "columns");
+	const originalRows = Object.getOwnPropertyDescriptor(proto, "rows");
+	probe.unmount();
+	Object.defineProperty(proto, "columns", { get: () => columns, configurable: true });
+	Object.defineProperty(proto, "rows", { value: rowsWanted, configurable: true });
+	try {
+		return await run();
+	} finally {
+		if (originalColumns) Object.defineProperty(proto, "columns", originalColumns);
+		else Reflect.deleteProperty(proto, "columns");
+		if (originalRows) Object.defineProperty(proto, "rows", originalRows);
+		else Reflect.deleteProperty(proto, "rows");
+	}
+}
+
 describe("watchPanelHeight", () => {
 	test("asks for twelve rows and no more, however tall the terminal is", () => {
 		expect(watchPanelHeight(24)).toBe(WATCH_PANEL_DESIRED_ROWS);
@@ -643,8 +666,10 @@ describe("Ctrl+T at the REPL", () => {
 		const h = replSetup();
 		h.store.set((s) => ({ ...s, activity: { home: undefined, range: "all" } }));
 		await h.write(CTRL_T);
+		// The heatmap owns the frame, so the split's panes stand down while it is up
+		// — the same rule a dialog follows. The panel is open behind it all the same.
 		expect(h.frame()).toContain("Activity");
-		expect(h.frame()).toContain("VITE v5 ready");
+		expect(h.frame()).not.toContain("VITE v5 ready");
 
 		// One Escape, one panel: the order matters, and it is the REPL's own — the
 		// activity block is above the watch panel's in the key handler.
@@ -654,7 +679,131 @@ describe("Ctrl+T at the REPL", () => {
 
 		await h.write("\x1b");
 		expect(h.frame()).not.toContain("VITE v5 ready");
+		expect(h.frame()).not.toContain("Conversation");
 		h.finish();
+	}, 20_000);
+});
+
+describe("the split view at the REPL", () => {
+	/** The terminal spells the page keys this way; ink parses both as `pageUp`/`pageDown`. */
+	const PAGE_UP = "\x1b[5~";
+	const PAGE_DOWN = "\x1b[6~";
+
+	test("on a terminal with room, Ctrl+T splits the frame into two live panes", async () => {
+		await withTerminalSize(100, 24, async () => {
+			const h = replSetup();
+			await h.write(CTRL_T);
+			// Both panes in one frame, and the prompt is still the prompt: the split
+			// adds columns, it does not take the keyboard.
+			expect(h.frame()).toContain("Conversation");
+			expect(h.frame()).toContain("ctrl+v cycles");
+			expect(h.frame()).toContain("VITE v5 ready");
+			await h.write("a draft");
+			expect(h.frame()).toContain("a draft");
+			h.finish();
+		});
+	}, 20_000);
+
+	// The same key, a terminal that cannot hold two columns: the panel's old
+	// inline form is the honest answer, not a squeezed split. Asserted on the
+	// pane header's absence *and* the tail's presence, so a frame that failed to
+	// render anything cannot pass the first half.
+	test("on a narrow terminal the same key keeps the inline panel", async () => {
+		await withTerminalSize(80, 24, async () => {
+			const h = replSetup();
+			await h.write(CTRL_T);
+			expect(h.frame()).toContain("VITE v5 ready");
+			expect(h.frame()).toContain("ctrl+v cycles");
+			expect(h.frame()).not.toContain("Conversation");
+			h.finish();
+		});
+	}, 20_000);
+
+	test("PgUp pages the conversation back, PgDn follows it, Escape closes the split", async () => {
+		await withTerminalSize(100, 24, async () => {
+			const h = replSetup();
+			h.store.set((s) => ({
+				...s,
+				entries: Array.from({ length: 30 }, (_, i) => ({ kind: "user" as const, text: `message ${i + 1}` })),
+			}));
+			await delay(30);
+			await h.write(CTRL_T);
+			expect(h.frame()).toContain("message 30");
+
+			await h.write(PAGE_UP);
+			expect(h.frame()).toContain("scrolled");
+			expect(h.frame()).not.toContain("message 30");
+
+			await h.write(PAGE_DOWN);
+			expect(h.frame()).not.toContain("scrolled");
+			expect(h.frame()).toContain("message 30");
+
+			// Escape is the panel's close key everywhere; the split is the panel's
+			// wide shape, not a third screen with its own vocabulary.
+			await h.write("\x1b");
+			expect(h.frame()).not.toContain("Conversation");
+			expect(h.frame()).not.toContain("ctrl+v cycles");
+			h.finish();
+		});
+	}, 20_000);
+
+	// The split's rows and an overlay's rows are both charged to one capped frame,
+	// and ink garbles a frame it has to clip (measured — see
+	// `docs/dev/split-pane-design.md`). So the panes stand down while an overlay
+	// owns the screen, and come back exactly as they were when it closes: the
+	// split is still open behind the dialog, not forgotten by it.
+	test("a dialog takes the frame, and the panes return when it closes", async () => {
+		await withTerminalSize(100, 24, async () => {
+			const h = replSetup();
+			await h.write(CTRL_T);
+			expect(h.frame()).toContain("Conversation");
+
+			h.store.set((s) => ({
+				...s,
+				dialog: { callId: "c1", toolName: "Bash", inputPreview: "rm -rf build", resolve: () => {} },
+			}));
+			await delay(30);
+			expect(h.frame()).toContain("Bash");
+			expect(h.frame()).not.toContain("Conversation");
+
+			h.store.set((s) => ({ ...s, dialog: null }));
+			await delay(30);
+			expect(h.frame()).toContain("Conversation");
+			expect(h.frame()).toContain("VITE v5 ready");
+			h.finish();
+		});
+	}, 20_000);
+
+	// Queued messages are rows in the same frame. The panes give them the space,
+	// and on a 24-row terminal three of them leave too few rows to be readable —
+	// so the split yields to the ordinary layout for as long as the queue is
+	// there, rather than drawing a pane of five rows or pushing the frame past
+	// the terminal.
+	test("a queue that would leave the panes unreadable yields the split, and the split returns when it drains", async () => {
+		await withTerminalSize(100, 24, async () => {
+			const h = replSetup();
+			await h.write(CTRL_T);
+			expect(h.frame()).toContain("Conversation");
+
+			h.store.set((s) => ({
+				...s,
+				queued: [
+					{ id: "q1", text: "first", mode: "queue" },
+					{ id: "q2", text: "second", mode: "queue" },
+					{ id: "q3", text: "third", mode: "queue" },
+				],
+			}));
+			await delay(30);
+			expect(h.frame()).toContain("first");
+			expect(h.frame()).not.toContain("Conversation");
+			// The ordinary layout is what took its place: the band, not a blank.
+			expect(h.frame()).toContain("ctrl+v cycles");
+
+			h.store.set((s) => ({ ...s, queued: [] }));
+			await delay(30);
+			expect(h.frame()).toContain("Conversation");
+			h.finish();
+		});
 	}, 20_000);
 });
 

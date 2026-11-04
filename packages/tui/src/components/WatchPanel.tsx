@@ -185,6 +185,8 @@ export function WatchPanel({
 	selection = null,
 	subagentLines = [],
 	statusLines = [],
+	columns: fixedColumns,
+	height: fixedHeight,
 }: {
 	shells: UiBackgroundShell[];
 	/** The stop Ctrl+V moved to; `null` while the automatic shell still stands. */
@@ -193,11 +195,25 @@ export function WatchPanel({
 	subagentLines?: string[];
 	/** The published session facts, one per line (model, cost, context, cache). */
 	statusLines?: string[];
+	/**
+	 * The column the panel was given, when it is not the terminal's — the split
+	 * view's right pane. Omitted, the panel measures the terminal exactly as it
+	 * did as a bottom band.
+	 */
+	columns?: number;
+	/**
+	 * The rows the panel may occupy, border included. Omitted, the inline
+	 * budget ({@link watchPanelHeight}) applies; the split view passes the
+	 * height its column actually has.
+	 */
+	height?: number;
 }) {
 	const theme = useTheme();
-	const { columns, rows } = useWindowSize();
+	const size = useWindowSize();
+	const columns = fixedColumns ?? size.columns;
+	const panelHeight = fixedHeight ?? watchPanelHeight(size.rows);
 	// The frame inside the border: everything below is budgeted in these rows.
-	const inner = Math.max(0, watchPanelHeight(rows) - 2);
+	const inner = Math.max(0, panelHeight - 2);
 	// The stop on screen. A picked shell that has left the list falls back to
 	// the automatic answer rather than to a neighbour: the pick is an identity,
 	// and "the one I chose is gone" must not silently become "here is another
@@ -217,7 +233,21 @@ export function WatchPanel({
 	const width = Math.max(8, columns - 4);
 
 	return (
-		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
+		<Box
+			flexDirection="column"
+			// In the split view the column reserves a fixed width; without this the
+			// panel would shrink to its longest row and leave a gap at the frame's
+			// right edge. Inline, it keeps sizing to its content as the band always
+			// has.
+			width={fixedColumns}
+			borderStyle="single"
+			borderColor={theme.border}
+			paddingX={1}
+			// Only the split view fixes a height; the inline band keeps growing to
+			// its content, which is what the frame budget has always assumed.
+			height={fixedHeight}
+			flexShrink={fixedHeight === undefined ? undefined : 0}
+		>
 			<Text dimColor wrap="truncate">
 				{POLL_NOTE}
 			</Text>

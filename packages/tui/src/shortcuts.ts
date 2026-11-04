@@ -110,7 +110,10 @@ export function shortcutGroups(opts: {
 				// action plainly. (The `Ctrl+R` row above is the case where the key is
 				// the engine's and the row names the command it runs.)
 				["Ctrl+O", "transcript"],
-				["Ctrl+T", "watch panel"],
+				// The same key opens both layouts: the two-column split where the
+				// terminal can hold it, the bottom band everywhere else. Naming the
+				// split first is the honest order — it is what a wide terminal gets.
+				["Ctrl+T", "watch view: split transcript + watch (panel when narrow)"],
 				// The one host key neither engine contests — vim's ctrl block
 				// forwards everything but C-r, and the emacs engine binds no C-v at
 				// all — so unlike the two rows above this one needs no "taken"

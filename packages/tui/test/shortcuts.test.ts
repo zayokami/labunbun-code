@@ -167,9 +167,12 @@ describe("shortcutGroups", () => {
 			shortcutGroups({ editor, vimMode: "normal" })
 				.find((g) => g.title === "Prompt")
 				?.rows.find(([k]) => k === "Ctrl+T")?.[1];
-		expect(ctrlT("none")).toBe("watch panel");
-		expect(ctrlT("vim")).toBe("watch panel");
-		expect(ctrlT("emacs")).toBe("watch panel");
+		// The row names both layouts the one key opens: the split view where the
+		// terminal is wide enough, the bottom band everywhere else.
+		const label = "watch view: split transcript + watch (panel when narrow)";
+		expect(ctrlT("none")).toBe(label);
+		expect(ctrlT("vim")).toBe(label);
+		expect(ctrlT("emacs")).toBe(label);
 		// The new contract: the engine does not declare the key at all.
 		expect(RESERVED_KEYS.map(([token]) => token)).not.toContain("C-t");
 	});

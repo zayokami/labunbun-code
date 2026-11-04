@@ -26,6 +26,7 @@ import { PromptInput } from "./PromptInput.tsx";
 import { QuestionDialog } from "./QuestionDialog.tsx";
 import { QueuedMessages } from "./QueuedMessages.tsx";
 import { ShortcutOverlay } from "./ShortcutOverlay.tsx";
+import { SplitWorkspace, workspaceFits, workspaceHeight } from "./SplitWorkspace.tsx";
 import { StatusCard } from "./StatusCard.tsx";
 import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
@@ -300,7 +301,7 @@ export function REPL({
 	// `flex-end` keeps the newest rows when the content is taller than the cap:
 	// the oldest live rows are the ones clipped, never the prompt or a dialog's
 	// buttons. The non-TTY fallback leaves tests and pipes uncapped.
-	const { rows: windowRows } = useWindowSize();
+	const { rows: windowRows, columns: windowColumns } = useWindowSize();
 	const frameCap = stdout.isTTY && windowRows > 1 ? windowRows - 1 : undefined;
 	// A dialog is the user deciding, not the model working. The clock stops while
 	// one is open, so a turn that spent two minutes waiting on an approval does
@@ -560,6 +561,51 @@ export function REPL({
 	// not re-aimed behind their back — and the panel still falls back to the
 	// automatic answer if the picked shell has since ended out of the list.
 	const [watchSelection, setWatchSelection] = useState<WatchSelection | null>(null);
+	// The split view's scroll position, in entries back from the newest.
+	// `Ctrl+T` opens the view; on a wide enough terminal that view is the two
+	// columns, and the transcript side can then be paged with PgUp/PgDn.
+	const [workspaceOffset, setWorkspaceOffset] = useState(0);
+	// What the terminal can hold. `windowRows` is undefined under the test
+	// harness and on some hosts, so 24 is the same fallback the transcript
+	// screen uses; the split appears only where both panes stay readable.
+	const workspaceColumns = windowColumns ?? 80;
+	const workspaceRowCount = windowRows ?? 24;
+	// The rows the split must not spend: the queued-message previews (a hint, up
+	// to three rows, and a `+N more`) and the Ctrl+C confirmation. They live below
+	// the panes in the same frame, so the panes shrink by exactly what they cost —
+	// and if the panes would fall below a readable height, the split gives way to
+	// the ordinary layout for as long as the queue is there.
+	const queuedRows = queued.length === 0 ? 0 : 1 + Math.min(queued.length, 3) + (queued.length > 3 ? 1 : 0);
+	const splitReserve = queuedRows + (ctrlCHint ? 1 : 0);
+	const splitHeight = Math.max(0, workspaceHeight(workspaceRowCount) - splitReserve);
+	const splitActive = watchOpen && workspaceFits(workspaceColumns, workspaceRowCount - splitReserve);
+	// A dialog, a question, a picker or a card takes the frame. The split's rows
+	// would push that overlay past the frame cap, where ink's clipping garbles the
+	// screen (the measurement in `docs/dev/split-pane-design.md`); so the panes
+	// step out of the layout while one is up and return unchanged when it closes.
+	// The live list stays at zero height regardless, so nothing is sealed behind
+	// the hidden pane.
+	const overlayOpen =
+		dialog !== null ||
+		question !== null ||
+		planReview !== null ||
+		picker !== null ||
+		statusCard !== null ||
+		activity !== null ||
+		wheelOpen ||
+		shortcutsOpen;
+
+	// While the split is open, the live list keeps its place in the tree (its
+	// `<Static>` index is what stops sealed rows printing twice) but is handed
+	// a frozen snapshot: the rows it would seal are on screen in the pane
+	// already, and printing them behind it would be a second copy. On close the
+	// live array returns and Static prints only the entries it has not shown —
+	// once, in order. The snapshot is an array reference, so its entries are
+	// the objects of the moment the view opened; a tool result that lands while
+	// the pane is up is seen through `entries` in the pane and printed on close.
+	const liveEntriesRef = useRef(entries);
+	if (!splitActive) liveEntriesRef.current = entries;
+	const liveListEntries = splitActive ? liveEntriesRef.current : entries;
 
 	useInput((input, key) => {
 		// The key list is dismissed by either key, and while it is up the prompt is
@@ -609,6 +655,7 @@ export function REPL({
 		// behind the transcript, exactly as it was.
 		if (watchOpen && !transcriptMode && key.escape) {
 			setWatchOpen(false);
+			setWorkspaceOffset(0);
 			return;
 		}
 		if (key.ctrl && input === "o") {
@@ -627,6 +674,10 @@ export function REPL({
 			if (dialog || question || planReview || picker) return;
 			if (transcriptMode) return;
 			setWatchOpen((v) => !v);
+			// A view that opens on the tail and remembers a scroll from last time
+			// would open somewhere the user did not leave it; the panel has no
+			// scroll, so the offset only exists for this one layout.
+			setWorkspaceOffset(0);
 			return;
 		}
 		// Ctrl+V walks the watch panel's source ring: each shell's tail in the
@@ -665,6 +716,18 @@ export function REPL({
 			if (emacs) return;
 			const jumpTo = Number.parseInt(input, 10);
 			setWatchSelection((current) => jumpWatchSelection(backgroundShells, jumpTo) ?? current);
+			return;
+		}
+		// The split view's transcript pane pages with the keys a screen reader
+		// of history expects. The prompt keeps every other key: this is the one
+		// place the pane needs input, and it needs exactly two keys. The page
+		// is the pane's own body height, so a press never skips an entry that
+		// was never on screen (the transcript screen's rule).
+		if (splitActive && (key.pageUp || key.pageDown)) {
+			if (dialog || question || planReview || picker) return;
+			const page = Math.max(1, splitHeight - 4);
+			if (key.pageUp) setWorkspaceOffset((o) => Math.min(o + page, entries.length));
+			else setWorkspaceOffset((o) => Math.max(0, o - page));
 			return;
 		}
 		if (transcriptMode) {
@@ -928,9 +991,36 @@ export function REPL({
 					sessionTitle={sessionTitle}
 					actionRequired={awaitingUser}
 				/>
-				<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} paintedTheme={themeCommit} />
-				<StreamingPreview text={streamingText} thinking={thinkingText} />
-				{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
+				{/* The split view replaces the live transcript with the panes. The
+				    list itself stays mounted at zero height so its Static index
+				    survives, but it is fed the frozen snapshot — see
+				    `liveListEntries` — so nothing is sealed behind the pane. */}
+				<Box flexDirection="column" height={splitActive ? 0 : undefined} overflow={splitActive ? "hidden" : undefined}>
+					<VirtualMessageList
+						entries={liveListEntries}
+						liveOutputs={liveOutputs}
+						paint={paint}
+						paintedTheme={themeCommit}
+					/>
+					{splitActive ? null : <StreamingPreview text={streamingText} thinking={thinkingText} />}
+					{!splitActive && tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
+				</Box>
+				{splitActive && !overlayOpen && (
+					<SplitWorkspace
+						entries={entries}
+						liveOutputs={liveOutputs}
+						streamingText={streamingText}
+						thinkingText={thinkingText}
+						shells={backgroundShells}
+						selection={watchSelection}
+						subagentLines={watchSubagentLines}
+						statusLines={watchStatusLines}
+						tasks={tasks}
+						columns={workspaceColumns}
+						height={splitHeight}
+						offset={workspaceOffset}
+					/>
+				)}
 				<Box marginBottom={1} flexDirection="column">
 					<StatusLine
 						phase={statusPhase}
@@ -1029,7 +1119,7 @@ export function REPL({
 					    is inside the non-transcript branch — the branch is the reason the
 					    panel is *not* drawn there, and the condition is the reason the
 					    state it comes back to is the state it left. */}
-				{watchOpen && !transcriptMode && (
+				{watchOpen && !transcriptMode && !splitActive && (
 					<WatchPanel
 						shells={backgroundShells}
 						selection={watchSelection}
