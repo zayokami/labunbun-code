@@ -122,7 +122,9 @@ describe("prompt input", () => {
 		stdin.write("b");
 		await delay(30);
 		expect(submitted).toEqual([]);
-		expect(flat(lastFrame())).toContain("│ a │");
+		// The prompt's `>` margin, then the buffer: the `a` is still on the first
+		// row and the newline created a second one.
+		expect(flat(lastFrame())).toContain("> a");
 		stdin.write("\r");
 		await delay(30);
 		expect(submitted).toEqual(["a\nb"]);
@@ -187,6 +189,19 @@ describe("prompt input", () => {
 		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} />));
 		await delay(30);
 		expect(flat(lastFrame())).toContain("Esc interrupt");
+		unmount();
+	});
+
+	// During a run Enter is not "send a new turn": the buffer is queued, or
+	// steered into the turn at its next tool boundary. The legend has to follow
+	// the key, and this is the only row that can say what it will do.
+	test("the hint follows the running turn", async () => {
+		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} busy canSteer />));
+		await delay(30);
+		const frame = flat(lastFrame());
+		expect(frame).toContain("Enter steer");
+		expect(frame).toContain("Tab queue");
+		expect(frame).not.toContain("Enter send");
 		unmount();
 	});
 
@@ -1155,6 +1170,41 @@ describe("the permission mode badge", () => {
 		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} modeLabel="Plan" />));
 		await delay(30);
 		expect(flat(lastFrame())).toContain("[Plan] Enter send");
+		unmount();
+	});
+});
+
+/**
+ * The prompt's shell.
+ *
+ * The box is the one element on screen that is always there, so its shape is
+ * what tells a reader "this is waiting for you" before they have typed
+ * anything. The glyph is in the margin and the legend is outside the box: both
+ * are split from the writing surface deliberately, and both are the kind of
+ * styling that a refactor can quietly undo without failing a behavioural test.
+ */
+describe("the prompt's shell", () => {
+	test("the empty prompt is a rounded box with the shell's > in the margin", async () => {
+		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} placeholder="Ask anything" />));
+		await delay(30);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("╭");
+		expect(frame).toContain("╰");
+		// The glyph and the placeholder share a row, inside the border.
+		expect(flat(frame)).toMatch(/│ > Ask anything/);
+		unmount();
+	});
+
+	test("the badges and the hint sit under the box, not inside it", async () => {
+		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} modeLabel="Plan" />));
+		await delay(30);
+		const lines = (lastFrame() ?? "").split("\n");
+		const bottom = lines.findIndex((l) => l.includes("╰"));
+		const legend = lines.findIndex((l) => l.includes("[Plan] Enter send"));
+		expect(bottom).toBeGreaterThanOrEqual(0);
+		expect(legend).toBeGreaterThan(bottom);
+		// The legend's row is outside the border, so it carries no `│` edge.
+		expect(lines[legend]).not.toContain("│");
 		unmount();
 	});
 });

@@ -43,9 +43,25 @@ export function escapeHint(editor: EditorKind, vimMode: VimMode): string {
  * The prompt's key hint, folded to what fits. Three tiers rather than wrapping:
  * a hint that spills onto a second line pushes the prompt up and down as the
  * user resizes, and the terminal is the one place it cannot be reflowed later.
+ *
+ * While a turn is running the key meanings change, so the legend does too:
+ * Enter no longer sends a new turn, it queues the buffer (or steers it into the
+ * run when the turn can take it), and Tab queues. A row that still said
+ * "Enter send" was a caption for a key that did something else, which is the
+ * class of lie the shortcut overlay's tests exist to catch.
  */
-export function hintLine(columns: number, opts: { editor: EditorKind; vimMode: VimMode }): string {
+export function hintLine(
+	columns: number,
+	opts: { editor: EditorKind; vimMode: VimMode; busy?: boolean; canSteer?: boolean },
+): string {
 	const esc = escapeHint(opts.editor, opts.vimMode);
+	if (opts.busy) {
+		// The Esc clause stays the editor's answer even here: under vim insert the
+		// key leaves insert before it can reach the session's interrupt.
+		const enter = opts.canSteer ? "Enter steer" : "Enter queue";
+		if (columns >= HINT_SHORT_MIN_COLUMNS) return `${enter} · Tab queue · ${esc}`;
+		return `${enter} · ${esc}`;
+	}
 	// Under emacs `C-r` starts an incremental search backward, not history
 	// search — the overlay's Ctrl+R row names the search the key starts, and the
 	// hint must not claim the history clause in the smaller font. The other two

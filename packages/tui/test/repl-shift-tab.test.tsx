@@ -67,7 +67,10 @@ function setup(pair?: { mode: PermissionMode; sandbox: SandboxMode }, onModeChan
 		stdin: view.stdin,
 		/** The prompt's own text, out of the rounded box, as in the emacs suite. */
 		buffer: () => {
-			const match = /│([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "));
+			// The prompt is the only bordered row that starts with `> `. The welcome
+			// panel above it draws borders too, and pairing every `│` in a frame
+			// with three-column rows mixes the greeting's edges with the prompt's.
+			const match = /│ > ([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "));
 			return match?.[1]?.trim();
 		},
 		frame: () => (view.lastFrame() ?? "").replace(/\s+/g, " "),
@@ -192,13 +195,13 @@ describe("Shift+Tab in the prompt", () => {
 		await delay(40);
 
 		// Still `/h`: had the branch fallen through, this would read `/help`.
-		const text = /│([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "))?.[1]?.trim();
+		const text = /│ > ([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "))?.[1]?.trim();
 		expect(text).toBe("/h");
 		// And Tab itself still works in this same prompt, so the assertion above is
 		// about the modifier and not about a prompt that never completes anything.
 		view.stdin.write("\t");
 		await delay(40);
-		expect(/│([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "))?.[1]?.trim()).toBe("/help");
+		expect(/│ > ([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "))?.[1]?.trim()).toBe("/help");
 		view.unmount();
 	}, 20_000);
 

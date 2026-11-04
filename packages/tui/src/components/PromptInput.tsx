@@ -906,12 +906,18 @@ export function PromptInput({
 			{/* Above the prompt, where the suggestion lists go: it is a thing to
 			    read and press while typing, not a modal standing over the app. */}
 			{osk && <OnScreenKeyboard pageIndex={oskPageIndex} cursor={oskCursor} shift={oskShift} />}
-			<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
+			{/* Rounded, and with the shell's `>` in the margin: the box is the one
+			    element on screen that is always there, and a square corner with a
+			    bare line of text reads as an output log rather than something
+			    waiting for a keystroke. The glyph is the accent colour and the
+			    buffer is not: the cursor has one job, and this is what frames it. */}
+			<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1}>
 				{state.text.length === 0 ? (
 					// The cursor has to be drawn here too. Falling through to the
 					// placeholder alone leaves an empty prompt with no caret, so the
 					// terminal looks unfocused until the first keystroke.
 					<Text>
+						<Text color={theme.accent}>{"> "}</Text>
 						<Text inverse>{placeholderCaret(placeholder).caret}</Text>
 						<Text dimColor>{placeholderCaret(placeholder).rest}</Text>
 					</Text>
@@ -919,6 +925,10 @@ export function PromptInput({
 					lines.map((line, i) => (
 						// biome-ignore lint/suspicious/noArrayIndexKey: lines are plain text renders with no per-item state to preserve
 						<Text key={i} color={theme.text}>
+							{/* Only the first line wears the glyph; continuation lines
+							    keep its width so a multi-line draft hangs under the
+							    first character rather than under the margin. */}
+							<Text color={theme.accent}>{i === 0 ? "> " : "  "}</Text>
 							{i === cursorLine || (sel && sel.start < lineEndOf(state.text, i))
 								? renderLineWithCursorAndSelection(state, i, cursorColumn(state.text, state.cursor, i), sel)
 								: line}
@@ -955,6 +965,12 @@ export function PromptInput({
 						<Text inverse> </Text>
 					</Text>
 				)}
+			</Box>
+			{/* The badges and the key list sit under the box, not in it. Inside,
+			    they shared a border with the sentence being typed and grew it into
+			    a three-row panel; below, the box is the writing surface and this
+			    is the legend for it — the same split Claude Code's prompt uses. */}
+			<Box paddingX={1} flexDirection="row">
 				{/* A plain wrapper with styled children rather than a dim Text with a
 				    nested badge: ink applies a Text's `dimColor` as a transform over
 				    the whole squashed line, after nested children have been styled
@@ -980,7 +996,7 @@ export function PromptInput({
 					    `dimColor` as a transform over the whole squashed line, so only
 					    text outside that Text can carry a colour of its own. */}
 					{modeLabel ? <Text color={modeBadgeColor(modeLabel, theme)}>{`[${modeLabel}] `}</Text> : null}
-					<Text dimColor>{hintLine(columns, { editor: editor.mode, vimMode })}</Text>
+					<Text dimColor>{hintLine(columns, { editor: editor.mode, vimMode, busy, canSteer })}</Text>
 				</Text>
 			</Box>
 		</Box>

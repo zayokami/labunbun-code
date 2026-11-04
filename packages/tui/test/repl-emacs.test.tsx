@@ -57,7 +57,10 @@ function setup(options: { emacs?: boolean } = {}) {
 		 * character being *absent*, which a substring search cannot state.
 		 */
 		buffer: () => {
-			const match = /│([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "));
+			// The prompt is the only bordered row that starts with `> `. The welcome
+			// panel above it draws borders too, and pairing every `│` in a frame
+			// with three-column rows mixes the greeting's edges with the prompt's.
+			const match = /│ > ([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "));
 			return match?.[1]?.trim();
 		},
 		frame: () => (view.lastFrame() ?? "").replace(/\s+/g, " "),

@@ -47,6 +47,36 @@ describe("hintLine", () => {
 		expect(hintLine(120, { editor: "none", vimMode: "insert" })).toContain("ctrl+r search");
 		expect(hintLine(120, { editor: "vim", vimMode: "insert" })).toContain("ctrl+r search");
 	});
+
+	// Enter does not send during a run: it queues the buffer, or steers it into
+	// the turn when there is a tool boundary to steer at. The legend said
+	// "Enter send" through all of it — a caption for a key doing another thing.
+	test("switches to the mid-run meanings while a turn is running", () => {
+		const steer = hintLine(120, { editor: "none", vimMode: "insert", busy: true, canSteer: true });
+		expect(steer).toContain("Enter steer");
+		expect(steer).toContain("Tab queue");
+		expect(steer).not.toContain("Enter send");
+		const queue = hintLine(120, { editor: "none", vimMode: "insert", busy: true, canSteer: false });
+		expect(queue).toContain("Enter queue");
+		expect(queue).not.toContain("Enter steer");
+	});
+
+	// The key that matters at a narrow width is the one that dispatches the
+	// buffer; Tab is the shortcut for the same queue, so it goes first.
+	test("the mid-run hint folds the Tab clause before the key that matters", () => {
+		const narrow = hintLine(HINT_SHORT_MIN_COLUMNS - 1, {
+			editor: "none",
+			vimMode: "insert",
+			busy: true,
+			canSteer: true,
+		});
+		expect(narrow).toContain("Enter steer");
+		expect(narrow).not.toContain("Tab queue");
+	});
+
+	test("the mid-run hint keeps the editor's answer for Escape", () => {
+		expect(hintLine(120, { editor: "vim", vimMode: "insert", busy: true })).toContain("Esc normal");
+	});
 });
 
 describe("escapeHint", () => {
