@@ -620,7 +620,24 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		return 2;
 	}
 
-	console.log(`${CLI_NAME} ${CODING_AGENT_VERSION} — starting interactive mode…`);
+	// Ink needs raw mode, which needs a terminal on stdin. Without one the first
+	// frame is drawn and then the renderer throws, so a launcher that does not
+	// give the process a console shows the interface for a moment and closes —
+	// read as "it flashed and disappeared" rather than as "this mode needs a
+	// terminal". Say so before mounting anything; `-p` is the door for the rest.
+	if (process.stdin.isTTY !== true) {
+		console.error(
+			`${CLI_NAME}'s interactive mode needs a terminal.\n` +
+				`Use \`${CLI_NAME} -p "<prompt>"\` for a one-shot run, or \`${CLI_NAME} --help\` for the full list.`,
+		);
+		return 2;
+	}
+
+	// No startup line here. It used to print `<name> <version> — starting
+	// interactive mode…` and then hand over, but a scrollback line saying the
+	// thing the welcome panel is about to say in full is noise above the first
+	// frame, and it is the one line Ink cannot take back. The greeting owns the
+	// first screen now (packages/tui/src/components/WelcomeBanner.tsx).
 	const { runInteractive } = await import("./interactive.ts");
 	return runInteractive({
 		modelRef: args.model ?? undefined,
