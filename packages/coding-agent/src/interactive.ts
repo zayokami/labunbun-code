@@ -173,7 +173,7 @@ import {
 // The constant lives in the module with no other imports: `./index.ts`
 // re-exports the migration graph, and a REPL start must not pull every source
 // reader in just to print a name.
-import { CLI_NAME } from "./cli-constants.ts";
+import { CLI_NAME, CODING_AGENT_VERSION } from "./cli-constants.ts";
 import {
 	builtInCommands,
 	type Command,
@@ -2124,6 +2124,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		].sort(([a], [b]) => a.localeCompare(b)),
 		completeFiles: (query) => fileCompleter(query),
 		dirName: basename(cwd),
+		// The greeting's title line. The TUI has no version of its own — the
+		// release number belongs to the product, and this is the layer that knows
+		// which product is running.
+		version: CODING_AGENT_VERSION,
 		// Read before mounting, so the first frame already carries the name the
 		// session was given rather than replacing the directory a moment later.
 		sessionTitle: readSessionTitle(store.path),

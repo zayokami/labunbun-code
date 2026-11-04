@@ -32,6 +32,7 @@ import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } fro
 import { TaskStrip } from "./TaskStrip.tsx";
 import { TerminalTitle } from "./TerminalTitle.tsx";
 import { jumpWatchSelection, nextWatchSelection, WatchPanel, type WatchSelection } from "./WatchPanel.tsx";
+import { WelcomeBanner } from "./WelcomeBanner.tsx";
 
 /** Verdict from the app layer's prompt gate (UserPromptSubmit hooks). */
 export interface PromptSubmitVerdict {
@@ -107,6 +108,13 @@ export interface ReplProps {
 	history?: string[];
 	/** Basename of the session directory, for the terminal window title. */
 	dirName?: string;
+	/**
+	 * The workspace root, for the welcome panel. The basename alone cannot say
+	 * which checkout a greeting belongs to, and the panel has room to say it.
+	 */
+	cwd?: string;
+	/** The build's version, for the welcome panel's title line. */
+	version?: string;
 	/**
 	 * The controller, when there is one. Optional, and every pad-driven branch in
 	 * this component is behind it: without a pad the tree renders exactly as it
@@ -210,6 +218,8 @@ export function REPL({
 	completeFiles,
 	history,
 	dirName = "",
+	cwd,
+	version,
 	pad,
 }: ReplProps) {
 	const entries = useStore(store, (s) => s.entries);
@@ -967,6 +977,47 @@ export function REPL({
 	const start = end - windowSize;
 	const windowEntries = entries.slice(start, end);
 
+	// The greeting is for the screen before the first message. A resumed session
+	// starts with rows, and a run in flight has a user row even before the first
+	// answer, so both land on the transcript instead of a welcome they have
+	// already moved past. An overlay gives way to it as well: the wheel, the key
+	// list and a dialog need the rows, and the welcome is the one thing on
+	// screen that is not doing anything. Read here, after every piece of state
+	// it asks about has been declared.
+	//
+	// Info rows are not the conversation. A session opens with a few of them —
+	// a controller that is not attached, a skill that failed validation, a
+	// catalog refresh — and counting those as "already talking" hid the panel on
+	// nearly every real machine. They stay on screen under it; only a row
+	// somebody authored or received, or a failure, ends the greeting.
+	const conversationStarted = entries.some((entry) => entry.kind !== "info");
+	const showWelcome =
+		!conversationStarted &&
+		streamingText === "" &&
+		statusPhase === "idle" &&
+		!dialog &&
+		!question &&
+		!planReview &&
+		!picker &&
+		!wheelOpen &&
+		!shortcutsOpen &&
+		!activity &&
+		!watchOpen &&
+		!transcriptMode &&
+		!statusCard;
+	// What the notices under the panel cost the terminal. Only info rows can be
+	// here while the greeting shows, each one line plus the run's trailing gap,
+	// and a long notice wraps at the frame width. Handed to the banner so its
+	// size ladder spends the room that is actually left.
+	const welcomeNoticeRows = !showWelcome
+		? 0
+		: entries.reduce(
+				(sum, entry) =>
+					sum +
+					Math.max(1, Math.ceil((entry.kind === "info" ? entry.text.length : 0) / Math.max(1, windowColumns ?? 80))),
+				0,
+			) + (entries.length > 0 ? 1 : 0);
+
 	return (
 		<Box
 			flexDirection="column"
@@ -991,6 +1042,16 @@ export function REPL({
 					sessionTitle={sessionTitle}
 					actionRequired={awaitingUser}
 				/>
+				{showWelcome ? (
+					<WelcomeBanner
+						columns={windowColumns ?? 80}
+						rows={windowRows ?? 24}
+						noticeRows={welcomeNoticeRows}
+						version={version}
+						cwd={cwd}
+						modelName={modelName}
+					/>
+				) : null}
 				{/* The split view replaces the live transcript with the panes. The
 				    list itself stays mounted at zero height so its Static index
 				    survives, but it is fed the frozen snapshot — see

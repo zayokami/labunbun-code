@@ -111,6 +111,8 @@ export interface ReplAppOptions {
 	history?: string[];
 	/** Workspace root — what a "don't ask again" rule for a file tool is scoped to. */
 	cwd?: string;
+	/** The build's version, for the welcome panel's title line. */
+	version?: string;
 	/**
 	 * Called with "allow" decisions so the app can record don't-ask-again rules.
 	 * The input comes along because the scope of the rule is derived from what
@@ -511,6 +513,8 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				commandSuggestions={options.commandSuggestions}
 				completeFiles={options.completeFiles}
 				dirName={options.dirName}
+				cwd={options.cwd}
+				version={options.version}
 				history={options.history}
 				pad={options.pad}
 			/>
