@@ -1,7 +1,10 @@
 {
 	"$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
 	"vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
-	"files": { "ignoreUnknown": true },
+	"files": {
+		"ignoreUnknown": true,
+		"includes": ["**", "!packages/coding-agent/src/bundled-skills.generated.ts"]
+	},
 	"formatter": {
 		"enabled": true,
 		"indentStyle": "tab",

@@ -273,6 +273,8 @@ A skill is a directory that contains a `SKILL.md` file. The tool adds a command 
 
 Put a skill in `~/.labunbun/skills/` or in `<project>/.labunbun/skills/`.
 
+The release binaries also carry the built-in skills, so a one-file install has them without a checkout. The tool writes them to `~/.labunbun/bundled-skills/<version>/` on first use and reads them from there. A skill with the same name in your directory or in the project replaces the built-in one.
+
 ### Plan mode
 
 Plan mode reads the code first. Plan mode does not change files. The tool then shows you a plan for review.
@@ -702,6 +704,7 @@ The server reports the `loadSession` capability. The editor can open a new sessi
 | `~/.labunbun/rules/` | Your rule files. |
 | `~/.labunbun/agents/` | Your agent definitions. |
 | `~/.labunbun/skills/` | Your skills. |
+| `~/.labunbun/bundled-skills/<version>/` | The built-in skills, written from the binary. |
 | `~/.labunbun/themes/` | Your themes. |
 | `~/.labunbun/output-styles/` | Your output styles. |
 | `~/.labunbun/history.jsonl` | The prompts that you typed. Press ↑ to recall them. |

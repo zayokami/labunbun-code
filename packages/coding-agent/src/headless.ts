@@ -638,7 +638,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// the line is the only way a scripted run can learn its instructions are
 	// missing rather than absent.
 	for (const warning of memory.warnings) console.error(`Memory: ${warning}`);
-	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
+	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home, { bundled: true });
 	// Built once and shared by the session prompt and every subagent's context
 	// block, so both are matching the same discovery snapshot.
 	const skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));

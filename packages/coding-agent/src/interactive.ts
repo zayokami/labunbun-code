@@ -1338,7 +1338,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// The three tools as one list for every consumer that spreads them; the
 	// control rides beside them for the command layer only.
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
-	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
+	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, undefined, { bundled: true });
 	markStartup("definitions+skills loaded");
 	// The model's half of the same skill list the slash commands expand for the
 	// user. Built here because the skill directory is this package's to know;

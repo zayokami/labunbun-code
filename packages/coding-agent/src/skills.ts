@@ -19,6 +19,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isMissingPathError } from "@labunbun/tools";
+import { materializeBundledSkills } from "./bundled-skills.ts";
 import type { Command, PromptCommand } from "./commands.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
 
@@ -176,8 +177,21 @@ function projectSkills(cwd: string, notes: string[]): Skill[] {
 	return loadSkillsFromDir(join(cwd, ".labunbun", "skills"), notes);
 }
 
+export interface SkillLoadOptions {
+	/**
+	 * Include the product's built-in skills (`bundled-skills.ts`). Off by
+	 * default so the loader stays a pure reader of the two on-disk tiers:
+	 * library tests and importers get exactly the files they wrote, and the
+	 * product's three entry points opt in explicitly. That opt-in is the one
+	 * line a new entry point can forget, so it is named in the type rather than
+	 * hidden behind a default.
+	 */
+	bundled?: boolean;
+}
+
 /**
- * The user tier always, the project tier only once this directory is trusted.
+ * The built-in tier, the user tier always, the project tier only once this
+ * directory is trusted.
  *
  * A skill's body is sent to the model as the text the user typed, so a repository
  * that ships one can write what reaches the prompt — see `project-trust.ts`. The
@@ -185,22 +199,32 @@ function projectSkills(cwd: string, notes: string[]): Skill[] {
  * is a loader with two meanings, and the headless path, which has no dialog to
  * approve anything with, calls this one.
  *
+ * Precedence is the order below: a user's own skill substitutes for the
+ * product's when the names collide, and a trusted project's substitutes for
+ * both. Built-ins are lowest because they are the only tier the user cannot
+ * delete — anything they wrote should win against something they cannot.
+ *
  * Notes report held-back skill folders rather than staying silent: a folder
  * whose name fails validation is invisible to every command and to discovery,
  * and the failure mode that matters is the author believing it loaded.
  */
-export function loadSkillsWithNotes(cwd: string, home = homedir()): SkillLoadResult {
+export function loadSkillsWithNotes(cwd: string, home = homedir(), options: SkillLoadOptions = {}): SkillLoadResult {
 	const notes: string[] = [];
+	let bundled: Skill[] = [];
+	if (options.bundled) {
+		const materialized = materializeBundledSkills(home);
+		if (materialized.note) notes.push(materialized.note);
+		if (materialized.root) bundled = loadSkillsFromDir(materialized.root, notes);
+	}
 	const user = loadSkillsFromDir(join(home, ".labunbun", "skills"), notes);
 	const project = isProjectTierTrusted(cwd, "skills", home) ? projectSkills(cwd, notes) : [];
-	// Project skills override user skills with the same name.
 	const byName = new Map<string, Skill>();
-	for (const skill of [...user, ...project]) byName.set(skill.name, skill);
+	for (const skill of [...bundled, ...user, ...project]) byName.set(skill.name, skill);
 	return { skills: [...byName.values()], notes };
 }
 
-export function loadSkills(cwd: string, home = homedir()): Skill[] {
-	return loadSkillsWithNotes(cwd, home).skills;
+export function loadSkills(cwd: string, home = homedir(), options: SkillLoadOptions = {}): Skill[] {
+	return loadSkillsWithNotes(cwd, home, options).skills;
 }
 
 /** The project skills the trust gate is holding back, for a dialog to offer. */

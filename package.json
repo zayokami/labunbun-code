@@ -13,7 +13,8 @@
 		"test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage",
 		"lint": "biome check --error-on-warnings .",
 		"fmt": "biome format --write .",
-		"bin:build": "bun build --compile --minify packages/coding-agent/src/main.ts --outfile dist/labunbun-x64.exe",
+		"skills:bundle": "bun run scripts/bundle-skills.ts",
+		"bin:build": "bun run scripts/bundle-skills.ts && bun build --compile --minify packages/coding-agent/src/main.ts --outfile dist/labunbun-x64.exe",
 		"installer:build": "bun run scripts/build-installer.ts",
 		"release:package": "bun run scripts/package-release.ts"
 	},

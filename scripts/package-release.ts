@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { writeBundledSkillsModule } from "./bundle-skills.ts";
 import { buildAppImage, buildDeb, buildRpm, buildZip, type DebFile, type SquashfsEntry } from "./release-archives.ts";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -198,6 +199,11 @@ function writeZip(architecture: string, binary: Buffer): string {
 	writeFileSync(artifact, data);
 	return artifact;
 }
+
+// The compiled binaries embed the built-in skills; regenerate the import list
+// before the first target is built so a skill added in this change is in the
+// release rather than in the source tree only.
+writeBundledSkillsModule(REPO);
 
 rmSync(RELEASE, { recursive: true, force: true });
 mkdirSync(RELEASE, { recursive: true });

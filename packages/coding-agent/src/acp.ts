@@ -1123,7 +1123,7 @@ class AcpAgent implements acp.Agent {
 
 		const memory = loadMemoryFiles(cwd, home);
 		for (const warning of memory.warnings) process.stderr.write(`Memory: ${warning}\n`);
-		const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
+		const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home, { bundled: true });
 		// The model's door to the same skills the discovery block lists, merged
 		// beside the sandbox tools because the skill directory is this package's
 		// to know. No `Task` and no plan tools are built here, but a skill is a
