@@ -1,6 +1,6 @@
 import { Box, Static, Text } from "ink";
 import { memo, useMemo } from "react";
-import { RESULT_INDENT, RESULT_LEAD, TOOL_DOT } from "../figures.ts";
+import { ASSISTANT_DOT, RESULT_INDENT, RESULT_LEAD, TOOL_DOT } from "../figures.ts";
 import { formatTokens } from "../format.ts";
 import { type CodeToken, highlightCode } from "../highlight.ts";
 import { LIVE_OUTPUT_LINES, LIVE_PREVIEW_MAX, liveOutputLines, livePreviewTargets } from "../live-output.ts";
@@ -63,12 +63,20 @@ function AssistantMessageView({
 }) {
 	const theme = useTheme();
 	return (
-		<Box marginBottom={1} flexDirection="column">
-			{renderMarkdownLite(stripAnsi(text), theme)}
-			{/* The text above is what had arrived when the stream stopped; without
-			    this line it reads as a finished answer that happens to be short. */}
-			{incomplete ? <Text color={theme.warning}>(response ended early; output is partial)</Text> : null}
-			{cache ? <Text dimColor>{cacheFooter(cache)}</Text> : null}
+		<Box marginBottom={1} flexDirection="row">
+			{/* The dot anchors the assistant's side of the transcript, the way a
+			    tool call's does: one speaker, one shape. The body hangs under it
+			    so a wrapped paragraph and the code box below it share an edge. */}
+			<Box width={2} flexShrink={0}>
+				<Text color={theme.textMuted}>{ASSISTANT_DOT}</Text>
+			</Box>
+			<Box flexDirection="column" flexGrow={1}>
+				{renderMarkdownLite(stripAnsi(text), theme)}
+				{/* The text above is what had arrived when the stream stopped; without
+				    this line it reads as a finished answer that happens to be short. */}
+				{incomplete ? <Text color={theme.warning}>(response ended early; output is partial)</Text> : null}
+				{cache ? <Text dimColor>{cacheFooter(cache)}</Text> : null}
+			</Box>
 		</Box>
 	);
 }
@@ -473,6 +481,25 @@ function liveTextOf(entry: UiEntry, previews: Record<string, string>): string | 
 	return entry.kind === "toolUse" ? previews[entry.callId] : undefined;
 }
 
+/**
+ * A stable React key per entry.
+ *
+ * Entries are immutable and append-only, and a tool result replaces its entry
+ * with a new object — so object identity is exactly the "did this row change"
+ * question a key answers. The index used to stand in for it, which React warns
+ * about and which goes wrong the moment a list is ever reordered.
+ */
+const entryKeys = new WeakMap<UiEntry, number>();
+let entryKeySeq = 0;
+function keyFor(entry: UiEntry): string {
+	let key = entryKeys.get(entry);
+	if (key === undefined) {
+		key = ++entryKeySeq;
+		entryKeys.set(entry, key);
+	}
+	return `entry-${key}`;
+}
+
 export function MessageList({
 	entries,
 	full,
@@ -487,8 +514,13 @@ export function MessageList({
 	return (
 		<Box flexDirection="column">
 			{entries.map((entry, i) => (
-				// biome-ignore lint/suspicious/noArrayIndexKey: entries is append-only, existing indices never change identity
-				<EntryView key={i} entry={entry} full={full} liveText={liveTextOf(entry, previews)} />
+				<EntryView
+					key={keyFor(entry)}
+					entry={entry}
+					full={full}
+					liveText={liveTextOf(entry, previews)}
+					spaced={entry.kind === "info" ? infoRunEnds(entries, i) : true}
+				/>
 			))}
 		</Box>
 	);
@@ -510,13 +542,26 @@ function ErrorView({ text }: { text: string }) {
 	);
 }
 
-function InfoView({ text }: { text: string }) {
+function InfoView({ text, spaced = true }: { text: string; spaced?: boolean }) {
 	const theme = useTheme();
 	return (
-		<Box marginBottom={1}>
+		<Box marginBottom={spaced ? 1 : 0}>
 			<Text color={theme.textMuted}>{text}</Text>
 		</Box>
 	);
+}
+
+/**
+ * Whether the entry after `index` continues a run of info rows.
+ *
+ * Startup writes several notices in a row — a skill that failed validation, a
+ * controller that is not attached, a catalog refresh — and giving each its own
+ * trailing blank line turned four lines of diagnostics into eight and pushed
+ * the greeting up. Only the last row of the run keeps the gap, so the block
+ * still separates from whatever comes next.
+ */
+function infoRunEnds(entries: UiEntry[], index: number): boolean {
+	return entries[index]?.kind === "info" && entries[index + 1]?.kind !== "info";
 }
 
 /**
@@ -533,10 +578,13 @@ export const EntryView = memo(function EntryView({
 	entry,
 	full,
 	liveText,
+	spaced = true,
 }: {
 	entry: UiEntry;
 	full?: boolean;
 	liveText?: string;
+	/** Keep the gap under this row. False inside a run of one-line notices. */
+	spaced?: boolean;
 }) {
 	switch (entry.kind) {
 		case "user":
@@ -548,7 +596,7 @@ export const EntryView = memo(function EntryView({
 		case "error":
 			return <ErrorView text={entry.text} />;
 		case "info":
-			return <InfoView text={entry.text} />;
+			return <InfoView text={entry.text} spaced={spaced} />;
 	}
 });
 
@@ -636,11 +684,21 @@ export function VirtualMessageList({
 	return (
 		<Box flexDirection="column">
 			<Static key={`${transcriptPaintKey(printedTheme)}:${paint}`} items={head}>
-				{(entry, i) => <EntryView key={`sealed-${i}`} entry={entry} />}
+				{(entry, i) => (
+					<EntryView
+						key={keyFor(entry)}
+						entry={entry}
+						spaced={entry.kind === "info" ? infoRunEnds(entries, i) : true}
+					/>
+				)}
 			</Static>
 			{tail.map((entry, i) => (
-				// biome-ignore lint/suspicious/noArrayIndexKey: sealed + i reconstructs the entry's stable absolute position in the full list
-				<EntryView key={`live-${sealed + i}`} entry={entry} liveText={liveTextOf(entry, previews)} />
+				<EntryView
+					key={keyFor(entry)}
+					entry={entry}
+					liveText={liveTextOf(entry, previews)}
+					spaced={entry.kind === "info" ? infoRunEnds(entries, sealed + i) : true}
+				/>
 			))}
 		</Box>
 	);
@@ -663,9 +721,16 @@ export function StreamingPreview({ text, thinking }: { text: string; thinking: s
 	const rendered = useMemo(() => (text ? renderMarkdownLite(stripAnsi(text), theme) : null), [text, theme]);
 	if (!text && !thinking) return null;
 	return (
-		<Box flexDirection="column" marginBottom={1}>
-			{rendered ? <Box flexDirection="column">{rendered}</Box> : null}
-			{thinking && !text && <Text color={theme.thinking}>… {thinking.slice(-200)}</Text>}
+		<Box flexDirection="row" marginBottom={1}>
+			{/* The same gutter the sealed row gets, so the answer does not jump two
+			    columns left the moment the stream ends. */}
+			<Box width={2} flexShrink={0}>
+				<Text color={theme.textMuted}>{ASSISTANT_DOT}</Text>
+			</Box>
+			<Box flexDirection="column" flexGrow={1}>
+				{rendered ? <Box flexDirection="column">{rendered}</Box> : null}
+				{thinking && !text && <Text color={theme.thinking}>… {thinking.slice(-200)}</Text>}
+			</Box>
 		</Box>
 	);
 }

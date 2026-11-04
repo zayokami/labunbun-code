@@ -20,6 +20,17 @@
  */
 export const TOOL_DOT = process.platform === "darwin" ? "⏺" : "●";
 
+/**
+ * The dot before an assistant message.
+ *
+ * The same glyph as a tool call's, because both are the assistant's side of the
+ * transcript: the color is what tells a sentence from an action (a tool's dot
+ * carries its state; this one stays muted), and the shared shape is what makes
+ * a turn read as one speaker. The body hangs two columns in from it, so a
+ * wrapped paragraph and the code block under it share one left edge.
+ */
+export const ASSISTANT_DOT = TOOL_DOT;
+
 /** The result lead — two spaces, `⎿`, two spaces — dim, on a result's first line. */
 export const RESULT_LEAD = "  ⎿  ";
 

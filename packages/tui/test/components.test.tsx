@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AgentMessage, Usage } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import type React from "react";
-import { MessageList } from "../src/components/MessageList.tsx";
+import { MessageList, StreamingPreview } from "../src/components/MessageList.tsx";
 import { PermissionDialog } from "../src/components/PermissionDialog.tsx";
 import { ShortcutOverlay } from "../src/components/ShortcutOverlay.tsx";
 import { CONTEXT_BAR_SEGMENTS, contextBar, StatusCard } from "../src/components/StatusCard.tsx";
@@ -59,6 +59,48 @@ describe("MessageList", () => {
 		expect(frame).toContain(`${RESULT_LEAD}a.txt`);
 		expect(frame).toContain("Here are the files.");
 		expect(frame).toContain("Error: boom");
+	});
+
+	// The transcript used to be a column of unanchored paragraphs: a reply's
+	// first line started at the margin and every line after it wrapped back to
+	// the same one, so prose read as a different speaker than the tool call
+	// under it. The dot is the tool's, in the same column; the body is two
+	// columns in.
+	test("an answer starts with the shared dot and a two-column gutter", () => {
+		const { lastFrame } = render(
+			withTheme(<MessageList entries={[{ kind: "assistant", text: "Here are the files." }]} />),
+		);
+		expect(lastFrame() ?? "").toContain(`${TOOL_DOT} Here are the files.`);
+	});
+
+	test("the streaming preview keeps the sealed answer's gutter", () => {
+		const { lastFrame } = render(withTheme(<StreamingPreview text="half an ans" thinking="" />));
+		// Without this, the answer shifts two columns left the moment the stream seals.
+		expect(lastFrame() ?? "").toContain(`${TOOL_DOT} half an ans`);
+	});
+
+	// Startup notices arrive as a run. Each row used to carry its own trailing
+	// blank line, so four diagnostics became eight rows and pushed the prompt.
+	test("keeps consecutive notices on adjacent rows", () => {
+		const { lastFrame } = render(
+			withTheme(
+				<MessageList
+					entries={[
+						{ kind: "info", text: "first notice" },
+						{ kind: "info", text: "second notice" },
+						{ kind: "info", text: "third notice" },
+					]}
+				/>,
+			),
+		);
+		const lines = (lastFrame() ?? "").split("\n");
+		const at = (text: string) => lines.findIndex((line) => line.includes(text));
+		const first = at("first notice");
+		expect(first).toBeGreaterThanOrEqual(0);
+		expect(at("second notice")).toBe(first + 1);
+		expect(at("third notice")).toBe(first + 2);
+		// The run still ends with one gap, so the block separates from the prompt.
+		expect(lines[first + 3]?.trim()).toBe("");
 	});
 
 	test("an answered row prints the turn's cache share, and a row without cache prints nothing", () => {
