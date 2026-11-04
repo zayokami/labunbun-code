@@ -203,6 +203,7 @@ import {
 	detectSubscriptionSignIns,
 	missingCredentialNotice,
 	NO_SIGN_INS,
+	postSignInModelNotice,
 	requestPathPermits,
 	type SubscriptionSignIns,
 	unrunnableSuffix,
@@ -4898,6 +4899,18 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/login": {
 			const trimmed = text.trim().slice("/login".length).trim();
 			const words = trimmed === "" ? [] : trimmed.split(/\s+/);
+			/**
+			 * Report a finished sign-in, and — when the session's model is not on
+			 * the wire that sign-in just authenticated — say which model is still
+			 * in force and how to move it. The session is read at dispatch time:
+			 * `/resume` can have swapped it since startup.
+			 */
+			const saySignedIn = (line: string, wire: "claude" | "chatgpt" | "gemini") => {
+				pushInfo(ctx.handle, line);
+				const model = ctx.getSession()?.model;
+				const notice = model ? postSignInModelNotice(model, wire) : undefined;
+				if (notice) pushInfo(ctx.handle, notice);
+			};
 			// The first word may name the subscription. With no name — or with
 			// "claude" — this is the Claude flow it has always been, and a bare
 			// first word is the paste the manual flow asked for. A paste whose
@@ -4927,7 +4940,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 							store: auth.store(),
 							note: (line) => pushInfo(ctx.handle, line),
 						});
-						pushInfo(ctx.handle, chatGptSignedInLine(credential));
+						saySignedIn(chatGptSignedInLine(credential), "chatgpt");
 					} catch (error) {
 						pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
 					} finally {
@@ -4955,7 +4968,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 							const auth = geminiAuthOf(ctx);
 							const credential = await auth.complete({ input, pending, store: auth.store() });
 							pendingGeminiLogin = null;
-							pushInfo(ctx.handle, geminiSignedInLine(credential));
+							saySignedIn(geminiSignedInLine(credential), "gemini");
 						} catch (error) {
 							pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
 						}
@@ -4982,7 +4995,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 							pushInfo(ctx.handle, "When the page shows the code, run: /login gemini <code>");
 						} else {
 							pendingGeminiLogin = null;
-							pushInfo(ctx.handle, geminiSignedInLine(result.credential));
+							saySignedIn(geminiSignedInLine(result.credential), "gemini");
 						}
 					} catch (error) {
 						pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
@@ -5008,7 +5021,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					try {
 						const credential = await auth.complete({ input, pending, store: auth.store() });
 						pendingClaudeLogin = null;
-						pushInfo(ctx.handle, signedInLine(credential));
+						saySignedIn(signedInLine(credential), "claude");
 					} catch (error) {
 						// The pending login stays: the usual failure is a mis-paste,
 						// and a fresh URL would invalidate the code still on screen.
@@ -5036,7 +5049,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						pushInfo(ctx.handle, "When the page shows the code, run: /login <code#state>");
 					} else {
 						pendingClaudeLogin = null;
-						pushInfo(ctx.handle, signedInLine(result.credential));
+						saySignedIn(signedInLine(result.credential), "claude");
 					}
 				} catch (error) {
 					pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);

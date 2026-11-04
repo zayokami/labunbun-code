@@ -18,6 +18,7 @@ import {
 	missingCredentialNotice,
 	modelMayRun,
 	NO_SIGN_INS,
+	postSignInModelNotice,
 	requestPathPermits,
 	type SubscriptionSignIns,
 	unrunnableSuffix,
@@ -203,5 +204,27 @@ describe("detectSubscriptionSignIns", () => {
 		mkdirSync(join(home, ".labunbun"), { recursive: true });
 		writeFileSync(join(home, ".labunbun", ".credentials.json"), "{not json");
 		expect((await detectSubscriptionSignIns({ home, keychain: null })).claude).toBe(false);
+	});
+});
+
+describe("postSignInModelNotice", () => {
+	test("says nothing when the session is already on the wire that signed in", () => {
+		expect(postSignInModelNotice(anthropicRow, "claude")).toBeUndefined();
+		expect(postSignInModelNotice(chatgptRow, "chatgpt")).toBeUndefined();
+		expect(postSignInModelNotice(geminiRow, "gemini")).toBeUndefined();
+	});
+
+	// The recorded residual gap: `/login chatgpt` on a default anthropic session
+	// used to print only the success line, and the next prompt failed on a key
+	// the sign-in had never been able to supply.
+	test("names the model that is still in force and the command that moves it", () => {
+		const notice = postSignInModelNotice(anthropicRow, "chatgpt");
+		expect(notice).toContain("anthropic/claude-sonnet-5");
+		expect(notice).toContain("/model");
+	});
+
+	test("the other two wires answer the same way", () => {
+		expect(postSignInModelNotice(chatgptRow, "claude")).toContain("chatgpt/gpt-5.6");
+		expect(postSignInModelNotice(envRow, "gemini")).toContain("env-row");
 	});
 });

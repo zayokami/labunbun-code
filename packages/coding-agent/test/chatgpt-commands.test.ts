@@ -19,6 +19,7 @@ import type {
 	ClaudeCredentialStore,
 	ClaudeOAuthCredential,
 } from "@labunbun/ai";
+import { resolveModel } from "@labunbun/ai";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import type { ChatGptAuthHooks, ChatGptLoginFlowOptions } from "../src/chatgpt-login.ts";
 import type { ClaudeAuthHooks } from "../src/claude-login.ts";
@@ -114,10 +115,14 @@ function makeClaudeAuth(seed?: ClaudeOAuthCredential | null) {
 	return { hooks, store, logins };
 }
 
-function makeCtx(auth: { claudeAuth?: ClaudeAuthHooks; chatgptAuth?: ChatGptAuthHooks }) {
+function makeCtx(
+	auth: { claudeAuth?: ClaudeAuthHooks; chatgptAuth?: ChatGptAuthHooks },
+	/** The live session's model, when a test is about the post-sign-in advice. */
+	model?: ReturnType<typeof resolveModel>,
+) {
 	const store = createStore<UiState>({ ...initialUiState(false) });
 	const ctx = {
-		getSession: () => null,
+		getSession: () => (model ? ({ model } as never) : null),
 		handle: { store },
 		claudeAuth: auth.claudeAuth,
 		chatgptAuth: auth.chatgptAuth,
@@ -178,6 +183,29 @@ describe("/login chatgpt and /logout chatgpt", () => {
 		const text = info().join("\n");
 		expect(text).toContain("Open this URL to sign in to a ChatGPT subscription:");
 		expect(text).toContain("Signed in to the ChatGPT subscription as user@example.com (plus).");
+	});
+
+	test("a session still on another wire is told which model is in force", async () => {
+		const auth = makeChatGptAuth();
+		const model = resolveModel("anthropic/claude-sonnet-5");
+		if (!model) throw new Error("the catalog is missing anthropic/claude-sonnet-5");
+		const { ctx, info } = makeCtx({ chatgptAuth: auth.hooks }, model);
+		handleAppCommand("/login chatgpt", ctx);
+		await settle();
+		const text = info().join("\n");
+		expect(text).toContain("Signed in to the ChatGPT subscription as user@example.com (plus).");
+		expect(text).toContain("This session is still on anthropic/claude-sonnet-5");
+		expect(text).toContain("/model");
+	});
+
+	test("a session already on a ChatGPT model gets no follow-up", async () => {
+		const auth = makeChatGptAuth();
+		const model = resolveModel("chatgpt/gpt-6-astra");
+		if (!model) throw new Error("the catalog is missing chatgpt/gpt-6-astra");
+		const { ctx, info } = makeCtx({ chatgptAuth: auth.hooks }, model);
+		handleAppCommand("/login chatgpt", ctx);
+		await settle();
+		expect(info().join("\n")).not.toContain("This session is still on");
 	});
 
 	test("an argument after the provider word is refused with the no-code note", async () => {

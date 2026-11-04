@@ -108,6 +108,29 @@ export function unrunnableSuffix(model: Model, signIns: SubscriptionSignIns): st
 }
 
 /**
+ * The line after an in-session sign-in when the prompt is not on a model that
+ * sign-in reaches.
+ *
+ * A sign-in is for a wire, and the session is on a model. `/login chatgpt` on a
+ * session still on the default anthropic model is the case that made this
+ * necessary: the browser closes, the transcript says "signed in", and the next
+ * prompt still fails on the anthropic key — a success line followed by that
+ * failure reads as the sign-in not working. Naming the model the session is on
+ * and the command that moves it is the whole fix; switching by itself would
+ * be a login changing a setting nobody asked it to change.
+ */
+export function postSignInModelNotice(model: Model, signedInTo: "claude" | "chatgpt" | "gemini"): string | undefined {
+	const reached =
+		signedInTo === "chatgpt"
+			? model.api === "chatgpt-responses"
+			: signedInTo === "gemini"
+				? model.api === "gemini-code-assist"
+				: model.provider === "anthropic";
+	if (reached) return undefined;
+	return `Signed in. This session is still on ${model.provider}/${model.id} — /model to switch to a model the sign-in can run.`;
+}
+
+/**
  * The startup line for a session whose model cannot run, or undefined when it
  * can. One line, because it is a notice and not a lecture: what is missing,
  * what will happen, and the ways out — sign in, or import a setup that
