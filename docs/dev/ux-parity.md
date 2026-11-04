@@ -89,11 +89,37 @@ The failures this section covers are the ones the user could not see: a retry th
 
 Esc keeps its order: a dialog owns the press first, then the editor (insert mode, an `@` list, a half-typed command), then a command that declared itself cancellable, and only then the session (`packages/tui/src/components/REPL.tsx:676-693`). That order is what makes `/compact` cancellable without making Esc mean two things at once.
 
+## The polish wave (2026-11-04)
+
+Three places where the screen said something the session was not actually going to do.
+
+| Area | What the user sees | Code |
+| --- | --- | --- |
+| Assistant margin | An answer carries the tool-call dot in a muted colour, with the body two columns in, so prose, a code block and the next tool row share a left edge. The streaming preview uses the same gutter, so the answer does not jump left when it seals. | `packages/tui/src/figures.ts:32`, `packages/tui/src/components/MessageList.tsx:66-80`, `:723-735` |
+| Mid-turn hint | While a turn runs the legend under the prompt reads `Enter steer · Tab queue` (or `Enter queue` when the turn cannot be steered), not `Enter send`. It returns to the idle legend when the turn ends. | `packages/tui/src/shortcuts.ts:53-76`, `packages/tui/src/components/PromptInput.tsx` |
+| Post-sign-in model | A sign-in that does not reach the session's model adds one line naming the model still in force and `/model`, instead of a success line followed by a failed prompt. | `packages/coding-agent/src/credential-presence.ts:110-131`, `packages/coding-agent/src/interactive.ts` (`saySignedIn`) |
+
+The common rule: a legend, a marker or a confirmation line describes the state that is actually in force, never the state that was assumed when the string was written.
+
+## The split wave (2026-11-04)
+
+Two columns, on every platform, without the alternate screen.
+
+| Area | What the user sees | Code |
+| --- | --- | --- |
+| Split view | On a terminal with room (≥88 columns, and a pane height of 12), `Ctrl+T` draws the transcript on the left and the watch panel on the right, with the prompt still under both. The same key closes it, as does Escape. Narrow or short terminals keep the inline bottom band — one honest placement rather than a squeezed split. | `packages/tui/src/components/SplitWorkspace.tsx`, `packages/tui/src/components/REPL.tsx` (`splitActive`, the `Ctrl+T` and Escape branches) |
+| The pane names its window | The transcript pane opens on the tail of the conversation and its header says `Conversation 12-17 of 40`; scrolled back it adds `· scrolled`. The terminal's own scrollback above the frame is untouched and stays full width. | `buildConversation` in `packages/tui/src/components/SplitWorkspace.tsx` |
+| Page keys | `PgUp`/`PgDn` page the conversation pane back and forward; `Ctrl+V` and `Alt+1..9` keep working on the watch column. The footer spells the two new keys. | `packages/tui/src/components/REPL.tsx` (the page-key branch), `packages/tui/src/shortcuts.ts` |
+| No duplicate scrollback | Opening the split does not seal the conversation behind itself, and closing it prints only what arrived while it was open — the live list stays mounted at zero height over a frozen snapshot. | `liveEntriesRef`/`liveListEntries` in `packages/tui/src/components/REPL.tsx` |
+| One frame, one height budget | An overlay — a permission dialog, question, picker, status card, the heatmap, the key list — takes the frame; the panes stand down while it is open and return unchanged when it closes. Queued-message rows and the Ctrl+C hint come out of the panes' height first, and a queue that would leave them unreadable falls back to the inline layout until it drains. | `splitReserve`/`overlayOpen` in `packages/tui/src/components/REPL.tsx` |
+
+The rendering rule this wave added to the codebase: a fixed-height pane in ink 7.1.1 must be handed exactly the rows it has. The left pane is a line model (`buildConversation`) that wraps, tails and pads entries itself; it never asks ink to clip. That was measured, not assumed — see `docs/dev/split-pane-design.md`.
+
 ## Deliberately not built
 
 | Feature | Why not |
 | --- | --- |
-| Split panes | The transcript is terminal scrollback after `<Static>` seals a row. A pane cannot re-lay out what the terminal owns. The measured design and its gates are in `docs/dev/split-pane-design.md`. |
+| Split panes of the scrollback | The transcript's older rows are terminal scrollback after `<Static>` seals them, and a pane cannot re-lay out what the terminal owns. The shipped split (above) is a live-area window over `entries`, not a re-layout of history; the full-screen design that would trade the scrollback away stays gated in `docs/dev/split-pane-design.md`. |
 | Mouse input | Ink 7.1.1 exposes no mouse events. Terminal selection and scrollback stay native. |
 | Image paste | There is no clipboard image reader in the app, and a new image content block would touch the provider adapters. The value does not pay for that surface yet. |
 | A keybinding JSON file | The key inventory is crowded, and the vim and Emacs engines already own large parts of it. A user map would need a conflict model before it needs a file. |
@@ -109,3 +135,5 @@ Esc keeps its order: a dialog owns the press first, then the editor (insert mode
 - `packages/coding-agent/test/session-preview.test.ts` and the preview group in `packages/tui/test/list-picker.test.tsx`: the tail read, the parent chain, the caps and notices, the requester, and the stale-answer guard.
 - `packages/tui/test/status-battery.test.tsx`: the retry label counts down and keeps the attempt after the wait; `packages/tui/test/components.test.tsx` and `packages/tui/test/resume-replay.test.tsx`: the fallback line, the partial marker, the interrupted result, the truncation notes, and the dropped-message previews. `packages/tui/test/queued.test.tsx` holds the interrupt report against the queue state.
 - `packages/tui/test/permission-options.test.ts`, `packages/tui/test/question-dialog.test.tsx`, and `packages/tui/test/pad-dialogs.test.tsx`: the fourth option's feedback field, `Other…` on a single-select only, the empty-field and Esc rules, and the pad's plain deny.
+- `packages/tui/test/components.test.tsx`: the answer's dot and two-column gutter, in the sealed row and in the streaming preview. `packages/tui/test/shortcuts.test.ts` and `packages/tui/test/prompt-input.test.tsx`: the mid-turn legend names steer or queue and never `Enter send`. `packages/coding-agent/test/credential-presence.test.ts` and `packages/coding-agent/test/chatgpt-commands.test.ts`: the post-sign-in notice appears exactly when the sign-in's wire is not the session's model.
+- `packages/tui/test/split-workspace.test.tsx`: the split's clamps, the line model's exact row count and width, streaming only at the tail, the window's entry names, and the drawn frame at 100 columns and at the minimum size — both panes, no overflow, no merged rows. `packages/tui/test/watch-panel.test.tsx`: `Ctrl+T` splits at 100×24, keeps the band at 80 columns, `PgUp`/`PgDn` page back and forward, Escape closes, an overlay stands the panes down and returns them, and a queue that would make them unreadable yields the split until it drains.
