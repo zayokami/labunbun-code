@@ -15,9 +15,25 @@
 
 export type DiffLineKind = "header" | "context" | "added" | "removed";
 
+/**
+ * A run of a line. `changed` marks the words that differ from the line this one
+ * was paired with, so the dialog can draw the whole line in its side's colour
+ * and the edit itself a weight heavier.
+ */
+export interface DiffSegment {
+	text: string;
+	changed: boolean;
+}
+
 export interface DiffLine {
 	kind: DiffLineKind;
 	text: string;
+	/**
+	 * Present only for a removed/added line paired with its counterpart. Lines
+	 * with nothing in common, and unaligned bodies, carry no segments and render
+	 * as one colour: highlighting a line that changed everywhere says nothing.
+	 */
+	segments?: DiffSegment[];
 }
 
 export interface PermissionDiff {
@@ -104,7 +120,7 @@ export function permissionDiff(
 		oldLines !== undefined && oldLines.length <= bounds.maxLinesPerSide && newLines.length <= bounds.maxLinesPerSide;
 	const body: DiffLine[] = [];
 	if (aligned && oldLines) {
-		body.push(...lcsDiff(oldLines, newLines));
+		body.push(...markWordChanges(lcsDiff(oldLines, newLines)));
 	} else {
 		for (const text of oldLines ?? []) body.push({ kind: "removed", text });
 		for (const text of newLines) body.push({ kind: "added", text });
@@ -185,6 +201,142 @@ function lcsDiff(oldLines: string[], newLines: string[]): BodyLine[] {
 		j++;
 	}
 	return out;
+}
+
+/**
+ * Word-level highlight: inside a removed/added pair, which words changed.
+ *
+ * The line colour already says "this line is different"; without a second
+ * channel the reader still has to compare the two lines character by character
+ * to find *what* is different. The tokens here are words, whitespace runs and
+ * punctuation runs, so `answer = 1;` against `answer = 42;` marks `1` and `42`
+ * rather than the whole statement.
+ *
+ * The token table is quadratic like the line one. A pair is skipped beyond
+ * `WORD_DIFF_MAX_TOKENS` (a 240-code-point line can hold that many one-character
+ * tokens); a pair that shares less than `WORD_DIFF_MIN_SIMILARITY` of its text
+ * is skipped too, because highlighting most of both lines is noise rather than
+ * an answer.
+ */
+const WORD_DIFF_MAX_TOKENS = 160;
+const WORD_DIFF_MIN_SIMILARITY = 0.3;
+/** Words, whitespace runs, and punctuation runs — together every code point. */
+const TOKEN_RE = /[\p{L}\p{N}_]+|\s+|[^\p{L}\p{N}_\s]+/gu;
+
+interface WordPair {
+	removed?: DiffSegment[];
+	added?: DiffSegment[];
+}
+
+/**
+ * Mark the words that differ inside each removed/added run.
+ *
+ * A hunk is a run of non-context lines; within it the removals and additions
+ * are paired by position, which is how a line edit reads on screen. Context
+ * lines end a hunk, so a distant change is never paired with this one.
+ */
+function markWordChanges(lines: BodyLine[]): DiffLine[] {
+	const out: DiffLine[] = lines.map((line) => ({ ...line }));
+	let index = 0;
+	while (index < out.length) {
+		if (out[index]?.kind === "context") {
+			index += 1;
+			continue;
+		}
+		const removed: number[] = [];
+		const added: number[] = [];
+		let end = index;
+		while (end < out.length && out[end]?.kind !== "context") {
+			if (out[end]?.kind === "removed") removed.push(end);
+			else if (out[end]?.kind === "added") added.push(end);
+			end += 1;
+		}
+		for (let pair = 0; pair < Math.min(removed.length, added.length); pair += 1) {
+			const removedIndex = removed[pair];
+			const addedIndex = added[pair];
+			if (removedIndex === undefined || addedIndex === undefined) continue;
+			const removedLine = out[removedIndex];
+			const addedLine = out[addedIndex];
+			if (!removedLine || !addedLine) continue;
+			const segments = wordSegments(removedLine.text, addedLine.text);
+			if (!segments) continue;
+			if (segments.removed) out[removedIndex] = { ...removedLine, segments: segments.removed };
+			if (segments.added) out[addedIndex] = { ...addedLine, segments: segments.added };
+		}
+		index = end;
+	}
+	return out;
+}
+
+function wordSegments(oldText: string, newText: string): WordPair | undefined {
+	const oldTokens = tokenize(oldText);
+	const newTokens = tokenize(newText);
+	if (oldTokens.length === 0 || newTokens.length === 0) return undefined;
+	if (oldTokens.length > WORD_DIFF_MAX_TOKENS || newTokens.length > WORD_DIFF_MAX_TOKENS) return undefined;
+
+	const table: number[][] = Array.from({ length: oldTokens.length + 1 }, () =>
+		new Array<number>(newTokens.length + 1).fill(0),
+	);
+	for (let i = oldTokens.length - 1; i >= 0; i--) {
+		const row = table[i];
+		const nextRow = table[i + 1];
+		if (!row || !nextRow) continue;
+		for (let j = newTokens.length - 1; j >= 0; j--) {
+			row[j] = oldTokens[i] === newTokens[j] ? (nextRow[j + 1] ?? 0) + 1 : Math.max(nextRow[j] ?? 0, row[j + 1] ?? 0);
+		}
+	}
+
+	const oldMatched = new Array<boolean>(oldTokens.length).fill(false);
+	const newMatched = new Array<boolean>(newTokens.length).fill(false);
+	let i = 0;
+	let j = 0;
+	while (i < oldTokens.length && j < newTokens.length) {
+		if (oldTokens[i] === newTokens[j]) {
+			oldMatched[i] = true;
+			newMatched[j] = true;
+			i += 1;
+			j += 1;
+		} else if ((table[i + 1]?.[j] ?? 0) >= (table[i]?.[j + 1] ?? 0)) {
+			i += 1;
+		} else {
+			j += 1;
+		}
+	}
+
+	const commonChars = oldTokens.reduce((sum, token, index) => (oldMatched[index] ? sum + token.length : sum), 0);
+	const longest = Math.max(oldText.length, newText.length);
+	if (longest === 0 || commonChars / longest < WORD_DIFF_MIN_SIMILARITY) return undefined;
+
+	const removed = segmentsFor(oldTokens, oldMatched);
+	const added = segmentsFor(newTokens, newMatched);
+	if (!removed && !added) return undefined;
+	return { removed, added };
+}
+
+function tokenize(text: string): string[] {
+	return text.match(TOKEN_RE) ?? [];
+}
+
+/**
+ * Merge the tokens into runs by whether they survived the alignment.
+ *
+ * A side with no changed tokens (an insertion) or no unchanged ones (a total
+ * rewrite) returns undefined: there is no contrast to draw, and colouring every
+ * word would only repeat the line colour.
+ */
+function segmentsFor(tokens: string[], matched: boolean[]): DiffSegment[] | undefined {
+	const hasChanged = matched.some((flag) => !flag);
+	const hasUnchanged = matched.some((flag) => flag);
+	if (!hasChanged || !hasUnchanged) return undefined;
+	const segments: DiffSegment[] = [];
+	for (let index = 0; index < tokens.length; index += 1) {
+		const text = tokens[index] ?? "";
+		const changed = !(matched[index] ?? false);
+		const last = segments[segments.length - 1];
+		if (last && last.changed === changed) last.text += text;
+		else segments.push({ text, changed });
+	}
+	return segments;
 }
 
 function splitLines(text: string, maxChars: number): string[] {

@@ -80,6 +80,19 @@ commands, and SHA-256 checksums.
   and the split returns unchanged afterwards, and queued-message rows are taken
   from the panes first, so the frame never grows past the terminal.
 
+- **The approval diff marks the words that changed.** A removed/added pair in
+  the permission dialog keeps its line colour and draws the words that actually
+  differ in bold, so `const answer = 1;` against `const answer = 42;` points at
+  `1` and `42` instead of asking the reader to compare the lines by eye. A pair
+  with almost nothing in common stays one colour, and an unaligned body or a
+  `Write` has no counterpart to pair with, so it is drawn as before.
+
+- **The permission dialog has one-key answers.** `y` allows once, `n` denies,
+  and `a` takes the session's standing "don't ask again" answer when the list
+  offers one. An escalated Bash call has no such row, and `a` there does
+  nothing rather than promising a grant the engine would not honour. The legend
+  names `y` and `a`; Esc already stands for deny.
+
 ### Changed
 
 - **Interactive mode says why it needs a terminal.** When stdin is not a TTY

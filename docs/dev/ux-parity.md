@@ -6,7 +6,7 @@ This note compares the interaction surface of LaBunbun Code with Claude Code 2.1
 
 | Area | Claude Code 2.1.289 | LaBunbun Code now | Code |
 | --- | --- | --- | --- |
-| Approval diff | The permission question shows a unified diff. Word-level highlight is available. `Ctrl+O` expands the tool card, not the question. | `Edit` and `Write` questions show a unified diff. `Ctrl+A` swaps in the raw input and swaps back. Every other tool keeps its one-line preview. | `packages/tui/src/permission-diff.ts:63`, `packages/tui/src/components/PermissionDialog.tsx:246` |
+| Approval diff | The permission question shows a unified diff. Word-level highlight is available. `Ctrl+O` expands the tool card, not the question. | `Edit` and `Write` questions show a unified diff; a paired line marks the words that differ in bold. `Ctrl+A` swaps in the raw input and swaps back. Every other tool keeps its one-line preview. | `packages/tui/src/permission-diff.ts:79`, `packages/tui/src/components/PermissionDialog.tsx:253` |
 | Picker search | The `Select` base has a search mode. `/model` opens in it. `/resume` filters as you type. | Every `ListPickerDialog` filters on label and description. `/resume` and the other lists share the same four match tiers. | `packages/tui/src/filter-rank.ts:34`, `packages/tui/src/components/ListPickerDialog.tsx:131` |
 | Session title | `/resume` offers `ctrl+r` rename. The name persists with the session. | `/rename <title>` writes a sidecar. The name replaces the directory name in the terminal title and becomes the `/resume` row label. | `packages/coding-agent/src/session-title.ts:19`, `packages/coding-agent/src/interactive.ts:3803` |
 | Session preview | `/resume` offers `space` preview for the highlighted session. | `Space` opens a preview of the highlighted session in `/resume`. `Esc` closes the panel first, then the list. | `packages/coding-agent/src/session-preview.ts:133`, `packages/tui/src/components/ListPickerDialog.tsx:310` |
@@ -17,10 +17,12 @@ The question is whether a change is acceptable. A JSON input asks the reader to 
 
 - The view covers `Edit` and `Write` only. Any other tool, or an input whose fields do not fit, returns no diff and keeps the old preview.
 - The body is a line-level LCS when each side has 20 lines or fewer. Above that bound the view shows one removed block and then one added block, and says so.
+- Inside that aligned body, each removed line is paired with the added line in the same position and compared word by word. The words that differ are drawn in bold on the line's own colour. A pair whose sides share less than 30% of their text, or that exceeds 160 tokens a side, keeps the single line colour; so does an unaligned body and every `Write` line, which has no removed side to compare against.
 - A line is cut at 240 code points. The body is cut at 40 lines. Each cut adds a notice. A notice about omitted lines ends with `ctrl+a for the full input.`
 - `replace_all` adds the notice `Every occurrence will be replaced.`
 - ANSI escapes and control characters are removed. Tab is kept, because alignment is its job.
 - `Ctrl+A` still shows the raw input. A second `Ctrl+A` returns to the diff.
+- `y` allows once, `n` denies, and `a` takes the standing "don't ask again" answer when the list offers one. An escalated Bash call offers no standing answer, so `a` does nothing there. The hint row names `y` and `a`; Esc already stands for deny.
 
 ### Picker search
 
@@ -115,6 +117,15 @@ Two columns, on every platform, without the alternate screen.
 
 The rendering rule this wave added to the codebase: a fixed-height pane in ink 7.1.1 must be handed exactly the rows it has. The left pane is a line model (`buildConversation`) that wraps, tails and pads entries itself; it never asks ink to clip. That was measured, not assumed — see `docs/dev/split-pane-design.md`.
 
+## The approval-diff wave (2026-11-06)
+
+The diff was line-level: it said which line changed, not what in it. The bold runs close that gap, and the quick keys close the other one — reaching a standing answer no longer takes an arrow-down first.
+
+| Area | What the user sees | Code |
+| --- | --- | --- |
+| Word highlight | A paired removed/added line keeps its colour and draws the words that differ in bold. A pair with too little shared text, an unaligned body, and every `Write` line stay one colour. | `permission-diff.ts` (`markWordChanges`), `PermissionDialog.tsx:253` |
+| Quick answers | `y` allows once, `n` denies, and `a` takes the standing answer when the list offers one. The hint names `y` and `a`; Esc already stands for deny. | `PermissionDialog.tsx` (`input === "a"`) |
+
 ## Deliberately not built
 
 | Feature | Why not |
@@ -129,7 +140,7 @@ The rendering rule this wave added to the codebase: a fixed-height pane in ink 7
 
 ## Tests that hold these claims
 
-- `packages/tui/test/permission-diff.test.ts` and `packages/tui/test/components.test.tsx`: the diff body, the caps, the notices, the `Ctrl+A` swap, and the unchanged fallback.
+- `packages/tui/test/permission-diff.test.ts` and `packages/tui/test/components.test.tsx`: the diff body, the word-level pairing, the caps, the notices, the `Ctrl+A` swap, the one-key answers, and the unchanged fallback.
 - `packages/tui/test/filter-rank.test.ts`, `packages/tui/test/list-picker.test.tsx`, and `packages/tui/test/prompt-input.test.tsx`: the four tiers, stable order, the 8-row window, the original-index contract, the Space rule, and the two-stage `Esc`.
 - `packages/coding-agent/test/session-title.test.ts`, `packages/coding-agent/test/rename-command.test.ts`, and `packages/tui/test/terminal-title.test.ts`: normalization, the atomic sidecar, the clear path, the `/resume` label, and the terminal title.
 - `packages/coding-agent/test/session-preview.test.ts` and the preview group in `packages/tui/test/list-picker.test.tsx`: the tail read, the parent chain, the caps and notices, the requester, and the stale-answer guard.

@@ -212,6 +212,12 @@ export function PermissionDialog({
 			onResolve(false, false);
 		} else if (input === "y") {
 			onResolve(true, false);
+		} else if (input === "a") {
+			// The standing answer, when the list offers one. An escalated Bash call
+			// has no such row, and `a` then does nothing rather than guessing at a
+			// grant the engine would not honour.
+			const answer = answers.find((option) => option.alwaysAllow);
+			if (answer) choose(answer);
 		} else if (input === "n") {
 			onResolve(false, false);
 		} else if (input === "1" || input === "2" || input === "3" || input === "4") {
@@ -250,7 +256,14 @@ export function PermissionDialog({
 						// biome-ignore lint/suspicious/noArrayIndexKey: diff lines are positional and never reordered
 						<Text key={`diff-${i}`} color={diffColor(line.kind, theme)}>
 							{diffPrefix(line.kind)}
-							{line.text}
+							{line.segments
+								? line.segments.map((segment, s) => (
+										// biome-ignore lint/suspicious/noArrayIndexKey: segments are positional and never reordered
+										<Text key={`segment-${s}`} bold={segment.changed}>
+											{segment.text}
+										</Text>
+									))
+								: line.text}
 						</Text>
 					))}
 					{diff.notice ? <Text dimColor>{diff.notice}</Text> : null}
@@ -278,7 +291,7 @@ export function PermissionDialog({
 			) : (
 				<Box marginTop={1}>
 					<Text dimColor>
-						↑/↓ select · Enter confirm · Esc deny
+						↑/↓ select · Enter confirm · Esc deny · y allow{standing >= 0 ? " · a always" : ""}
 						{inputFull ? ` · Ctrl+A ${expanded ? "collapse" : "show full input"}` : ""}
 						{/* The pad's answers, named next to the keyboard's the way the wheel
 						    and the on-screen keyboard name them. The hold is the part that has

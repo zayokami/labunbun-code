@@ -785,6 +785,45 @@ describe("PermissionDialog", () => {
 		unmount();
 	});
 
+	test("a takes the standing answer, not the highlighted one", async () => {
+		const decisions: Array<[boolean, boolean, boolean | undefined]> = [];
+		const { stdin, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Bash"
+					inputPreview="git status"
+					options={permissionOptions("Bash", { command: "git status" }, process.cwd())}
+					onResolve={(allow, always, ask) => decisions.push([allow, always, ask])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("a");
+		await delay(30);
+		expect(decisions).toEqual([[true, true, false]]);
+		unmount();
+	});
+
+	test("a does nothing when the list offers no standing answer", async () => {
+		// Escalated Bash: this call only, or no. There is no session rule to grant.
+		const decisions: Array<[boolean, boolean, boolean | undefined]> = [];
+		const { stdin, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Bash"
+					inputPreview="rm -rf build"
+					options={permissionOptions("Bash", { command: "rm -rf build", escalate: true }, process.cwd())}
+					onResolve={(allow, always, ask) => decisions.push([allow, always, ask])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("a");
+		await delay(30);
+		expect(decisions).toEqual([]);
+		unmount();
+	});
+
 	test("the fourth answer opens a field instead of denying on the spot", async () => {
 		// The row promises to tell the model what to do differently; a denial that
 		// resolved before anything was typed would leave that promise unkept.

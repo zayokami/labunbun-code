@@ -61,6 +61,63 @@ describe("permissionDiff", () => {
 		expect(permissionDiff("Write", { file_path: "a", content: "" })).toBeUndefined();
 	});
 
+	test("a paired edit marks only the words that differ", () => {
+		const diff = permissionDiff("Edit", {
+			file_path: "a.ts",
+			old_string: "const answer = 1;",
+			new_string: "const answer = 42;",
+		});
+		const removed = diff?.lines.find((line) => line.kind === "removed");
+		const added = diff?.lines.find((line) => line.kind === "added");
+		expect(removed?.segments).toEqual([
+			{ text: "const answer = ", changed: false },
+			{ text: "1", changed: true },
+			{ text: ";", changed: false },
+		]);
+		expect(added?.segments).toEqual([
+			{ text: "const answer = ", changed: false },
+			{ text: "42", changed: true },
+			{ text: ";", changed: false },
+		]);
+	});
+
+	test("an insertion inside a line marks only the added run", () => {
+		const diff = permissionDiff("Edit", {
+			file_path: "a.ts",
+			old_string: "const x = 1;",
+			new_string: "const x = 1 + 2;",
+		});
+		const removed = diff?.lines.find((line) => line.kind === "removed");
+		const added = diff?.lines.find((line) => line.kind === "added");
+		// Nothing was removed: the old side has no contrast to draw.
+		expect(removed?.segments).toBeUndefined();
+		expect(added?.segments).toEqual([
+			{ text: "const x = 1", changed: false },
+			{ text: " + 2", changed: true },
+			{ text: ";", changed: false },
+		]);
+	});
+
+	test("lines with nothing in common carry no word highlight", () => {
+		const diff = permissionDiff("Edit", { file_path: "a.ts", old_string: "two", new_string: "TWO" });
+		const removed = diff?.lines.find((line) => line.kind === "removed");
+		const added = diff?.lines.find((line) => line.kind === "added");
+		expect(removed?.segments).toBeUndefined();
+		expect(added?.segments).toBeUndefined();
+	});
+
+	test("an unaligned body is not paired line by line", () => {
+		const oldText = Array.from({ length: 21 }, (_, i) => `value-${i}`).join("\n");
+		const newText = Array.from({ length: 21 }, (_, i) => `value-x-${i}`).join("\n");
+		const diff = permissionDiff("Edit", { file_path: "a.ts", old_string: oldText, new_string: newText });
+		expect(diff?.lines.every((line) => line.segments === undefined)).toBe(true);
+	});
+
+	test("Write is all addition, so it has no pair to compare against", () => {
+		const diff = permissionDiff("Write", { file_path: "a.ts", content: "const answer = 42;" });
+		expect(diff?.lines.every((line) => line.segments === undefined)).toBe(true);
+	});
+
 	test("ANSI escapes are removed whole, and other controls become spaces", () => {
 		const diff = permissionDiff("Edit", {
 			file_path: "a.ts",
