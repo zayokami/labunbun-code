@@ -22,7 +22,12 @@ commands, and SHA-256 checksums.
   under both — two live surfaces at once instead of one at a time. The
   transcript pane opens on the tail of the conversation, its header names the
   entries it is showing (`Conversation 12-17 of 40`), and `PgUp`/`PgDn` page it
-  back and forward; `Ctrl+T` or Escape closes the split. The terminal's
+  back and forward by the span the pane is showing. A page, once turned, stays
+  put while new output arrives below, and the header counts it (`· 3 new`);
+  paging back to the tail resumes following, and sending a message returns
+  there. The right column carries the watch panel over a compact task strip —
+  up to three unfinished tasks, an exact row budget — with one blank column
+  between the panes. `Ctrl+T` or Escape closes the split. The terminal's
   scrollback above the frame is untouched and stays full width, so nothing is
   reprinted or lost. Narrow or short terminals keep the inline watch panel —
   the same key, one honest placement rather than a squeezed split. The left
