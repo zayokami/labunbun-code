@@ -21,6 +21,7 @@ import { inputTrace } from "./input-trace.ts";
 import { permissionDiff } from "./permission-diff.ts";
 import type { PermissionReply } from "./permission-options.ts";
 import { createPermissionQueue } from "./permission-queue.ts";
+import { createPhraseConfirmSlot } from "./phrase-confirm-slot.ts";
 import { createPlanReviewSlot } from "./plan-review-slot.ts";
 import { createQuestionSlot } from "./question-slot.ts";
 import { createStore, type Store, useStore } from "./store.ts";
@@ -28,6 +29,7 @@ import { enterRawModeEarly } from "./terminal-input.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
 import {
 	initialUiState,
+	type PhraseConfirmRequest,
 	type PlanReviewResult,
 	type StatusCardData,
 	toolFullView,
@@ -173,6 +175,16 @@ export interface ReplAppHandle {
 		}>,
 	) => Promise<string[] | null>;
 	/**
+	 * Ask for a typed confirmation; resolves true only when the exact phrase was
+	 * typed, and false on Esc, abort or replacement.
+	 *
+	 * Its own surface rather than `askUser` because the answer is not a choice:
+	 * the dialog validates the sentence and keeps itself open on a mismatch.
+	 * What it shows is supplied by the caller — the request owns the wording, so
+	 * the safety argument stays beside the feature that needs it.
+	 */
+	confirmPhrase: (request: PhraseConfirmRequest) => Promise<boolean>;
+	/**
 	 * Show a scrollable pick-one list; resolves with the chosen index or null on
 	 * cancel. The in-app /resume and /model pickers both run on this.
 	 *
@@ -210,6 +222,12 @@ export interface ReplAppHandle {
 	 * run's question will never be answered, and its caller is still awaiting it.
 	 */
 	clearQuestionRequest: () => void;
+	/**
+	 * Dismiss an open phrase confirmation as not confirmed, if one is up. The
+	 * same caller-side need as the two above: its caller is awaiting a boolean
+	 * and a dialog left behind by an abort would never settle it.
+	 */
+	clearPhraseConfirmRequest: () => void;
 	/**
 	 * Dismiss an open plan review as canceled, if one is up. The third dialog with
 	 * the same caller-side need: its caller is a tool call awaiting an answer.
@@ -541,6 +559,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		show: (planReview) => store.set((state) => ({ ...state, planReview })),
 	});
 
+	const phraseConfirmSlot = createPhraseConfirmSlot({
+		show: (phraseConfirm) => store.set((state) => ({ ...state, phraseConfirm })),
+	});
+
 	return {
 		store,
 		waitUntilExit: async () => {
@@ -637,9 +659,11 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			store.set((s) => (s.thinkingLevel === level ? s : { ...s, thinkingLevel: level }));
 		},
 		askUser: questionSlot.ask,
+		confirmPhrase: phraseConfirmSlot.confirm,
 		requestPlanReview: planReviewSlot.request,
 		clearPermissionRequest: permissionQueue.clear,
 		clearQuestionRequest: questionSlot.clear,
+		clearPhraseConfirmRequest: phraseConfirmSlot.clear,
 		clearPlanReviewRequest: planReviewSlot.clear,
 		clearPickerRequest: () => cancelOpenPicker(store),
 	};

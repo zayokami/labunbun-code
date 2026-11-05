@@ -106,6 +106,8 @@ export interface BeetleSurfaceDeps {
 	permissionMode: () => PermissionMode | undefined;
 	sandbox: () => SandboxMode | undefined;
 	network: () => NetworkAxis | undefined;
+	/** The root session's YOLO flag, read by every member's evaluation. */
+	yolo?: () => boolean | undefined;
 	getPermissionRules: () => PermissionRule[];
 	/**
 	 * Arm the pending tool-block-change registration for the main session's next
@@ -341,6 +343,7 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			permissionMode: deps.permissionMode,
 			sandbox: deps.sandbox,
 			network: deps.network,
+			yolo: deps.yolo,
 			getPermissionRules: deps.getPermissionRules,
 		});
 		band = next;

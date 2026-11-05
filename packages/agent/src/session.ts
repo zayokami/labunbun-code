@@ -91,6 +91,12 @@ export class AgentSession {
 	#sandbox: SandboxMode;
 	#network: NetworkAxis;
 	#outputSchema: Record<string, unknown> | undefined;
+	/**
+	 * The YOLO posture. Session-only and in memory: deliberately not an option, a
+	 * settings key, a CLI flag or a field of the session store, so it cannot be
+	 * resumed into or scripted. `/yolo` is the only door, and `setMode` closes it.
+	 */
+	#yolo = false;
 
 	#handlers = new Set<AgentEventHandler>();
 	#steering: string[] = [];
@@ -158,10 +164,63 @@ export class AgentSession {
 	setMode(mode: PermissionMode, sandbox?: SandboxMode): void {
 		this.#permissionMode = mode;
 		if (sandbox !== undefined) this.#sandbox = sandbox;
+		// Any mode change is an exit from YOLO, whoever makes it: `/mode`, the
+		// picker, Shift+Tab, or the model's own plan entry. The two postures must
+		// never coexist, and clearing here is what makes that true for every caller
+		// rather than for the ones that remember.
+		this.#yolo = false;
 	}
 
 	get permissionMode(): PermissionMode {
 		return this.#permissionMode;
+	}
+
+	/**
+	 * Whether this session is in YOLO. Read live at the permission decision, never
+	 * copied into a tool-call context — a copy would go stale the moment `/yolo`
+	 * or a mode change landed.
+	 */
+	get yolo(): boolean {
+		return this.#yolo;
+	}
+
+	/**
+	 * Enter YOLO, or say why this session cannot.
+	 *
+	 * The three session-level refusals live here rather than only in the `/yolo`
+	 * command, so every caller gets the same answer:
+	 *
+	 * - a running turn: the flag is read per call, so flipping it mid-run would
+	 *   change decisions whose consequences are already in flight;
+	 * - `plan` mode: its read-only gate would contradict a standing allow on every
+	 *   tool, and YOLO would either be a no-op or break the promise;
+	 * - `danger-full-access`: YOLO's promise is that the sandbox stays on, and a
+	 *   sandbox that is already off has nothing for it to keep.
+	 *
+	 * The managed-policy refusal (`disableBypassPermissionsMode`) and the existence
+	 * of a confirmation surface belong to the app layer, which is the only place
+	 * that holds the policy and the dialog.
+	 */
+	enableYolo(): { ok: true } | { ok: false; reason: string } {
+		if (this.#running) {
+			return { ok: false, reason: "YOLO cannot be entered while a turn is running. Wait for it to finish." };
+		}
+		if (this.#permissionMode === "plan") {
+			return { ok: false, reason: "YOLO is not available in plan mode. Leave plan mode first, then run /yolo." };
+		}
+		if (this.#sandbox === "danger-full-access") {
+			return {
+				ok: false,
+				reason:
+					"YOLO keeps the sandbox on, and this session has no sandbox. Switch to a confined mode (Agent) first, then run /yolo.",
+			};
+		}
+		this.#yolo = true;
+		return { ok: true };
+	}
+
+	disableYolo(): void {
+		this.#yolo = false;
 	}
 
 	get sandbox(): SandboxMode {

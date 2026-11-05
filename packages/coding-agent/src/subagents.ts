@@ -193,6 +193,16 @@ export interface TaskToolContext {
 	 */
 	sandbox?: () => SandboxMode | undefined;
 	/**
+	 * The parent's YOLO flag, read at the same call.
+	 *
+	 * A live getter rather than a boolean copied at spawn: `/yolo off`, a mode
+	 * change that clears it, or a worker spawned while it was on and evaluated
+	 * after it was off would all be answered from a stale snapshot. Workers
+	 * cannot enable it — they have no command and no phrase surface; they only
+	 * inherit whether the session they belong to is in it.
+	 */
+	yolo?: () => boolean | undefined;
+	/**
 	 * The third axis, read at the same moment and for the same reason. A
 	 * subagent that reached the network while its parent was `restricted` would
 	 * make every allow-list entry in `settings.networkDomains` advisory, and the
@@ -607,6 +617,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 								rules: ctx.getPermissionRules?.() ?? [],
 								cwd: scope.cwd,
 								readOnlyToolNames,
+								yolo: ctx.yolo?.() ?? false,
 							});
 							if (decision.behavior !== "ask") return decision;
 							const ask = ctx.requestPermission;

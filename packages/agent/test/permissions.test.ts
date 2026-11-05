@@ -302,7 +302,7 @@ describe("evaluatePermissions", () => {
 			// A deny with no reason is indistinguishable from a bug, and the reason
 			// is what tells a reader this was a refusal to guess rather than a
 			// classification.
-			expect(decision.message).toContain("no readable string command");
+			expect(decision.message ?? "").toContain("no readable string command");
 		});
 
 		test("and no allow rule can buy it back", () => {
@@ -323,7 +323,7 @@ describe("evaluatePermissions", () => {
 			};
 			const decision = evaluatePermissions("Bash", { command: 123 }, config);
 			if (decision.behavior !== "deny") throw new Error(`expected deny, got ${decision.behavior}`);
-			expect(decision.message).toContain("no readable string command");
+			expect(decision.message ?? "").toContain("no readable string command");
 		});
 
 		test("a readable command is unaffected, in both directions", () => {
@@ -410,7 +410,7 @@ describe("evaluatePermissions", () => {
 			}
 			// The reason too: a deny naming the dangerous command would be the
 			// other bug, and it is the one this ordering is most likely to drift to.
-			expect(decision.message).toContain("Plan mode");
+			expect(decision.message ?? "").toContain("Plan mode");
 		}
 
 		// The control, and the reason this is a claim about *ordering* rather than
@@ -621,7 +621,7 @@ describe("evaluatePermissions", () => {
 			if (decision.behavior !== "ask") throw new Error("unreachable");
 			// The message names the rule that asked, which is most of what the
 			// dialog has to show about why it opened.
-			expect(decision.message).toContain("Asked by projectSettings rule: Bash(git commit *)");
+			expect(decision.message ?? "").toContain("Asked by projectSettings rule: Bash(git commit *)");
 			// Control: the specifier bounds the rule, so a sibling git command still
 			// runs unattended.
 			expect(evaluatePermissions("Bash", { command: "git status" }, config).behavior).toBe("allow");
@@ -658,7 +658,7 @@ describe("evaluatePermissions", () => {
 				if (decision.behavior !== "deny") throw new Error("unreachable");
 				// The refusing rule is named too, so the assertion cannot be satisfied
 				// by some other refusal happening to fire instead.
-				expect(decision.message).toContain("Denied by projectSettings rule: Bash(git commit *)");
+				expect(decision.message ?? "").toContain("Denied by projectSettings rule: Bash(git commit *)");
 			}
 		});
 
@@ -692,11 +692,11 @@ describe("evaluatePermissions", () => {
 			const decision = evaluatePermissions("Bash", { command: "rm -rf /" }, config);
 			expect(decision.behavior).toBe("deny");
 			if (decision.behavior !== "deny") throw new Error("unreachable");
-			expect(decision.message).toContain("Blocked as a dangerous command");
+			expect(decision.message ?? "").toContain("Blocked as a dangerous command");
 			expect(decision.message).not.toContain("Asked by");
 			// The refusal no longer points at a rule as a way through: no rule lifts
 			// this one, and that is the sentence that used to say otherwise.
-			expect(decision.message).toContain("no allow or ask rule lifts it");
+			expect(decision.message ?? "").toContain("no allow or ask rule lifts it");
 			// Control, both halves: the same ask rule does reach an ordinary command
 			// (so the rule is live), and in `ask` mode the classified command is the
 			// classifier's to ask about — its message, not the rule's.
@@ -715,7 +715,7 @@ describe("evaluatePermissions", () => {
 			const decision = evaluatePermissions("Write", { file_path: "a.txt", content: "" }, config);
 			expect(decision.behavior).toBe("deny");
 			if (decision.behavior !== "deny") throw new Error("unreachable");
-			expect(decision.message).toContain("Plan mode");
+			expect(decision.message ?? "").toContain("Plan mode");
 			// Control: a read-only tool the plan gate admits does reach the dialog,
 			// and the message proves the rule opened it rather than the mode's own
 			// undecided fallback (which also answers `ask`, without a message).
@@ -740,7 +740,7 @@ describe("evaluatePermissions", () => {
 			if (decision.behavior !== "ask") throw new Error("unreachable");
 			// The verdict names the path it caught, so the dialog can say why it
 			// opened.
-			expect(decision.message).toContain('command accesses "secret/key"');
+			expect(decision.message ?? "").toContain('command accesses "secret/key"');
 			// Control: the same redirection into an unprotected directory runs
 			// unattended in agent mode, and the file tool itself is still asked
 			// about.
@@ -1087,5 +1087,97 @@ describe("a path rule reaches the other tools that open the same files", () => {
 		const edit = config("allow", "Edit(src/**)", "ask");
 		expect(verdict("Edit", { file_path: "src/a.ts" }, edit)).toBe("allow");
 		expect(verdict("Write", { file_path: "src/a.ts", content: "" }, edit)).toBe("ask");
+	});
+});
+
+describe("YOLO mode", () => {
+	const base = { mode: "ask" as const, sandbox: SANDBOX, rules: [] as PermissionRule[], cwd: CWD };
+	const run = (
+		toolName: string,
+		input: unknown,
+		extra: {
+			mode?: "ask" | "plan" | "agent";
+			sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+			rules?: PermissionRule[];
+			yolo?: boolean;
+		} = {},
+	) => evaluatePermissions(toolName, input, { ...base, ...extra });
+
+	/**
+	 * The classifier is the headline and the reason the override exists. `ask`
+	 * proves it is the classifier being spent and not `agent`'s fallback: both
+	 * modes get the same sentence from the same rule, and both land here.
+	 */
+	test.each(["ask", "agent"] as const)("%s mode reaches a classified command with no dialog", (mode) => {
+		const blocked = run("Bash", { command: "rm -rf /" }, { mode });
+		expect(blocked.behavior).toBe(mode === "agent" ? "deny" : "ask");
+		expect(run("Bash", { command: "rm -rf /" }, { mode, yolo: true }).behavior).toBe("allow");
+	});
+
+	test("ask rules are skipped, but the allow and deny loops are not", () => {
+		const rules: PermissionRule[] = [
+			{ toolName: "Bash", behavior: "ask", source: "projectSettings" },
+			{ toolName: "Read", behavior: "allow", source: "projectSettings" },
+			{ toolName: "Write", behavior: "deny", source: "projectSettings" },
+		];
+		expect(run("Bash", { command: "git status" }, { rules }).behavior).toBe("ask");
+		expect(run("Bash", { command: "git status" }, { rules, yolo: true }).behavior).toBe("allow");
+		expect(run("Write", { file_path: "a.txt", content: "" }, { rules, yolo: true }).behavior).toBe("deny");
+	});
+
+	/**
+	 * A deny rule is the user's floor, not a prompt. It is the one thing the
+	 * override leaves above everything, and the Bash cross-check proves the
+	 * shell cannot go around a file deny either.
+	 */
+	test("deny rules still decide first, including the shell's file access", () => {
+		const rules = parseRuleList(["Read(secret/**)"], "deny", "projectSettings");
+		const decision = run("Read", { file_path: "secret/key" }, { rules, yolo: true });
+		expect(decision.behavior).toBe("deny");
+		expect(run("Bash", { command: "cat secret/key" }, { rules, yolo: true }).behavior).toBe("deny");
+	});
+
+	test("the plan gate and the read-only write gate still refuse", () => {
+		expect(run("Write", { file_path: "a.txt", content: "" }, { mode: "plan", yolo: true }).behavior).toBe("deny");
+		expect(run("Bash", { command: "ls" }, { mode: "plan", yolo: true }).behavior).toBe("deny");
+		expect(run("Write", { file_path: "a.txt", content: "" }, { sandbox: "read-only", yolo: true }).behavior).toBe(
+			"deny",
+		);
+	});
+
+	test("the Bash shape check survives the classifier it belongs to", () => {
+		const decision = run("Bash", { command: 123 }, { yolo: true });
+		expect(decision.behavior).toBe("deny");
+		expect(decision.behavior === "deny" ? decision.message : "").toContain("no readable string command");
+	});
+
+	/**
+	 * Escalation is a request to leave the sandbox, and the sandbox is the thing
+	 * YOLO keeps. Approving it would quietly undo the whole distinction.
+	 */
+	test("an escalated command is denied, not approved", () => {
+		const decision = run(
+			"Bash",
+			{ command: "npm install", escalate: true, justification: "needs the network" },
+			{ yolo: true },
+		);
+		expect(decision.behavior).toBe("deny");
+		expect(decision.behavior === "deny" ? decision.message : "").toContain("keeps the sandbox");
+	});
+
+	test("the escalated call's own shape checks still answer before the YOLO refusal", () => {
+		const background = run(
+			"Bash",
+			{ command: "npm install", escalate: true, justification: "x", run_in_background: true },
+			{ yolo: true },
+		);
+		expect(background.behavior === "deny" ? background.message : "").toContain("cannot also start in the background");
+		const unjustified = run("Bash", { command: "npm install", escalate: true }, { yolo: true });
+		expect(unjustified.behavior === "deny" ? unjustified.message : "").toContain("needs a justification");
+	});
+
+	test("the fallback is an allow whatever the mode, so an ask mode never dialogs", () => {
+		expect(run("Read", { file_path: "a.txt" }, { yolo: true }).behavior).toBe("allow");
+		expect(run("mcp__github__x", {}, { yolo: true }).behavior).toBe("allow");
 	});
 });

@@ -481,6 +481,12 @@ export interface BeetleBandOptions {
 	permissionMode?: () => PermissionMode | undefined;
 	sandbox?: () => SandboxMode | undefined;
 	network?: () => NetworkAxis | undefined;
+	/**
+	 * The root session's YOLO flag, read at each evaluation. A member inherits
+	 * the posture its band belongs to and has no command to change it; a copied
+	 * boolean would keep approving after the root had left.
+	 */
+	yolo?: () => boolean | undefined;
 	getPermissionRules?: () => PermissionRule[];
 }
 
@@ -822,6 +828,7 @@ export class BeetleBand {
 						rules: options.getPermissionRules?.() ?? [],
 						cwd: options.cwd,
 						readOnlyToolNames,
+						yolo: options.yolo?.() ?? false,
 					});
 					if (decision.behavior !== "ask") return decision;
 					// The bus and the board are the calls that must survive an "ask":

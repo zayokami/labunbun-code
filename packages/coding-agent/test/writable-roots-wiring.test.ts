@@ -108,8 +108,11 @@ describe("/permissions shows the writable roots", () => {
 		expect(window).toContain("home: ctx.home");
 		expect(window).toContain("configured: ctx.settings.permissions.additionalDirectories");
 		// The control for the two above: a `caseBlock` that silently found nothing
-		// would make all three vacuous.
-		expect(window).toContain("describeSandboxBackend(ctx.sandboxBackend");
+		// would make all three vacuous. The call is allowed to wrap across lines —
+		// the formatter decides that — so the name and its first argument are
+		// asserted separately rather than as one source line.
+		expect(window).toContain("describeSandboxBackend(");
+		expect(window).toContain("ctx.sandboxBackend");
 	});
 
 	test("and it renders them from the same function the policy is built from", () => {

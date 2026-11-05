@@ -694,6 +694,29 @@ describe("what the user is told", () => {
 		}
 	});
 
+	/**
+	 * YOLO turns the classifier off, and these sentences name it as a limit that
+	 * remains. Left alone they would make `/permissions` contradict its own YOLO
+	 * line two rows above: one saying "classifier off", the next saying it still
+	 * applies. The flag is threaded in rather than the output string edited.
+	 */
+	test("the classifier is dropped from the sentence when YOLO has turned it off", () => {
+		const normal = describeSandboxBackend("unavailable", "workspace-write", "linux");
+		expect(normal).toContain("dangerous-command classifier");
+		const yolo = describeSandboxBackend("unavailable", "workspace-write", "linux", undefined, false);
+		expect(yolo).not.toContain("classifier");
+		expect(yolo).toContain("The deny rules still apply");
+
+		for (const platform of ["win32", "linux"] as const) {
+			expect(describeSandboxBackend("simulated", "workspace-write", platform, undefined, false)).not.toContain(
+				"classifier",
+			);
+		}
+		expect(describeSandboxBackend("native", "danger-full-access", "darwin", undefined, false)).not.toContain(
+			"classifier",
+		);
+	});
+
 	test("the backend follows the platform, and a platform with no backend is never native", () => {
 		expect(sandboxBackendFor("darwin", true)).toBe("native");
 		expect(sandboxBackendFor("linux", true)).toBe("native");

@@ -21,6 +21,7 @@ import { CommandWheel } from "./CommandWheel.tsx";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
+import { PhraseConfirmDialog } from "./PhraseConfirmDialog.tsx";
 import { PlanReviewDialog } from "./PlanReviewDialog.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { QuestionDialog } from "./QuestionDialog.tsx";
@@ -238,6 +239,7 @@ export function REPL({
 	const question = useStore(store, (s) => s.question);
 	const planReview = useStore(store, (s) => s.planReview);
 	const picker = useStore(store, (s) => s.picker);
+	const phraseConfirm = useStore(store, (s) => s.phraseConfirm);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const contextActivity = useStore(store, (s) => s.contextActivity);
 	const contextActivitySince = useStore(store, (s) => s.contextActivitySince);
@@ -287,6 +289,19 @@ export function REPL({
 	 */
 	const cycleMode = useCallback(() => {
 		const session = getSession();
+		// YOLO's brake. The first Shift+Tab while it is on only exits YOLO: the
+		// key must not both disarm the widest posture and move to the next row,
+		// or the user would have to predict where they land to know whether they
+		// stopped. No mode changed, so the label goes back to the underlying
+		// pair's own name and nothing is recorded.
+		if (session.yolo) {
+			session.disableYolo();
+			store.set((s) => ({
+				...s,
+				modeLabel: describeModeChoice(session.permissionMode, session.sandbox),
+			}));
+			return;
+		}
 		const previous = { mode: session.permissionMode, sandbox: session.sandbox };
 		const next = cycleModeChoice(previous);
 		session.setMode(next.mode, next.sandbox);
@@ -327,7 +342,8 @@ export function REPL({
 	// All three overlays mean the same thing: the run is stopped until the user
 	// answers. The clock, the title and the notification all read it from here so
 	// a new overlay cannot be added to one and forgotten in another.
-	const awaitingUser = dialog !== null || question !== null || planReview !== null || picker !== null;
+	const awaitingUser =
+		dialog !== null || question !== null || planReview !== null || picker !== null || phraseConfirm !== null;
 	/** A key pressed now would land mid-turn, so the prompt's keys change meaning. */
 	const busy = statusPhase !== "idle";
 	/**
@@ -629,6 +645,7 @@ export function REPL({
 		question !== null ||
 		planReview !== null ||
 		picker !== null ||
+		phraseConfirm !== null ||
 		statusCard !== null ||
 		activity !== null ||
 		wheelOpen ||
@@ -710,7 +727,7 @@ export function REPL({
 		// explaining itself: the panel is not a command, and nothing on screen would
 		// be improved by a sentence about a key that just said no.
 		if (key.ctrl && input === "t") {
-			if (dialog || question || planReview || picker) return;
+			if (dialog || question || planReview || picker || phraseConfirm) return;
 			if (transcriptMode) return;
 			setWatchOpen((v) => !v);
 			// A view that opens on the tail and remembers a scroll from last time
@@ -730,7 +747,7 @@ export function REPL({
 		// host, and the emacs engine binds no C-v at all — the terminal is the
 		// one place it can be swallowed (recorded in docs/dev/split-pane-design.md).
 		if (key.ctrl && input === "v") {
-			if (dialog || question || planReview || picker) return;
+			if (dialog || question || planReview || picker || phraseConfirm) return;
 			if (transcriptMode) return;
 			if (!watchOpen) return;
 			setWatchSelection((current) => nextWatchSelection(backgroundShells, current));
@@ -749,7 +766,7 @@ export function REPL({
 		// move the panel. The engine has the older claim, so the jump stands down
 		// under emacs and does nothing: the user sees one action, not two.
 		if (key.meta && /^[1-9]$/.test(input)) {
-			if (dialog || question || planReview || picker) return;
+			if (dialog || question || planReview || picker || phraseConfirm) return;
 			if (transcriptMode) return;
 			if (!watchOpen) return;
 			if (emacs) return;
@@ -763,7 +780,7 @@ export function REPL({
 		// is the pane's own body height, so a press never skips an entry that
 		// was never on screen (the transcript screen's rule).
 		if (splitActive && (key.pageUp || key.pageDown)) {
-			if (dialog || question || planReview || picker) return;
+			if (dialog || question || planReview || picker || phraseConfirm) return;
 			// The page is the entries the pane is showing right now, measured by
 			// the same line model that draws them: a press moves roughly one
 			// screenful, never a fixed number of entries that could leap over a
@@ -817,7 +834,7 @@ export function REPL({
 		// too would kill the very tool call the user is deciding about, and the
 		// decision they just made would land on a run that no longer exists.
 		if (key.escape) {
-			if (dialog || question || planReview || picker) return;
+			if (dialog || question || planReview || picker || phraseConfirm) return;
 			// The editor gets the first look — it may have something of its own to
 			// cancel (an @-list, insert mode, a half-typed vim command) that is not
 			// an interrupt. Only what it declines to use reaches the session.
@@ -880,7 +897,7 @@ export function REPL({
 		// A dialog is the user deciding, and its own subscription already has this
 		// action. An ○ here must not abort the very turn the dialog is asking
 		// about — the same rule the Esc branch states above.
-		if (dialog || question || planReview || picker) return true;
+		if (dialog || question || planReview || picker || phraseConfirm) return true;
 		if (transcriptMode) {
 			// The button that opened the transcript is the button that closes it, the
 			// way ctrl+o toggles both ways. ○ leaves as well, but a person who used
@@ -1042,6 +1059,7 @@ export function REPL({
 		!question &&
 		!planReview &&
 		!picker &&
+		!phraseConfirm &&
 		!wheelOpen &&
 		!shortcutsOpen &&
 		!activity &&
@@ -1188,6 +1206,18 @@ export function REPL({
 				{planReview && !transcriptMode ? (
 					<PlanReviewDialog plan={planReview.plan} resolve={planReview.resolve} pad={pad} />
 				) : null}
+				{phraseConfirm && !transcriptMode ? (
+					<PhraseConfirmDialog
+						title={phraseConfirm.title}
+						phrase={phraseConfirm.phrase}
+						off={phraseConfirm.off}
+						on={phraseConfirm.on}
+						sandbox={phraseConfirm.sandbox}
+						note={phraseConfirm.note}
+						resolve={phraseConfirm.resolve}
+						pad={pad}
+					/>
+				) : null}
 				{picker && !transcriptMode ? (
 					<ListPickerDialog
 						title={picker.title}
@@ -1271,6 +1301,7 @@ export function REPL({
 						question !== null ||
 						planReview !== null ||
 						picker !== null ||
+						phraseConfirm !== null ||
 						shortcutsOpen ||
 						activity !== null
 					}
@@ -1408,7 +1439,11 @@ export function connectTurnFooter(
 		const state = store.get();
 		const busy = state.statusPhase !== "idle";
 		const frozen =
-			state.dialog !== null || state.question !== null || state.planReview !== null || state.picker !== null;
+			state.dialog !== null ||
+			state.question !== null ||
+			state.planReview !== null ||
+			state.picker !== null ||
+			state.phraseConfirm !== null;
 		clock = advanceTimer(clock, now(), { busy, frozen });
 		if (busy) workingMs = clock.elapsedMs;
 	};

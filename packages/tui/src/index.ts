@@ -22,6 +22,7 @@ export {
 export { MessageList, StreamingPreview } from "./components/MessageList.tsx";
 export { OnScreenKeyboard } from "./components/OnScreenKeyboard.tsx";
 export { PermissionDialog } from "./components/PermissionDialog.tsx";
+export { PhraseConfirmDialog } from "./components/PhraseConfirmDialog.tsx";
 export { PromptInput } from "./components/PromptInput.tsx";
 export { QueuedMessages, queuedHint, queuedPreview } from "./components/QueuedMessages.tsx";
 export { connectSessionToStore, helpText, REPL, type ReplProps } from "./components/REPL.tsx";
@@ -130,6 +131,8 @@ export {
 	initialUiState,
 	type PendingTool,
 	type PermissionDialogState,
+	type PhraseConfirmRequest,
+	type PhraseConfirmState,
 	type QueuedMessage,
 	RESULT_TEXT_CAP,
 	reduceEvent,

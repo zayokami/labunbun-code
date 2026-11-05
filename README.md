@@ -84,7 +84,7 @@ The mode choices combine the first two axes.
 | Ask | `ask` | `workspace-write` |
 | Plan | `plan` | `workspace-write` |
 | Agent | `agent` | `workspace-write` |
-| Agent 无沙箱 | `agent` | `danger-full-access` |
+| Agent (no sandbox) | `agent` | `danger-full-access` |
 
 Press Shift+Tab to go to the next mode.
 
