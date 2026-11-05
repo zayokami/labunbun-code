@@ -42,7 +42,7 @@ import { ASSISTANT_DOT, RESULT_INDENT, RESULT_LEAD, TOOL_DOT } from "../figures.
 import { type Theme, useTheme } from "../theme.ts";
 import type { UiBackgroundShell, UiEntry, UiTask } from "../ui-state.ts";
 import { looksLikeDiff, resultLineColor, stripAnsi } from "./MessageList.tsx";
-import { TaskStrip } from "./TaskStrip.tsx";
+import { ICONS } from "./TaskStrip.tsx";
 import { WatchPanel, type WatchSelection } from "./WatchPanel.tsx";
 
 /**
@@ -87,6 +87,77 @@ export function watchColumnWidth(columns: number): number {
 /** Whether the terminal can show both panes at once. */
 export function workspaceFits(columns: number, rows: number): boolean {
 	return watchColumnWidth(columns) > 0 && workspaceHeight(rows) >= WORKSPACE_MIN_HEIGHT;
+}
+
+/**
+ * The blank column between the panes. Two borders drawn one against the other
+ * read as a single glyph; a cell of air is what makes them two panes.
+ */
+export const SPLIT_GAP = 1;
+
+/**
+ * The two panes' geometry from the terminal's size. The left pane's body is its
+ * width minus two border columns and two padding columns, and its height minus
+ * the header and footer rows; the page keys and the renderer both measure from
+ * this one function, so a page can never be a different size than the screen.
+ */
+export function splitBodySize(
+	columns: number,
+	height: number,
+): { watchWidth: number; leftWidth: number; bodyWidth: number; bodyRows: number } {
+	const watchWidth = Math.max(1, watchColumnWidth(columns));
+	const leftWidth = Math.max(1, columns - watchWidth - SPLIT_GAP);
+	return {
+		watchWidth,
+		leftWidth,
+		bodyWidth: Math.max(8, leftWidth - 4),
+		bodyRows: Math.max(1, height - 4),
+	};
+}
+
+/**
+ * A scrolled conversation pane. `end` is the entry just past the pane's bottom
+ * — an index, not a distance from the newest, so entries arriving below do not
+ * slide the page out from under a reader. `total` is how many entries existed
+ * when the reader left the tail; it is the baseline for "N new".
+ */
+export interface WorkspaceScroll {
+	end: number;
+	total: number;
+}
+
+/**
+ * One page-key press. Up pins the pane a page earlier; down walks back toward
+ * the newest and unpins at the tail, where the pane follows new entries again.
+ * A page never skips the whole conversation: it is measured from the entries
+ * currently on screen, so a press moves roughly one screenful and no entry is
+ * passed over unseen.
+ */
+export function scrollWorkspace(
+	current: WorkspaceScroll | null,
+	entryCount: number,
+	page: number,
+	direction: "up" | "down",
+): WorkspaceScroll | null {
+	const step = Math.max(1, Math.floor(page));
+	if (direction === "down") {
+		if (!current) return null;
+		return current.end + step >= entryCount ? null : { end: current.end + step, total: current.total };
+	}
+	const base = current?.end ?? entryCount;
+	const next = Math.max(0, base - step);
+	if (entryCount === 0 || next >= entryCount) return null;
+	return { end: next, total: current?.total ?? entryCount };
+}
+
+/**
+ * The rows the split's compact task strip needs: one blank separator, one
+ * header, and up to three unfinished tasks. `0` when there is nothing to show.
+ * Itemized so the right column's two children can never exceed its height.
+ */
+export function taskStripRows(tasks: UiTask[] | undefined): number {
+	if (!tasks || tasks.length === 0) return 0;
+	return 2 + Math.min(3, tasks.filter((task) => task.status !== "completed").length);
 }
 
 /** One styled run of a pane row. A row with one segment is the common case. */
@@ -479,6 +550,7 @@ export function SplitWorkspace({
 	columns,
 	height,
 	offset,
+	newBelow = 0,
 }: {
 	entries: UiEntry[];
 	liveOutputs?: Record<string, string>;
@@ -494,21 +566,19 @@ export function SplitWorkspace({
 	height: number;
 	/** Entries scrolled back from the newest; 0 follows the tail. */
 	offset: number;
+	/** Entries that arrived after the reader left the tail. */
+	newBelow?: number;
 }) {
 	const theme = useTheme();
-	const watchWidth = Math.max(1, watchColumnWidth(columns));
-	const leftWidth = Math.max(1, columns - watchWidth);
-	// Border (two columns), padding on each side (two more), header and footer
-	// (two rows) are the transcript pane's fixed costs; everything left is the
-	// line window the entries are fitted to.
-	const bodyWidth = Math.max(8, leftWidth - 4);
-	const bodyRows = Math.max(1, height - 4);
+	const { watchWidth, leftWidth, bodyWidth, bodyRows } = splitBodySize(columns, height);
 
 	// The task strip is worth its rows only when the watch panel still has a
-	// usable body left; otherwise the right column is the panel alone.
-	const taskRows = tasks && tasks.length > 0 ? Math.min(tasks.length + 2, 7) + 1 : 0;
-	const showTasks = taskRows > 0 && height - taskRows >= 6;
-	const watchHeight = showTasks ? height - taskRows : height;
+	// usable body left; otherwise the right column is the panel alone. Its rows
+	// are handed to it exactly, like the transcript pane's: two children whose
+	// heights add up to the column's height cannot overflow it.
+	const stripRows = taskStripRows(tasks);
+	const showTasks = stripRows > 0 && height - stripRows >= 8;
+	const watchHeight = showTasks ? height - stripRows : height;
 
 	const { lines, firstEntry, lastEntry } = buildConversation({
 		entries,
@@ -521,10 +591,8 @@ export function SplitWorkspace({
 		liveOutputs,
 	});
 	const scrolled = offset > 0;
-	const header =
-		entries.length === 0 || firstEntry >= lastEntry
-			? `Conversation${scrolled ? " · scrolled" : ""}`
-			: `Conversation ${firstEntry + 1}-${lastEntry} of ${entries.length}${scrolled ? " · scrolled" : ""}`;
+	const range =
+		entries.length === 0 || firstEntry >= lastEntry ? "" : ` ${firstEntry + 1}-${lastEntry} of ${entries.length}`;
 
 	return (
 		<Box flexDirection="row" height={height} flexShrink={0}>
@@ -537,8 +605,13 @@ export function SplitWorkspace({
 				borderColor={theme.border}
 				paddingX={1}
 			>
-				<Text dimColor wrap="truncate">
-					{header}
+				<Text wrap="truncate">
+					<Text bold color={theme.textMuted}>
+						Conversation
+					</Text>
+					{range ? <Text dimColor>{range}</Text> : null}
+					{scrolled ? <Text color={theme.warning}> · scrolled</Text> : null}
+					{newBelow > 0 ? <Text color={theme.accent}> · {newBelow} new</Text> : null}
 				</Text>
 				{/* Exactly `bodyRows` rows, each truncated rather than wrapped if a
 				    width estimate was off — Ink's clipping is the bug this avoids. */}
@@ -559,6 +632,7 @@ export function SplitWorkspace({
 					PgUp/PgDn scroll · Esc close
 				</Text>
 			</Box>
+			<Box width={SPLIT_GAP} flexShrink={0} />
 			<Box width={watchWidth} height={height} flexShrink={0} flexDirection="column">
 				<WatchPanel
 					shells={shells}
@@ -568,8 +642,36 @@ export function SplitWorkspace({
 					columns={watchWidth}
 					height={watchHeight}
 				/>
-				{showTasks && tasks ? <TaskStrip tasks={tasks} /> : null}
+				{showTasks && tasks ? <CompactTaskStrip tasks={tasks} width={watchWidth} rows={stripRows} /> : null}
 			</Box>
+		</Box>
+	);
+}
+
+/**
+ * The task strip the right column can afford: one blank separator, a count, and
+ * up to three unfinished tasks, each exactly one row. The frame's task strip
+ * (with its border, active-form row and margin) is the inline layout's shape;
+ * here the column is 40–56 columns wide and its height is a budget, so the
+ * compact form trades decoration for rows the watch panel can use.
+ */
+function CompactTaskStrip({ tasks, width, rows }: { tasks: UiTask[]; width: number; rows: number }) {
+	const theme = useTheme();
+	const completed = tasks.filter((task) => task.status === "completed").length;
+	const active = tasks.find((task) => task.status === "in_progress");
+	const allDone = completed === tasks.length;
+	const visible = tasks.filter((task) => task.status !== "completed").slice(0, Math.max(0, rows - 2));
+	return (
+		<Box flexDirection="column" width={width} height={rows} flexShrink={0}>
+			<Text> </Text>
+			<Text color={allDone ? theme.success : active ? theme.accent : theme.textMuted} wrap="truncate">
+				{`Tasks ${completed}/${tasks.length}${active?.activeForm ? ` · ${active.activeForm}` : ""}`}
+			</Text>
+			{visible.map((task) => (
+				<Text key={task.id} color={task.status === "in_progress" ? theme.accent : theme.pending} wrap="truncate">
+					{`${ICONS[task.status]} #${task.id} ${task.subject}${task.owner ? ` · ${task.owner}` : ""}`}
+				</Text>
+			))}
 		</Box>
 	);
 }
