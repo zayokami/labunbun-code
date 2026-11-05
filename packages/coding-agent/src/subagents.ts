@@ -182,7 +182,7 @@ export interface TaskToolContext {
 	definitions: () => AgentDefinition[];
 	/** Read at the call: `/resume` swaps the session a sidechain is written into. */
 	store?: () => SessionStore | undefined;
-	systemPromptFor?: (agent: AgentDefinition) => string;
+	systemPromptFor?: (agent: AgentDefinition, model: Model) => string;
 	/** Read at the call: the parent's mode follows EnterPlanMode and `/resume`. */
 	permissionMode?: () => PermissionMode | undefined;
 	/**
@@ -590,7 +590,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 
 		const subSession = new AgentSession({
 			model,
-			systemPrompt: ctx.systemPromptFor?.(definition) ?? agentSystemPrompt(definition),
+			systemPrompt: ctx.systemPromptFor?.(definition, model) ?? agentSystemPrompt(definition),
 			tools,
 			maxTurns: input.max_turns ?? definition.maxTurns,
 			cwd: scope.cwd,

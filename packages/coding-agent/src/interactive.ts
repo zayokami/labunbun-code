@@ -1284,7 +1284,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// the startup discovery block, read through the arrow like `skillTool`
 		// above. No output style and no language line: a subagent's output is a
 		// report to its parent, so a voice instruction belongs to the parent.
-		systemPromptFor: (definition) =>
+		systemPromptFor: (definition, workerModel) =>
 			[
 				agentSystemPrompt(definition),
 				buildSubagentContext({
@@ -1293,6 +1293,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					isTTY: true,
 					memory: memoryText,
 					skills: skillsBlock,
+					model: workerModel,
 				}),
 			]
 				.filter(Boolean)
@@ -1457,7 +1458,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * already tells the user it was remembered. The options are otherwise the
 	 * same as the startup build, so only the memory section differs.
 	 */
-	const buildPrompt = (currentMemory: string) => {
+	const buildPrompt = (currentMemory: string, activeModel: Model = sessionRef?.model ?? model) => {
 		// The style files are loaded through the same trust gate as the rest of
 		// the project tier; `settings.outputStyle` is what selects one, and an
 		// unset or unknown name contributes nothing (`output-styles.ts`). The
@@ -1473,6 +1474,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			language: settings.language,
 			outputStyle: resolveOutputStyle(settings.outputStyle, styles.styles)?.content,
 			skills: skillsBlock,
+			model: activeModel,
 		});
 	};
 	const systemPrompt = buildPrompt(memoryText);
@@ -1971,6 +1973,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			return false;
 		}
 		sessionRef?.setModel(next);
+		// The prompt carries the model's profile: the variant (full or lean) and
+		// the `# Model guidance` section. Rebuilding here is what makes the
+		// switch reach the next request rather than the next process — the same
+		// reason the `#` shortcut rebuilds after it appends a note.
+		sessionRef?.setSystemPrompt(buildPrompt(memoryText, next));
 		compactionWiring.rebuild(next, store);
 		thresholdHolder.current = compactionThreshold({
 			contextWindow: next.contextWindow,

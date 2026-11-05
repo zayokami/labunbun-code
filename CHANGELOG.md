@@ -7,6 +7,18 @@ commands, and SHA-256 checksums.
 
 ### Added
 
+- **The system prompt adapts to the model family.** Every session now resolves
+  its model to a profile: Claude, GPT, Gemini, DeepSeek, Kimi, Qwen, GLM,
+  MiniMax, Mistral, Meta, Hunyuan, MiMo, NVIDIA, a local Ollama model, or an
+  unknown row. The profile adds a `# Model guidance` section naming the active
+  model and carrying the family's tool and edit habits, and selects a short
+  prompt for small windows and small local models. A gateway row is read as the
+  model it serves, not as the gateway. `/model` rebuilds the prompt with the
+  new model, and a subagent gets the profile of the model it actually runs on.
+  The layer is per family, not per model, and it does not change thinking
+  parameters, limits, or tool availability — those stay on the model row where
+  the wire adapters read them. See `docs/dev/model-profiles.md`.
+
 - **Five more providers: Tencent TokenHub, Xiaomi MiMo, Meta's Model API, and
   Kimi's China and Code hosts.** `tencent/` carries `hy4`, `hy4-preview` and
   `hy3` from TokenHub, Tencent's official home for the Hy generation, keyed by

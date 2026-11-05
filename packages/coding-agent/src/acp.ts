@@ -1229,6 +1229,7 @@ class AcpAgent implements acp.Agent {
 				language: settings.language,
 				outputStyle: resolveOutputStyle(settings.outputStyle, outputStyles.styles)?.content,
 				skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
+				model,
 			}),
 			tools: allTools,
 			store,

@@ -16,6 +16,8 @@
  * differ in a way that buys something.
  */
 import { type AnyTool, localDayKey } from "@labunbun/agent";
+import type { Model } from "@labunbun/ai";
+import { modelGuidanceSection, resolveModelProfile } from "./model-profile.ts";
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "SYSTEM_PROMPT_DYNAMIC_BOUNDARY";
 
@@ -78,6 +80,72 @@ export interface SystemPromptContext {
 	 * because it differs per project and per machine.
 	 */
 	skills?: string;
+	/**
+	 * The model about to answer. It selects the prompt variant (`full` or the
+	 * short `lean` form for small and local models) and contributes the
+	 * `# Model guidance` section.
+	 *
+	 * Optional on purpose: the base prompt is one text, and a caller that passes
+	 * no model — a test, a library embedder, a prompt assembled before the model
+	 * is known — must keep getting the bytes it always got. The three hosts pass
+	 * the resolved session model, and `/model` rebuilds the prompt with the new
+	 * one so a switch reaches the next request.
+	 */
+	model?: Model;
+}
+
+/**
+ * The full prompt body: the harness contract, the attitude and communication
+ * rules. Written as a function because the lean variant is a different body,
+ * not a suffix of this one.
+ */
+function fullBasePrompt(ctx: Pick<SystemPromptContext, "language">): string {
+	return `You are LaBunbun Code, an interactive CLI coding agent. You help the user with software engineering tasks: reading and understanding code, making edits, running commands, and fixing bugs.
+
+# Attitude
+You MUST answer the user's question directly, without padding, and to the point. Do not restate what was asked. Skip flattery like "great question". Be direct and technical.
+
+# Context
+- This conversation is compacted for you automatically before it outgrows the model's context window, so do not stop or wrap up early because the context is filling.
+- A compaction replaces earlier messages with a summary; anything you will still need afterwards belongs in a file, not in the conversation.
+
+# Doing tasks
+- Explore before acting: read files before editing them; never guess content.
+- Prefer the dedicated tools (Read/Edit/Write/Grep/Glob) over shell equivalents.
+- Make focused, minimal changes that match the codebase's existing style.
+- Stop when the work asked for is done. Do not add features, tests, docs or refactors that were not asked for; the exception is a regression test for a bug you just fixed. If something else would help, name it at the end instead of doing it.
+- After changes, run the project's own check — a build, a type check, or a test that exercises the change. A check that only parses, or a command that failed to start, does not count.
+- If no real check can run, name the one you did not run and why, instead of reporting the change as done.
+- Do not commit unless explicitly asked.
+
+# Communication
+- ${ctx.language ? `Answer in ${ctx.language}.` : "Answer in the user's language."}
+- Reference code as path:line.
+- Say in one line what you are about to do before your first tool call, and note briefly what you just found when a turn runs long.
+- Report outcomes faithfully: if a command failed, say so with its output.`;
+}
+
+/**
+ * The short prompt for a small local model or a tiny window. It keeps every
+ * hard rule that changes behaviour — read before editing, dedicated tools,
+ * scope, a real check, no commit — and drops the sections that cost tokens
+ * without changing an action (`# Attitude`, the compaction explanation, the
+ * narration rule). The family guidance is still appended below the boundary,
+ * so the short form does not lose the model-specific half.
+ */
+function leanBasePrompt(ctx: Pick<SystemPromptContext, "language">): string {
+	return `You are LaBunbun Code, an interactive CLI coding agent. You help with software engineering tasks: reading code, making edits, running commands, and fixing bugs.
+
+# Rules
+- Read a file before editing it; never guess its content.
+- Prefer the dedicated Read/Edit/Write/Grep/Glob tools over shell equivalents.
+- Make the smallest change that solves the task. Do not add features, tests, docs or refactors that were not asked for.
+- After changes, run a real check — a build, a type check, or a test. A command that failed to start does not count.
+- If no real check can run, name the one you did not run and why.
+- ${ctx.language ? `Answer in ${ctx.language}.` : "Answer in the user's language."}
+- Reference code as path:line.
+- This conversation is compacted automatically; put anything you must keep in a file.
+- Do not commit unless explicitly asked.`;
 }
 
 /**
@@ -106,30 +174,9 @@ function skillsSection(skills: string | undefined): string | undefined {
 
 export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): string {
 	const sections: string[] = [];
+	const profile = ctx.model ? resolveModelProfile(ctx.model) : undefined;
 
-	sections.push(`You are LaBunbun Code, an interactive CLI coding agent. You help the user with software engineering tasks: reading and understanding code, making edits, running commands, and fixing bugs.
-
-# Attitude
-You MUST answer the user's question directly, without padding, and to the point. Do not restate what was asked. Skip flattery like "great question". Be direct and technical.
-
-# Context
-- This conversation is compacted for you automatically before it outgrows the model's context window, so do not stop or wrap up early because the context is filling.
-- A compaction replaces earlier messages with a summary; anything you will still need afterwards belongs in a file, not in the conversation.
-
-# Doing tasks
-- Explore before acting: read files before editing them; never guess content.
-- Prefer the dedicated tools (Read/Edit/Write/Grep/Glob) over shell equivalents.
-- Make focused, minimal changes that match the codebase's existing style.
-- Stop when the work asked for is done. Do not add features, tests, docs or refactors that were not asked for; the exception is a regression test for a bug you just fixed. If something else would help, name it at the end instead of doing it.
-- After changes, run the project's own check — a build, a type check, or a test that exercises the change. A check that only parses, or a command that failed to start, does not count.
-- If no real check can run, name the one you did not run and why, instead of reporting the change as done.
-- Do not commit unless explicitly asked.
-
-# Communication
-- ${ctx.language ? `Answer in ${ctx.language}.` : "Answer in the user's language."}
-- Reference code as path:line.
-- Say in one line what you are about to do before your first tool call, and note briefly what you just found when a turn runs long.
-- Report outcomes faithfully: if a command failed, say so with its output.`);
+	sections.push(profile?.variant === "lean" ? leanBasePrompt(ctx) : fullBasePrompt(ctx));
 
 	sections.push(environmentSection(ctx));
 
@@ -138,6 +185,16 @@ You MUST answer the user's question directly, without padding, and to the point.
 	const toolPrompts = tools.map((tool) => tool.prompt).filter((p): p is string => Boolean(p));
 	if (toolPrompts.length > 0) {
 		sections.push(`# Tool guidance\n${toolPrompts.join("\n")}`);
+	}
+
+	// The model-specific half. It follows the tool guidance because it is about
+	// how to use those tools on this model, and it stays below the boundary
+	// because a `/model` switch rebuilds it. An unknown family emits no section:
+	// there is no behaviour to tune, and a heading over generic advice would be
+	// bytes that buy nothing.
+	if (ctx.model && profile) {
+		const guidance = modelGuidanceSection(ctx.model, profile);
+		if (guidance) sections.push(guidance);
 	}
 
 	// Last, and after the boundary: this is the most specific instruction in the
@@ -171,7 +228,10 @@ You MUST answer the user's question directly, without padding, and to the point.
 }
 
 /** The parts of `SystemPromptContext` a subagent's context block reads. */
-export type SubagentContext = Pick<SystemPromptContext, "cwd" | "platform" | "isTTY" | "now" | "memory" | "skills">;
+export type SubagentContext = Pick<
+	SystemPromptContext,
+	"cwd" | "platform" | "isTTY" | "now" | "memory" | "skills" | "model"
+>;
 
 /**
  * The context a subagent shares with the session that spawned it: the
@@ -185,9 +245,17 @@ export type SubagentContext = Pick<SystemPromptContext, "cwd" | "platform" | "is
  * style. Those are the parent session's harness contract and voice; a
  * subagent's output is a report back to the parent, so a voice instruction
  * belongs to the parent rather than to every worker it spawns.
+ *
+ * `# Model guidance` is present when the caller knows the worker's model: a
+ * subagent can run on the light seat or on a model its definition names, and
+ * a 7B local worker needs the same short tool/edit rules as the main session.
+ * The section is the worker's own; the parent's identity is never used.
  */
 export function buildSubagentContext(ctx: SubagentContext): string {
-	return [environmentSection(ctx), memorySection(ctx.memory), skillsSection(ctx.skills)]
-		.filter((section): section is string => section !== undefined)
-		.join("\n\n");
+	const sections = [environmentSection(ctx), memorySection(ctx.memory), skillsSection(ctx.skills)];
+	if (ctx.model) {
+		const guidance = modelGuidanceSection(ctx.model, resolveModelProfile(ctx.model));
+		if (guidance) sections.push(guidance);
+	}
+	return sections.filter((section): section is string => section !== undefined).join("\n\n");
 }
