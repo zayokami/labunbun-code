@@ -65,7 +65,10 @@ describe("the YOLO flag", () => {
 	 * not the command's, so it holds for every caller.
 	 */
 	test("a running turn refuses it", async () => {
-		const faux = fauxProvider([{ text: "late", delayMs: 5_000 }]);
+		// The delay only has to outlive the `enableYolo` call below. Keeping it
+		// short matters: aborting this stream still awaits its timer on a backend
+		// that does not observe the signal, and the default per-test timeout is 5s.
+		const faux = fauxProvider([{ text: "late", delayMs: 2_000 }]);
 		const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
 		const run = session.prompt("go");
 		for (let i = 0; i < 100 && !session.isRunning; i++) await new Promise((r) => setTimeout(r, 5));
@@ -77,7 +80,7 @@ describe("the YOLO flag", () => {
 		expect(session.yolo).toBe(false);
 		session.abort();
 		await run.catch(() => {});
-	});
+	}, 15_000);
 
 	/**
 	 * `setMode` is the single owner of the transition: `/mode`, the picker,
