@@ -15,7 +15,11 @@ import {
 	buildConversation,
 	displayWidth,
 	type PaneLine,
+	SPLIT_GAP,
 	SplitWorkspace,
+	scrollWorkspace,
+	splitBodySize,
+	taskStripRows,
 	WORKSPACE_BOTTOM_ROWS,
 	WORKSPACE_MIN_COLUMNS,
 	WORKSPACE_MIN_HEIGHT,
@@ -25,7 +29,7 @@ import {
 	wrapText,
 } from "../src/components/SplitWorkspace.tsx";
 import { DARK_THEME, ThemeContext } from "../src/theme.ts";
-import type { UiBackgroundShell, UiEntry } from "../src/ui-state.ts";
+import type { UiBackgroundShell, UiEntry, UiTask } from "../src/ui-state.ts";
 
 const lineText = (line: PaneLine): string => line.segments.map((segment) => segment.text).join("");
 const paneRows = (lines: PaneLine[]): string[] => lines.map(lineText);
@@ -83,6 +87,60 @@ describe("the workspace's budget", () => {
 		expect(workspaceFits(WORKSPACE_MIN_COLUMNS, WORKSPACE_MIN_HEIGHT + WORKSPACE_BOTTOM_ROWS + 1)).toBe(true);
 		expect(workspaceFits(120, WORKSPACE_MIN_HEIGHT + WORKSPACE_BOTTOM_ROWS)).toBe(false);
 		expect(workspaceFits(120, WORKSPACE_MIN_HEIGHT + WORKSPACE_BOTTOM_ROWS + 1)).toBe(true);
+	});
+
+	test("the panes spend the terminal's columns exactly, with one column of air between", () => {
+		const body = splitBodySize(100, 16);
+		expect(body.watchWidth).toBe(40);
+		expect(body.leftWidth).toBe(100 - 40 - SPLIT_GAP);
+		expect(body.leftWidth + SPLIT_GAP + body.watchWidth).toBe(100);
+		// Border and one padding column on each side are the body's fixed costs.
+		expect(body.bodyWidth).toBe(body.leftWidth - 4);
+		expect(body.bodyRows).toBe(16 - 4);
+	});
+});
+
+describe("scrollWorkspace", () => {
+	test("a first PgUp pins the pane a page back, and appends do not move the pin", () => {
+		const pinned = scrollWorkspace(null, 30, 6, "up");
+		expect(pinned).toEqual({ end: 24, total: 30 });
+		// Two entries arrive below while the reader is back: another page up is
+		// measured from the pinned end, not from the new newest.
+		expect(scrollWorkspace(pinned, 32, 6, "up")).toEqual({ end: 18, total: 30 });
+	});
+
+	test("PgDn walks back toward the tail and unpins there, where following resumes", () => {
+		// One page lands exactly on the newest entry: the pane follows from here,
+		// including whatever arrives next.
+		expect(scrollWorkspace({ end: 24, total: 30 }, 30, 6, "down")).toBeNull();
+		expect(scrollWorkspace({ end: 20, total: 30 }, 30, 6, "down")).toEqual({ end: 26, total: 30 });
+	});
+
+	test("the ends are clamps, and a zero page still moves", () => {
+		expect(scrollWorkspace({ end: 2, total: 30 }, 30, 10, "up")).toEqual({ end: 0, total: 30 });
+		expect(scrollWorkspace(null, 0, 6, "up")).toBeNull();
+		expect(scrollWorkspace(null, 30, 6, "down")).toBeNull();
+		// A key that does nothing reads as broken; the step has a floor of one.
+		expect(scrollWorkspace(null, 30, 0, "up")).toEqual({ end: 29, total: 30 });
+	});
+});
+
+describe("taskStripRows", () => {
+	const task = (id: string, status: UiTask["status"]): UiTask => ({ id, subject: `task ${id}`, status });
+
+	test("is zero when there is nothing to show", () => {
+		expect(taskStripRows(undefined)).toBe(0);
+		expect(taskStripRows([])).toBe(0);
+	});
+
+	test("is a separator, a header, and at most three unfinished tasks", () => {
+		expect(taskStripRows([task("1", "completed")])).toBe(2);
+		expect(taskStripRows([task("1", "pending"), task("2", "in_progress")])).toBe(4);
+		const many = ["1", "2", "3", "4", "5", "6"].map((id) => task(id, id === "1" ? "in_progress" : "pending"));
+		expect(taskStripRows(many)).toBe(5);
+		// Completed tasks do not spend a row: the header's count is their report.
+		const mostlyDone = ["1", "2", "3", "4", "5"].map((id) => task(id, id === "5" ? "pending" : "completed"));
+		expect(taskStripRows(mostlyDone)).toBe(3);
 	});
 });
 
@@ -243,7 +301,7 @@ describe("the conversation pane's line model", () => {
 });
 
 /** Render the workspace at a terminal size the fake stdout can represent (it caps at 100). */
-function draw(columns: number, height: number) {
+function draw(columns: number, height: number, options: { offset?: number; newBelow?: number; tasks?: UiTask[] } = {}) {
 	const view = render(
 		<ThemeContext.Provider value={DARK_THEME}>
 			<SplitWorkspace
@@ -251,9 +309,11 @@ function draw(columns: number, height: number) {
 				streamingText="The fixed panel keeps"
 				thinkingText=""
 				shells={shells}
+				tasks={options.tasks}
 				columns={columns}
 				height={height}
-				offset={0}
+				offset={options.offset ?? 0}
+				newBelow={options.newBelow}
 			/>
 		</ThemeContext.Provider>,
 	);
@@ -269,8 +329,8 @@ describe("the split frame", () => {
 		expect(rows).toHaveLength(16);
 		for (const row of rows) expect(displayWidth(row)).toBeLessThanOrEqual(100);
 		// Side by side, not stacked: the transcript's right border and the panel's
-		// left border share the first row.
-		expect(rows[0]).toContain("╮┌");
+		// left border share the first row, one blank column apart.
+		expect(rows[0]).toContain("╮ ┌");
 		expect(frame).toContain("Conversation");
 		expect(frame).toContain("PgUp/PgDn scroll");
 		expect(frame).toContain("ctrl+v cycles");
@@ -295,5 +355,44 @@ describe("the split frame", () => {
 		for (const row of rows) expect(displayWidth(row)).toBeLessThanOrEqual(WORKSPACE_MIN_COLUMNS);
 		expect(frame).toContain("ctrl+v cycles");
 		expect(frame).toContain("The fixed panel keeps");
+	});
+
+	test("a scrolled pane names itself and counts what arrived below", () => {
+		const frame = draw(100, 16, { offset: 2, newBelow: 3 });
+		expect(frame).toContain("scrolled");
+		expect(frame).toContain("3 new");
+	});
+
+	test("the task strip is given exact rows and never grows the column past the frame", () => {
+		const tasks: UiTask[] = [
+			{ id: "1", subject: "wire the split view's keyboard handling into the REPL", status: "in_progress" },
+			{ id: "2", subject: "measure the task strip at the right column's width", status: "pending" },
+			{ id: "3", subject: "page the conversation with the visible span", status: "pending" },
+			{ id: "4", subject: "keep the watch panel's body readable", status: "pending" },
+			{ id: "5", subject: "return to the tail when a message is sent", status: "pending" },
+			{ id: "6", subject: "document the polish wave", status: "pending" },
+		];
+		const frame = draw(100, 16, { tasks });
+		const rows = frame.split("\n").filter((line) => line.length > 0);
+		// Exactly the height it was handed: a wrapped task subject that added a row
+		// here would push the frame to the viewport and take ink's clear path.
+		expect(rows).toHaveLength(16);
+		for (const row of rows) expect(displayWidth(row)).toBeLessThanOrEqual(100);
+		expect(frame).toContain("Tasks 0/6");
+		expect(frame).toContain("#1");
+		// Three unfinished rows and no more: the strip's whole budget.
+		expect(frame).toContain("#3");
+		expect(frame).not.toContain("#4");
+	});
+
+	test("a task strip that would leave the panel too short stands down", () => {
+		const tasks: UiTask[] = Array.from({ length: 6 }, (_, i) => ({
+			id: String(i + 1),
+			subject: `task ${i + 1}`,
+			status: "pending" as const,
+		}));
+		const frame = draw(100, 12, { tasks });
+		expect(frame.split("\n").filter((line) => line.length > 0)).toHaveLength(12);
+		expect(frame).not.toContain("Tasks ");
 	});
 });
