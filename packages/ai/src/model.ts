@@ -8,6 +8,16 @@ import type { ApiId, CustomProviderApiId, Model, ModelPricing, ThinkingLevel } f
 const ANTHROPIC_BASE = "https://api.anthropic.com";
 /** Kimi's international host; the China host serves the same ids under its own keys. */
 const KIMI_BASE = "https://api.moonshot.ai/v1";
+/** Kimi's China host. Same ids as the international host, billed in CNY, different keys. */
+const KIMI_CN_BASE = "https://api.moonshot.cn/v1";
+/**
+ * The Kimi Code membership's two hosts. Keys come from the Kimi Code console,
+ * not the open platform, and each region's key only works on its own host.
+ * `/coding/v1` is the OpenAI-compatible prefix; the Anthropic wire uses the
+ * same prefix without `/v1`, the gateway pair's rule applied to this vendor.
+ */
+const KIMI_CODE_BASE = "https://api.kimi.ai/coding/v1";
+const KIMI_CODE_CN_BASE = "https://api.kimi.com/coding/v1";
 /** Google's OpenAI-compatibility shim, which its docs still call beta. */
 const GOOGLE_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/";
 /** OpenAI's own host — the API this client's compat adapter was written against. */
@@ -33,6 +43,16 @@ const DEEPSEEK_BASE = "https://api.deepseek.com/v1";
 const MINIMAX_BASE = "https://api.minimax.io/v1";
 /** Mistral's own host; `/chat/completions` on it is OpenAI's wire. */
 const MISTRAL_BASE = "https://api.mistral.ai/v1";
+/**
+ * Tencent TokenHub's Guangzhou host, the official API for the Hy generation.
+ * The international host is `tokenhub-intl.tencentmaas.com`; a key bought there
+ * names it through `TENCENT_BASE_URL`. `/v1` is the OpenAI-compatible prefix.
+ */
+const TOKENHUB_BASE = "https://tokenhub.tencentmaas.com/v1";
+/** Xiaomi MiMo's pay-as-you-go host; `/v1` is OpenAI's wire. */
+const MIMO_BASE = "https://api.xiaomimimo.com/v1";
+/** Meta's Model API host; `/v1` is OpenAI's wire. `api.llama.com` was retired. */
+const META_BASE = "https://api.meta.ai/v1";
 /** Ollama's cloud host. `/v1` is OpenAI's wire; the native catalog API sits at the root. */
 const OLLAMA_CLOUD_BASE = "https://ollama.com/v1";
 /** The local daemon's default address; a user who moved it sets `OLLAMA_BASE_URL`. */
@@ -700,6 +720,10 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }],
 	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }],
 	["hy3", "Hy3", 256_000, 128_000, { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 }],
+	// GA on 2026-11-05 alongside the first-party rows: Go's listing serves it,
+	// and models.dev prices it at TokenHub's own USD figures. Preview and GA
+	// differ only in the window, as the first-party pair does.
+	["hy4", "Hy4", 1_048_576, 65_536, { input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 }],
 	["hy4-preview", "Hy4 preview", 1_024_000, 64_000, { input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 }],
 	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }],
 	["kimi-k2.7-code", "Kimi K2.7 Code", 262_144, 262_144, { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 }],
@@ -901,7 +925,7 @@ const BUILT_IN_MODELS: Model[] = [
 		reasoning: true,
 		pricing: { input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
 	}),
-	// Kimi (Moonshot), international host; another host needs `KIMI_BASE_URL`; K2.x, K3 and K3.1 publish no output cap, only the "window minus prompt" rule.
+	// Kimi (Moonshot), international host; the China host is the `kimi-cn` block below; K2.x, K3 and K3.1 publish no output cap, only the "window minus prompt" rule.
 	// K3.1 Pro entered on 2026-10-24, the day it shipped: the vendor's price table states 2/10 with 0.2 reads and a 2 write at the default five-minute tier,
 	// the highspeed twin 4/20 with the same read and a 4 write, and both carry the family's 1M window and 131k default output. It always thinks (low/high/max,
 	// default max), so `reasoning` stays false: "medium" is not a value this vendor takes.
@@ -1197,6 +1221,235 @@ const BUILT_IN_MODELS: Model[] = [
 		contextWindow: 131_072,
 		maxOutputTokens: 131_072,
 		pricing: { input: 0.3, output: 0.9, cacheRead: 0.03, cacheWrite: 0 },
+	}),
+	// Tencent TokenHub, the official API for the Hy generation. `hy4` is the GA
+	// row and `hy4-preview` its 1,024,000-window predecessor; `hy3` is the
+	// generation before them. TokenHub bills Guangzhou in CNY and publishes USD
+	// figures for the international host, which is what these rows carry; a key
+	// from another region names its host through `TENCENT_BASE_URL`. The
+	// documented effort vocabulary for `hy4` is `none`/`high`, so `reasoning`
+	// stays false — asking for `medium` is a value the endpoint may not take,
+	// and `/think high` still sends the one it does. TokenHub also resells other
+	// vendors' models; those rows are not here, because this provider id is meant
+	// to mean Tencent's own models rather than become a second gateway.
+	// Long-form design notes: docs/dev/ai-layer.md
+	openAICompatModel("tencent", TOKENHUB_BASE, "TENCENT_API_KEY", "hy4", "Hy4", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 65_536,
+		apiKeyEnvFallbacks: ["TOKENHUB_API_KEY"],
+		pricing: { input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 },
+	}),
+	openAICompatModel("tencent", TOKENHUB_BASE, "TENCENT_API_KEY", "hy4-preview", "Hy4 preview", {
+		contextWindow: 1_024_000,
+		maxOutputTokens: 64_000,
+		apiKeyEnvFallbacks: ["TOKENHUB_API_KEY"],
+		pricing: { input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 },
+	}),
+	openAICompatModel("tencent", TOKENHUB_BASE, "TENCENT_API_KEY", "hy3", "Hy3", {
+		contextWindow: 256_000,
+		maxOutputTokens: 128_000,
+		apiKeyEnvFallbacks: ["TOKENHUB_API_KEY"],
+		pricing: { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 },
+	}),
+	// Xiaomi MiMo, pay-as-you-go. Both V2.6 rows carry the family's 1M window and
+	// 131k output cap; V2.5 retired on 2026-10-21 and is absent on purpose. The
+	// official docs' sample names `MIMO_API_KEY`, and `XIAOMI_API_KEY` is the
+	// convention much of the ecosystem uses, so both are accepted. The vendor
+	// documents a thinking switch but no effort levels, so `reasoning` is false
+	// and the request leaves the model at its own default.
+	openAICompatModel("xiaomi", MIMO_BASE, "MIMO_API_KEY", "mimo-v2.6-flash", "MiMo-V2.6-Flash", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		apiKeyEnvFallbacks: ["XIAOMI_API_KEY"],
+		pricing: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+	}),
+	openAICompatModel("xiaomi", MIMO_BASE, "MIMO_API_KEY", "mimo-v2.6-pro", "MiMo-V2.6-Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		apiKeyEnvFallbacks: ["XIAOMI_API_KEY"],
+		pricing: { input: 0.435, output: 0.87, cacheRead: 0.0036, cacheWrite: 0 },
+	}),
+	// Kimi's China platform. Same six ids as the international rows above, with
+	// the same default output caps; the platform bills in CNY and its keys do not
+	// work on the international host. The USD figures are the international
+	// list prices, which is the only USD price this vendor publishes — a session
+	// on the China host is billed in CNY, and a declared `pricing` override is
+	// how a user pins the exchange rate they actually pay.
+	openAICompatModel("kimi-cn", KIMI_CN_BASE, "KIMI_CN_API_KEY", "kimi-k3.1-pro", "Kimi K3.1 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2 },
+	}),
+	openAICompatModel("kimi-cn", KIMI_CN_BASE, "KIMI_CN_API_KEY", "kimi-k3.1-pro-highspeed", "Kimi K3.1 Pro Highspeed", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 4 },
+	}),
+	openAICompatModel("kimi-cn", KIMI_CN_BASE, "KIMI_CN_API_KEY", "kimi-k3", "Kimi K3", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
+	}),
+	openAICompatModel("kimi-cn", KIMI_CN_BASE, "KIMI_CN_API_KEY", "kimi-k2.7-code", "Kimi K2.7 Code", {
+		contextWindow: 262_144,
+		maxOutputTokens: 32_768,
+		pricing: { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+	}),
+	openAICompatModel(
+		"kimi-cn",
+		KIMI_CN_BASE,
+		"KIMI_CN_API_KEY",
+		"kimi-k2.7-code-highspeed",
+		"Kimi K2.7 Code HighSpeed",
+		{
+			contextWindow: 262_144,
+			maxOutputTokens: 32_768,
+			pricing: { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
+		},
+	),
+	openAICompatModel("kimi-cn", KIMI_CN_BASE, "KIMI_CN_API_KEY", "kimi-k2.6", "Kimi K2.6", {
+		contextWindow: 262_144,
+		maxOutputTokens: 32_768,
+		pricing: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+	}),
+	// Kimi Code Plan, the membership rather than the open platform. Two regions,
+	// two hosts, keys that do not cross. Every row is priced at zero for the
+	// subscription reason the ChatGPT, Gemini and Ollama Cloud rows state: the
+	// plan bills a membership and no per-token rate exists to transcribe. The
+	// effort vocabulary is low/high/max, so `reasoning` is false for the reason
+	// the first-party Kimi rows give. `kimi-for-coding` is the K2.8 Preview id
+	// the plan's own model list serves.
+	openAICompatModel("kimi-code", KIMI_CODE_BASE, "KIMI_CODE_API_KEY", "kimi-for-coding", "Kimi for Coding", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 32_768,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel(
+		"kimi-code",
+		KIMI_CODE_BASE,
+		"KIMI_CODE_API_KEY",
+		"kimi-for-coding-highspeed",
+		"Kimi for Coding Highspeed",
+		{
+			contextWindow: 262_144,
+			maxOutputTokens: 32_768,
+			pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		},
+	),
+	openAICompatModel("kimi-code", KIMI_CODE_BASE, "KIMI_CODE_API_KEY", "k3", "Kimi K3", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("kimi-code", KIMI_CODE_BASE, "KIMI_CODE_API_KEY", "k3-256k", "Kimi K3 256K", {
+		contextWindow: 262_144,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("kimi-code", KIMI_CODE_BASE, "KIMI_CODE_API_KEY", "k3.1-pro", "Kimi K3.1 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("kimi-code", KIMI_CODE_BASE, "KIMI_CODE_API_KEY", "k3.1-pro-highspeed", "Kimi K3.1 Pro Highspeed", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("kimi-code-cn", KIMI_CODE_CN_BASE, "KIMI_CODE_CN_API_KEY", "kimi-for-coding", "Kimi for Coding", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 32_768,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel(
+		"kimi-code-cn",
+		KIMI_CODE_CN_BASE,
+		"KIMI_CODE_CN_API_KEY",
+		"kimi-for-coding-highspeed",
+		"Kimi for Coding Highspeed",
+		{
+			contextWindow: 262_144,
+			maxOutputTokens: 32_768,
+			pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		},
+	),
+	openAICompatModel("kimi-code-cn", KIMI_CODE_CN_BASE, "KIMI_CODE_CN_API_KEY", "k3", "Kimi K3", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("kimi-code-cn", KIMI_CODE_CN_BASE, "KIMI_CODE_CN_API_KEY", "k3-256k", "Kimi K3 256K", {
+		contextWindow: 262_144,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("kimi-code-cn", KIMI_CODE_CN_BASE, "KIMI_CODE_CN_API_KEY", "k3.1-pro", "Kimi K3.1 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel(
+		"kimi-code-cn",
+		KIMI_CODE_CN_BASE,
+		"KIMI_CODE_CN_API_KEY",
+		"k3.1-pro-highspeed",
+		"Kimi K3.1 Pro Highspeed",
+		{
+			contextWindow: 1_048_576,
+			maxOutputTokens: 131_072,
+			pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		},
+	),
+	// Meta's Model API, the official home of the Muse family since `api.llama.com`
+	// retired on 2026-07-06. The vendor's own sample reads `MODEL_API_KEY`; the
+	// shorter `META_API_KEY` leads because it names the vendor the way every other
+	// row here does, and the docs' name is the fallback. Every id carries the
+	// family's 1M window and 131k output cap. The contributor tiers trade training
+	// access for the lower rate and exist only for 1.2 and 1.3. No cache-write
+	// rate is published, so that channel is a real zero. `reasoning: true`: the
+	// model page states an effort vocabulary that includes `medium`, which is the
+	// condition every other row in this table is held to.
+	openAICompatModel("meta", META_BASE, "META_API_KEY", "muse-spark-1.1", "Muse Spark 1.1", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["MODEL_API_KEY"],
+		pricing: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+	}),
+	openAICompatModel("meta", META_BASE, "META_API_KEY", "muse-spark-1.2", "Muse Spark 1.2", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["MODEL_API_KEY"],
+		pricing: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+	}),
+	openAICompatModel("meta", META_BASE, "META_API_KEY", "muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["MODEL_API_KEY"],
+		pricing: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+	}),
+	openAICompatModel("meta", META_BASE, "META_API_KEY", "muse-spark-1.3", "Muse Spark 1.3", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["MODEL_API_KEY"],
+		pricing: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+	}),
+	openAICompatModel("meta", META_BASE, "META_API_KEY", "muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["MODEL_API_KEY"],
+		pricing: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+	}),
+	openAICompatModel("meta", META_BASE, "META_API_KEY", "muse-wonder-1.0", "Muse Wonder 1.0", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["MODEL_API_KEY"],
+		pricing: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 },
 	}),
 	// Ollama Cloud, in the host's own listing order — the one order its `tags`
 	// page states, so the picker reads the way `ollama list` does. Every row is

@@ -32,6 +32,15 @@ const ANTHROPIC: CacheCapability = {
 	promptCacheKey: false,
 };
 
+/** Kimi's documented cache shape, shared by its China and Code hosts. */
+const KIMI_CAPABILITY: CacheCapability = {
+	mode: "automatic",
+	minPrefixTokens: 256,
+	incrementTokens: 1,
+	ttl: [],
+	promptCacheKey: false,
+};
+
 /**
  * The documented behaviour, per provider.
  *
@@ -60,7 +69,13 @@ const CAPABILITIES: Readonly<Record<string, CacheCapability>> = {
 	// no-op that changes nothing. The documentation does not settle it, so the row
 	// records the documented position — no key — and `promptCacheKey: "on"` is how
 	// to send one anyway to an endpoint that turns out to want it.
-	kimi: { mode: "automatic", minPrefixTokens: 256, incrementTokens: 1, ttl: [], promptCacheKey: false },
+	kimi: KIMI_CAPABILITY,
+	// Kimi's China and Code hosts are the same service behind different doors:
+	// the same automatic cache, the same 256-token floor, and the same silence
+	// on a routing key.
+	"kimi-cn": KIMI_CAPABILITY,
+	"kimi-code": KIMI_CAPABILITY,
+	"kimi-code-cn": KIMI_CAPABILITY,
 	glm: { mode: "automatic", minPrefixTokens: 500, incrementTokens: 1, ttl: [], promptCacheKey: false },
 	google: { mode: "automatic", minPrefixTokens: 1024, incrementTokens: 1, ttl: [], promptCacheKey: false },
 };

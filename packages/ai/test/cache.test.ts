@@ -112,6 +112,14 @@ describe("cacheCapability", () => {
 		// no-op, so the row records what the documentation says; `promptCacheKey:
 		// "on"` is the setting for an endpoint that turns out to want one.
 		expect(kimi.promptCacheKey).toBe(false);
+
+		// Kimi's China and Code hosts are the same service behind different
+		// doors: same automatic cache, same floor, same silence on a key.
+		for (const provider of ["kimi-cn", "kimi-code", "kimi-code-cn"]) {
+			const row = cacheCapability(model({ provider, api: "openai-completions" }));
+			expect(row.minPrefixTokens).toBe(256);
+			expect(row.promptCacheKey).toBe(false);
+		}
 	});
 
 	test("an unmeasured provider falls back to the conservative row", () => {
