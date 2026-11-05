@@ -50,8 +50,21 @@ const KEY_VARS = [
 	"DEEPSEEK_API_KEY",
 	"KIMI_API_KEY",
 	"MOONSHOT_API_KEY",
+	// Kimi's China host and its two Code hosts issue region-locked keys, so each
+	// door names its own variable rather than sharing the open platform's.
+	"KIMI_CN_API_KEY",
+	"KIMI_CODE_API_KEY",
+	"KIMI_CODE_CN_API_KEY",
 	"MINIMAX_API_KEY",
 	"MISTRAL_API_KEY",
+	// The providers added on 2026-11-05, each with the second spelling its own
+	// documentation or the surrounding ecosystem uses.
+	"TENCENT_API_KEY",
+	"TOKENHUB_API_KEY",
+	"MIMO_API_KEY",
+	"XIAOMI_API_KEY",
+	"META_API_KEY",
+	"MODEL_API_KEY",
 	"GLM_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY",

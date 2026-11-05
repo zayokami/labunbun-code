@@ -30,7 +30,7 @@ afterEach(() => {
  * host test below reads resolved models, so every one of these is borrowed for
  * the duration — this file otherwise asserts the shipped table, and inheriting
  * the machine's configuration would make a developer's proxy a test failure. All
- * seventeen, not just the one that happened to be set: the point is that no
+ * twenty-three, not just the one that happened to be set: the point is that no
  * machine can change the answer.
  *
  * The `finally` is the whole restore path, and deliberately not an `afterEach`
@@ -43,6 +43,9 @@ const BASE_URL_VARS = [
 	"ANTHROPIC_BASE_URL",
 	"DEEPSEEK_BASE_URL",
 	"KIMI_BASE_URL",
+	"KIMI_CN_BASE_URL",
+	"KIMI_CODE_BASE_URL",
+	"KIMI_CODE_CN_BASE_URL",
 	"GLM_BASE_URL",
 	"OPENAI_BASE_URL",
 	"CHATGPT_BASE_URL",
@@ -50,6 +53,9 @@ const BASE_URL_VARS = [
 	"GOOGLE_BASE_URL",
 	"MINIMAX_BASE_URL",
 	"MISTRAL_BASE_URL",
+	"TENCENT_BASE_URL",
+	"MIMO_BASE_URL",
+	"META_BASE_URL",
 	"OPENCODE_ZEN_BASE_URL",
 	"OPENCODE_GO_BASE_URL",
 	"OPENCODE_ZEN_OAI_BASE_URL",
@@ -156,6 +162,38 @@ const BUILT_IN_REFS = [
 	"mistral/mistral-medium-3-5",
 	"mistral/mistral-small-2603",
 	"mistral/codestral-2508",
+	// Tencent TokenHub (Hunyuan's hy generation), Xiaomi MiMo, Kimi's China and
+	// Code hosts, and Meta's Model API. Added 2026-11-05; the block order is the
+	// order `BUILT_IN_MODELS` carries, which is the list's only rule.
+	"tencent/hy4",
+	"tencent/hy4-preview",
+	"tencent/hy3",
+	"xiaomi/mimo-v2.6-flash",
+	"xiaomi/mimo-v2.6-pro",
+	"kimi-cn/kimi-k3.1-pro",
+	"kimi-cn/kimi-k3.1-pro-highspeed",
+	"kimi-cn/kimi-k3",
+	"kimi-cn/kimi-k2.7-code",
+	"kimi-cn/kimi-k2.7-code-highspeed",
+	"kimi-cn/kimi-k2.6",
+	"kimi-code/kimi-for-coding",
+	"kimi-code/kimi-for-coding-highspeed",
+	"kimi-code/k3",
+	"kimi-code/k3-256k",
+	"kimi-code/k3.1-pro",
+	"kimi-code/k3.1-pro-highspeed",
+	"kimi-code-cn/kimi-for-coding",
+	"kimi-code-cn/kimi-for-coding-highspeed",
+	"kimi-code-cn/k3",
+	"kimi-code-cn/k3-256k",
+	"kimi-code-cn/k3.1-pro",
+	"kimi-code-cn/k3.1-pro-highspeed",
+	"meta/muse-spark-1.1",
+	"meta/muse-spark-1.2",
+	"meta/muse-spark-1.2-contributor",
+	"meta/muse-spark-1.3",
+	"meta/muse-spark-1.3-contributor",
+	"meta/muse-wonder-1.0",
 	// Ollama Cloud: the host's own listing order, swept 2026-10-12 from its
 	// `tags` endpoint. A subscription plan, so every row is priced at zero —
 	// nobody is billed per token — and none of them states an output cap, so
@@ -178,7 +216,7 @@ const BUILT_IN_REFS = [
 	"ollama-cloud/mistral-large-3:675b",
 	"ollama-cloud/nemotron-3-ultra",
 	"ollama-cloud/gpt-oss:20b",
-	// The gateway: 85 Zen rows and 34 Go rows, each on both wires — 238 references,
+	// The gateway: 85 Zen rows and 35 Go rows, each on both wires — 240 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
 	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
@@ -295,6 +333,7 @@ const BUILT_IN_REFS = [
 	"opencode-go/grok-4.6",
 	"opencode-go/grok-4.7",
 	"opencode-go/hy3",
+	"opencode-go/hy4",
 	"opencode-go/hy4-preview",
 	"opencode-go/kimi-k2.6",
 	"opencode-go/kimi-k2.7-code",
@@ -414,6 +453,7 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/grok-4.6",
 	"opencode-go-oai/grok-4.7",
 	"opencode-go-oai/hy3",
+	"opencode-go-oai/hy4",
 	"opencode-go-oai/hy4-preview",
 	"opencode-go-oai/kimi-k2.6",
 	"opencode-go-oai/kimi-k2.7-code",
@@ -868,6 +908,43 @@ describe("the built-in catalog", () => {
 			["mistral/mistral-medium-3-5", 1.5, 7.5, 0.15, 0],
 			["mistral/mistral-small-2603", 0.15, 0.6, 0.015, 0],
 			["mistral/codestral-2508", 0.3, 0.9, 0.03, 0],
+			// TokenHub bills Guangzhou in CNY and publishes USD figures for its
+			// international host; these are those figures. `hy4` and `hy4-preview`
+			// differ in window, not price. Xiaomi's cache-hit rate is its own
+			// published number, not a tenth of input. Kimi's China host lists the
+			// same ids at CNY figures that round to these USD ones; the Code Plan's
+			// rows are zero for the subscription reason the ChatGPT rows state.
+			["tencent/hy4", 0.834, 2.501, 0.042, 0],
+			["tencent/hy4-preview", 0.834, 2.501, 0.042, 0],
+			["tencent/hy3", 0.14, 0.58, 0.035, 0],
+			["xiaomi/mimo-v2.6-flash", 0.14, 0.28, 0.0028, 0],
+			["xiaomi/mimo-v2.6-pro", 0.435, 0.87, 0.0036, 0],
+			["kimi-cn/kimi-k3.1-pro", 2, 10, 0.2, 2],
+			["kimi-cn/kimi-k3.1-pro-highspeed", 4, 20, 0.2, 4],
+			["kimi-cn/kimi-k3", 3, 15, 0.3, 3],
+			["kimi-cn/kimi-k2.7-code", 0.95, 4, 0.19, 0],
+			["kimi-cn/kimi-k2.7-code-highspeed", 1.9, 8, 0.38, 0],
+			["kimi-cn/kimi-k2.6", 0.95, 4, 0.16, 0],
+			["kimi-code/kimi-for-coding", 0, 0, 0, 0],
+			["kimi-code/kimi-for-coding-highspeed", 0, 0, 0, 0],
+			["kimi-code/k3", 0, 0, 0, 0],
+			["kimi-code/k3-256k", 0, 0, 0, 0],
+			["kimi-code/k3.1-pro", 0, 0, 0, 0],
+			["kimi-code/k3.1-pro-highspeed", 0, 0, 0, 0],
+			["kimi-code-cn/kimi-for-coding", 0, 0, 0, 0],
+			["kimi-code-cn/kimi-for-coding-highspeed", 0, 0, 0, 0],
+			["kimi-code-cn/k3", 0, 0, 0, 0],
+			["kimi-code-cn/k3-256k", 0, 0, 0, 0],
+			["kimi-code-cn/k3.1-pro", 0, 0, 0, 0],
+			["kimi-code-cn/k3.1-pro-highspeed", 0, 0, 0, 0],
+			// Meta publishes no cache-write rate; the contributor tiers are the
+			// discounted rows and exist only for 1.2 and 1.3.
+			["meta/muse-spark-1.1", 1.25, 4.25, 0.15, 0],
+			["meta/muse-spark-1.2", 1.25, 4.25, 0.15, 0],
+			["meta/muse-spark-1.2-contributor", 0.1, 0.2, 0.002, 0],
+			["meta/muse-spark-1.3", 1.25, 4.25, 0.15, 0],
+			["meta/muse-spark-1.3-contributor", 0.1, 0.2, 0.002, 0],
+			["meta/muse-wonder-1.0", 4, 20, 0.2, 0],
 
 			// Ollama Cloud, swept from the host's own listing on 2026-10-12. All
 			// eighteen state zero for a structural reason rather than a promotional
@@ -998,6 +1075,7 @@ describe("the built-in catalog", () => {
 			["opencode-go/grok-4.6", 2, 6, 0.5, 0],
 			["opencode-go/grok-4.7", 2, 6, 0.5, 0],
 			["opencode-go/hy3", 0.14, 0.58, 0.035, 0],
+			["opencode-go/hy4", 0.834, 2.501, 0.042, 0],
 			["opencode-go/hy4-preview", 0.834, 2.501, 0.042, 0],
 			["opencode-go/kimi-k2.6", 0.95, 4, 0.16, 0],
 			["opencode-go/kimi-k2.7-code", 0.95, 4, 0.19, 0],
@@ -1117,6 +1195,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/grok-4.6", 2, 6, 0.5, 0],
 			["opencode-go-oai/grok-4.7", 2, 6, 0.5, 0],
 			["opencode-go-oai/hy3", 0.14, 0.58, 0.035, 0],
+			["opencode-go-oai/hy4", 0.834, 2.501, 0.042, 0],
 			["opencode-go-oai/hy4-preview", 0.834, 2.501, 0.042, 0],
 			["opencode-go-oai/kimi-k2.6", 0.95, 4, 0.16, 0],
 			["opencode-go-oai/kimi-k2.7-code", 0.95, 4, 0.19, 0],
@@ -1249,6 +1328,35 @@ describe("the built-in catalog", () => {
 			["mistral/mistral-medium-3-5", 262_144, 262_144],
 			["mistral/mistral-small-2603", 262_144, 262_144],
 			["mistral/codestral-2508", 131_072, 131_072],
+			["tencent/hy4", 1_048_576, 65_536],
+			["tencent/hy4-preview", 1_024_000, 64_000],
+			["tencent/hy3", 256_000, 128_000],
+			["xiaomi/mimo-v2.6-flash", 1_048_576, 131_072],
+			["xiaomi/mimo-v2.6-pro", 1_048_576, 131_072],
+			["kimi-cn/kimi-k3.1-pro", 1_048_576, 131_072],
+			["kimi-cn/kimi-k3.1-pro-highspeed", 1_048_576, 131_072],
+			["kimi-cn/kimi-k3", 1_048_576, 131_072],
+			["kimi-cn/kimi-k2.7-code", 262_144, 32_768],
+			["kimi-cn/kimi-k2.7-code-highspeed", 262_144, 32_768],
+			["kimi-cn/kimi-k2.6", 262_144, 32_768],
+			["kimi-code/kimi-for-coding", 1_048_576, 32_768],
+			["kimi-code/kimi-for-coding-highspeed", 262_144, 32_768],
+			["kimi-code/k3", 1_048_576, 131_072],
+			["kimi-code/k3-256k", 262_144, 131_072],
+			["kimi-code/k3.1-pro", 1_048_576, 131_072],
+			["kimi-code/k3.1-pro-highspeed", 1_048_576, 131_072],
+			["kimi-code-cn/kimi-for-coding", 1_048_576, 32_768],
+			["kimi-code-cn/kimi-for-coding-highspeed", 262_144, 32_768],
+			["kimi-code-cn/k3", 1_048_576, 131_072],
+			["kimi-code-cn/k3-256k", 262_144, 131_072],
+			["kimi-code-cn/k3.1-pro", 1_048_576, 131_072],
+			["kimi-code-cn/k3.1-pro-highspeed", 1_048_576, 131_072],
+			["meta/muse-spark-1.1", 1_048_576, 131_072],
+			["meta/muse-spark-1.2", 1_048_576, 131_072],
+			["meta/muse-spark-1.2-contributor", 1_048_576, 131_072],
+			["meta/muse-spark-1.3", 1_048_576, 131_072],
+			["meta/muse-spark-1.3-contributor", 1_048_576, 131_072],
+			["meta/muse-wonder-1.0", 1_048_576, 131_072],
 
 			// Ollama Cloud: each window is what the model's own `show` page states,
 			// and Ollama publishes no output cap for any of them — the third column
@@ -1376,6 +1484,7 @@ describe("the built-in catalog", () => {
 			["opencode-go/grok-4.6", 500_000, 500_000],
 			["opencode-go/grok-4.7", 500_000, 500_000],
 			["opencode-go/hy3", 256_000, 128_000],
+			["opencode-go/hy4", 1_048_576, 65_536],
 			["opencode-go/hy4-preview", 1_024_000, 64_000],
 			["opencode-go/kimi-k2.6", 262_144, 65_536],
 			["opencode-go/kimi-k2.7-code", 262_144, 262_144],
@@ -1495,6 +1604,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/grok-4.6", 500_000, 500_000],
 			["opencode-go-oai/grok-4.7", 500_000, 500_000],
 			["opencode-go-oai/hy3", 256_000, 128_000],
+			["opencode-go-oai/hy4", 1_048_576, 65_536],
 			["opencode-go-oai/hy4-preview", 1_024_000, 64_000],
 			["opencode-go-oai/kimi-k2.6", 262_144, 65_536],
 			["opencode-go-oai/kimi-k2.7-code", 262_144, 262_144],
@@ -1548,7 +1658,7 @@ describe("the built-in catalog", () => {
 		// all (MiniMax), or six depths with only the ends described (Mistral) —
 		// and the resellers are the ones whose vendor published nothing about
 		// thinking at all. Both are right to say "not medium", for reasons that
-		// have nothing to do with each other, and the second group is 238 rows
+		// have nothing to do with each other, and the second group is 240 rows
 		// long — a third of the catalog — which would bury the first. The gateway
 		// rows are held by the assertion directly below, which is exhaustive over
 		// the same set.
@@ -1587,6 +1697,34 @@ describe("the built-in catalog", () => {
 			"mistral/mistral-medium-3-5",
 			"mistral/mistral-small-2603",
 			"mistral/codestral-2508",
+			// TokenHub documents `none`/`high` for hy4 and nothing above those; the
+			// MiMo, Kimi and Kimi Code rows have the same "no `medium` in the
+			// vocabulary" shape as the Kimi rows above. Meta is the one new vendor
+			// whose page states an effort vocabulary with `medium` in it, so its six
+			// rows claim `reasoning: true` and are absent here.
+			"tencent/hy4",
+			"tencent/hy4-preview",
+			"tencent/hy3",
+			"xiaomi/mimo-v2.6-flash",
+			"xiaomi/mimo-v2.6-pro",
+			"kimi-cn/kimi-k3.1-pro",
+			"kimi-cn/kimi-k3.1-pro-highspeed",
+			"kimi-cn/kimi-k3",
+			"kimi-cn/kimi-k2.7-code",
+			"kimi-cn/kimi-k2.7-code-highspeed",
+			"kimi-cn/kimi-k2.6",
+			"kimi-code/kimi-for-coding",
+			"kimi-code/kimi-for-coding-highspeed",
+			"kimi-code/k3",
+			"kimi-code/k3-256k",
+			"kimi-code/k3.1-pro",
+			"kimi-code/k3.1-pro-highspeed",
+			"kimi-code-cn/kimi-for-coding",
+			"kimi-code-cn/kimi-for-coding-highspeed",
+			"kimi-code-cn/k3",
+			"kimi-code-cn/k3-256k",
+			"kimi-code-cn/k3.1-pro",
+			"kimi-code-cn/k3.1-pro-highspeed",
 			// Ollama Cloud's ten, and none of them is a guess: the host's `show`
 			// page states each model's thinking vocabulary and default, and the
 			// flag was read off it. The vocabulary without the word (Kimi K3,
@@ -1636,7 +1774,7 @@ describe("the built-in catalog", () => {
 		// without the flag set is a 400 on its first request, and nothing else in
 		// the suite would notice.
 		const gateway = BUILT_IN_REFS.filter(isReseller);
-		expect(gateway).toHaveLength(238);
+		expect(gateway).toHaveLength(240);
 		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
 		// And none of them claims a thinking shape either, for the same reason:
 		// the shape is what the 400 is about.
@@ -1661,6 +1799,12 @@ describe("the built-in catalog", () => {
 				host("google/gemini-3.8-flash"),
 				host("minimax/minimax-m3"),
 				host("mistral/mistral-large-4"),
+				host("tencent/hy4"),
+				host("xiaomi/mimo-v2.6-pro"),
+				host("kimi-cn/kimi-k3"),
+				host("kimi-code/k3"),
+				host("kimi-code-cn/k3"),
+				host("meta/muse-spark-1.3"),
 				host("opencode-zen/claude-opus-5-5"),
 				host("opencode-go/deepseek-v4-pro"),
 				host("opencode-zen-oai/gpt-6-sol"),
@@ -1689,6 +1833,16 @@ describe("the built-in catalog", () => {
 				"https://generativelanguage.googleapis.com/v1beta/openai/",
 				"https://api.minimax.io/v1",
 				"https://api.mistral.ai/v1",
+				// TokenHub's Guangzhou host, which is the one its CNY keys are
+				// issued against; the international host and the two Kimi Code
+				// regions are the same service behind a different door and a
+				// different key, and each row names its own base.
+				"https://tokenhub.tencentmaas.com/v1",
+				"https://api.xiaomimimo.com/v1",
+				"https://api.moonshot.cn/v1",
+				"https://api.kimi.ai/coding/v1",
+				"https://api.kimi.com/coding/v1",
+				"https://api.meta.ai/v1",
 				// The gateway's four, and the pairs are not interchangeable: the
 				// Anthropic client appends `/v1/messages` to whatever base it is
 				// given, so the pair of rows above must arrive without a `/v1`; the
@@ -1981,12 +2135,15 @@ describe("ids that were retired", () => {
 		// tests that pin such an id are what found this.
 		expect(resolveModel("gpt-5-codex")).toBeUndefined();
 		expect(resolveModel("grok-4.6")).toBeUndefined();
-		expect(resolveModel("hy3")).toBeUndefined();
+		// `hy3` used to stand here. TokenHub made it a first-party row on
+		// 2026-11-05, so the bare name now resolves — to Tencent, which is the
+		// rule working. `mimo-v2.5` is still only the Go plan's.
+		expect(resolveModel("mimo-v2.5")).toBeUndefined();
 		// Qualified, all three still resolve — the rule is about the bare name
 		// only, and the picker hands out exactly the qualified form.
 		expect(resolveModel("opencode-zen/gpt-5-codex")?.pricing?.output).toBe(8.5);
 		expect(resolveModel("opencode-zen/grok-4.6")?.provider).toBe("opencode-zen");
-		expect(resolveModel("opencode-go/hy3")?.provider).toBe("opencode-go");
+		expect(resolveModel("opencode-go/mimo-v2.5")?.provider).toBe("opencode-go");
 		// And the rule does not reach past the four gateway ids: a vendor that
 		// makes the model still answers for it, first-party rows sit ahead of the
 		// gateway ones, and a model on both is still the vendor's.
@@ -2001,7 +2158,7 @@ describe("ids that were retired", () => {
 		expect(resolveModel("gpt-6.1-sol")?.provider).toBe("openai");
 		expect(resolveModel("gpt-6.1-sol")?.pricing?.cacheRead).toBe(0.1);
 		// Exhaustive, and about the right thing: no bare id may *land on* a gateway
-		// row. Most of the 238 do resolve bare — to the vendor that makes the model
+		// row. Most of the 240 do resolve bare — to the vendor that makes the model
 		// — which is the rule working, not the rule failing, so the check is on
 		// where the resolution goes rather than on whether one happens. A fifth
 		// gateway added to the table without a decision here fails this.
@@ -2102,7 +2259,9 @@ describe("where a bare id can be bought", () => {
 			"opencode-zen-oai",
 			"opencode-go-oai",
 		]);
-		expect(gatewayProvidersFor("hy3")).toEqual(["opencode-go", "opencode-go-oai"]);
+		// `hy3` was the example here until Tencent's official row landed; the
+		// bare name now resolves first-party and correctly gets no hint.
+		expect(gatewayProvidersFor("mimo-v2.5")).toEqual(["opencode-go", "opencode-go-oai"]);
 		// Not for a model a first-party vendor makes. The gateway sells
 		// `claude-opus-5-5` too, and redirecting someone who typed the name that
 		// already works at Anthropic would send them off to buy a plan they do not

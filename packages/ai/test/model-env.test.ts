@@ -149,6 +149,28 @@ describe("resolveApiKey", () => {
 		expect(resolveApiKey(model)).toBe("kimi-key");
 	});
 
+	test("the providers added on 2026-11-05 accept the second spelling in use", () => {
+		// TokenHub's own ecosystem exports `TOKENHUB_API_KEY` while LiteLLM and
+		// most of the rest use `TENCENT_API_KEY`; Xiaomi's docs sample
+		// `MIMO_API_KEY` while much of the ecosystem uses `XIAOMI_API_KEY`; Meta's
+		// docs name `MODEL_API_KEY` while every other row here names the vendor.
+		// The region-locked Kimi doors deliberately have no fallback: a key from
+		// another region must not be silently tried against the wrong host.
+		const expected: Array<[string, string[]]> = [
+			["tencent/hy4", ["TENCENT_API_KEY", "TOKENHUB_API_KEY"]],
+			["xiaomi/mimo-v2.6-pro", ["MIMO_API_KEY", "XIAOMI_API_KEY"]],
+			["meta/muse-spark-1.3", ["META_API_KEY", "MODEL_API_KEY"]],
+			["kimi-cn/kimi-k3", ["KIMI_CN_API_KEY"]],
+			["kimi-code/k3", ["KIMI_CODE_API_KEY"]],
+			["kimi-code-cn/k3", ["KIMI_CODE_CN_API_KEY"]],
+		];
+		for (const [reference, names] of expected) {
+			const model = resolveModel(reference);
+			if (!model) throw new Error(`expected ${reference} to resolve`);
+			expect(apiKeyEnvNames(model)).toEqual(names);
+		}
+	});
+
 	test("the Google rows take their key from either variable, the page's precedence first", () => {
 		// The key page accepts GEMINI_API_KEY or GOOGLE_API_KEY and states that
 		// when both are set, GOOGLE_API_KEY takes precedence — so that is the
