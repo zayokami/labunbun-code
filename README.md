@@ -53,7 +53,7 @@ LaBunbun Code supports these providers:
 - OpenAI, on the Chat Completions wire and on the Responses wire
 - Google
 - Ollama, on a local daemon and on the Ollama cloud
-- Other endpoints on any of the three wires: Chat Completions, Responses, or Anthropic Messages, for example DeepSeek, Kimi, GLM, Mistral, OpenRouter
+- Other endpoints on any of the three wires: Chat Completions, Responses, or Anthropic Messages, for example DeepSeek, Kimi (the international and China platforms and the Kimi Code plan), Tencent TokenHub (the Hunyuan `hy` models), Xiaomi MiMo, Meta's Model API, GLM, Mistral, OpenRouter
 
 You add a provider of your own in the user settings file. See [Add a provider](#add-a-provider).
 

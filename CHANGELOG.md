@@ -7,6 +7,22 @@ commands, and SHA-256 checksums.
 
 ### Added
 
+- **Five more providers: Tencent TokenHub, Xiaomi MiMo, Meta's Model API, and
+  Kimi's China and Code hosts.** `tencent/` carries `hy4`, `hy4-preview` and
+  `hy3` from TokenHub, Tencent's official home for the Hy generation, keyed by
+  `TENCENT_API_KEY` or `TOKENHUB_API_KEY`; `hy4` also joins the OpenCode Go
+  plan. `xiaomi/` carries `mimo-v2.6-flash` and `mimo-v2.6-pro` on Xiaomi's
+  pay-as-you-go host, keyed by `MIMO_API_KEY` or `XIAOMI_API_KEY`. `meta/`
+  carries the six Muse models from `api.meta.ai`, keyed by `META_API_KEY` or
+  the docs' `MODEL_API_KEY`. `kimi-cn/` is the China platform's copy of the six
+  Kimi API rows, and `kimi-code/` and `kimi-code-cn/` are the two region-locked
+  Kimi Code plans, priced at zero because the plan bills a membership. Each
+  regional host takes its own key (`KIMI_CN_API_KEY`, `KIMI_CODE_API_KEY`, or
+  `KIMI_CODE_CN_API_KEY`) and cannot be reached with another region's. The
+  Kimi cache floor applies to all three Kimi doors, `/model` discovers each
+  provider's listing at startup, and every host can be moved with
+  `<PROVIDER>_BASE_URL`.
+
 - **`/yolo` turns off the permission gates for one session, with a typed
   confirmation.** Typing `/yolo` opens a dialog that names what stops — the
   dangerous-command classifier, ask rules, and every approval prompt — and what
