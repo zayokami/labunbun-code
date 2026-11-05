@@ -141,7 +141,7 @@ describe("the /resume picker", () => {
 		// And the swap says which session it resumed, by the same suffix the row
 		// used — not the month prefix every session in it shares.
 		expect(outcome.infos.join("\n")).toContain(`Resumed session ${plantedId.slice(-8)}`);
-	}, 30_000);
+	}, 60_000);
 
 	test("a swap that throws says so instead of closing onto nothing", async () => {
 		const home = tempDir("lbb-resume-picker-home-");

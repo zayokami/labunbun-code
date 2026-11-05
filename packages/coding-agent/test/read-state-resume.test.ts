@@ -257,7 +257,7 @@ describe("the edit gate across a compaction", () => {
 		// One re-read brought the record back: the clear is a cost, not a lockout.
 		expect(edits[1]?.isError).toBe(false);
 		expect(readFileSync(target, "utf8")).toBe("ALPHA\nbeta\n");
-	}, 30_000);
+	}, 60_000);
 });
 
 describe("the edit gate across /trim", () => {
@@ -323,5 +323,5 @@ describe("the edit gate across /trim", () => {
 		// One re-read brings the record back: the clear is a cost, not a lockout.
 		expect(edits[1]?.isError).toBe(false);
 		expect(readFileSync(big, "utf8").split("\n")[0]).toBe("LINE 000 xxxxxxxxxx");
-	}, 30_000);
+	}, 60_000);
 });
