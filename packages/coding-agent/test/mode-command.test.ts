@@ -167,7 +167,7 @@ describe("/mode with a name", () => {
 			// The badge has to be that same row's own label, walked with it. Asserting
 			// the label separately from the pair is the point: a publish that sent the
 			// *mode* where the *label* belongs would satisfy a weaker test, because
-			// `agent` and `Agent 无沙箱` share a mode and differ only in what the prompt
+			// `agent` and `Agent (no sandbox)` share a mode and differ only in what the prompt
 			// can see.
 			expect(h.store.get().modeLabel).toBe(choice.label);
 		}
@@ -235,14 +235,14 @@ describe("/mode without an argument", () => {
 	/**
 	 * The star is keyed on the pair, and this is the case that proves it.
 	 *
-	 * `agent` and `Agent 无沙箱` differ only in the sandbox axis. A marker that
+	 * `agent` and `Agent (no sandbox)` differ only in the sandbox axis. A marker that
 	 * looked the row up by mode would put a star on both, and the user would have
 	 * no way to tell which of the two the session is actually running under — the
 	 * one number on that screen that decides what a command can reach.
 	 */
 	test.each([
 		["agent", "workspace-write", "Agent"],
-		["agent", "danger-full-access", "Agent 无沙箱"],
+		["agent", "danger-full-access", "Agent (no sandbox)"],
 	] as const)("opens on %s with sandbox %s, and only that row is marked", async (mode, sandbox, label) => {
 		const h = await openPicker({ mode, sandbox });
 		const index = MODE_CHOICES.findIndex((c) => c.mode === mode && c.sandbox === sandbox);
@@ -261,12 +261,12 @@ describe("/mode without an argument", () => {
 
 		expect(h.session.permissionMode).toBe("agent");
 		expect(h.session.sandbox).toBe("danger-full-access");
-		expect(infoTexts(h.store)).toBe("Mode: Agent 无沙箱 (agent · sandbox danger-full-access)");
+		expect(infoTexts(h.store)).toBe("Mode: Agent (no sandbox) (agent · sandbox danger-full-access)");
 		// The picker is the one path a user with no keyboard at all can take, so it is
 		// the one where a stale badge would be worst: a controller user who picked
-		// `Agent 无沙箱` and read `Agent` under their thumb, unable to tell the
+		// `Agent (no sandbox)` and read `Agent` under their thumb, unable to tell the
 		// confinement the session is actually in.
-		expect(h.store.get().modeLabel).toBe("Agent 无沙箱");
+		expect(h.store.get().modeLabel).toBe("Agent (no sandbox)");
 	});
 
 	test("picking Plan in the list records the pair it is leaving", async () => {

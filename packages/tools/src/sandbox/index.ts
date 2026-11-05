@@ -516,18 +516,33 @@ export function networkConfinement(
  * reads as simulated. `appContainerReason` is the selection probe's own why,
  * printed when it declined — the machine that has a backend and did not
  * select it deserves a sentence about the machine, not about the build.
+ *
+ * `classifierActive` is false under the session-only YOLO override, where the
+ * dangerous-command classifier is deliberately off. The sentences below that
+ * name the classifier as a remaining limit are false there, so they say only
+ * what still holds — the deny rules. Every other caller leaves the default and
+ * gets the unchanged text.
  */
 export function describeSandboxBackend(
 	backend: SandboxBackend | undefined,
 	sandbox: SandboxMode,
 	platform: SandboxPlatform = process.platform,
 	appContainerReason?: string,
+	classifierActive = true,
 ): string {
+	/** The classifier is a separate limit from the sandbox; under YOLO it is not one. */
+	const limits = classifierActive ? "the deny rules and the dangerous-command classifier" : "the deny rules";
+	const remaining = classifierActive
+		? "The deny rules and the dangerous-command classifier still apply"
+		: "The deny rules still apply";
+	const separate = classifierActive
+		? "The deny rules and the dangerous-command classifier are separate and still apply."
+		: "The deny rules are separate and still apply.";
 	// Asked first because it is true in all three backend cases: an unrestricted
 	// policy wraps nothing on macOS with `sandbox-exec` sitting right there, so
 	// "native" must not be allowed to imply confinement on its own.
 	if (sandbox === "danger-full-access") {
-		return "Sandbox: off. This mode asks about nothing and confines nothing at the filesystem level — the deny rules and the dangerous-command classifier are the only limits, and they sit above every mode.";
+		return `Sandbox: off. This mode asks about nothing and confines nothing at the filesystem level — ${limits} are the only limits, and they sit above every mode.`;
 	}
 	if (sandbox === "read-only") {
 		// Per backend, like the workspace-write sentence. Only a native wrapper holds this mode; everything
@@ -556,7 +571,7 @@ export function describeSandboxBackend(
 			// Long-form design notes: docs/dev/sandbox.md
 			return `Sandbox: enforced by the OS. Commands run in a Windows AppContainer profile derived from this workspace, and the kernel refuses a write outside the roots the policy grants — every writable root the session names, not only the workspace. The confinement is the child's own token rather than a wrapper around it, so it is attached to the process and survives however the process tree is arranged. This mode does not narrow reads. Version-control metadata inside a granted root is narrowed on disk when it exists: the grant rewrites the container SID's own allow ACE on .git to read and execute and protects the DACL, so the kernel refuses a confined write there, and release writes the original ACE list back. The deny route is not used at all, because a deny ACE does not bind a container token (measured). A .git that does not exist yet is not narrowed, so a confined command could create one inside its grant and only the tool-layer rule refuses writes to that. A restricted network axis is not confined by this backend either: the proxy that enforces it listens on loopback, which a container child cannot reach, so that command runs on the tool-layer policy and the proxy rather than being held here.`;
 		case "unavailable":
-			return `Sandbox: not enforced. ${nativeSandboxProgram(platform)} is not installed here, so commands run without filesystem confinement. The deny rules and the dangerous-command classifier still apply — they live in this process — but the workspace boundary is not being held.`;
+			return `Sandbox: not enforced. ${nativeSandboxProgram(platform)} is not installed here, so commands run without filesystem confinement. ${remaining} — they live in this process — but the workspace boundary is not being held.`;
 		default: {
 			// Windows has a backend; the selection declined, and the reason says
 			// which machine state declined it. "This build ships no backend"
@@ -564,14 +579,14 @@ export function describeSandboxBackend(
 			// about the machine they are on.
 			if (platform === "win32") {
 				const why = appContainerReason ?? "the container probe did not select it for this session";
-				return `Sandbox: simulated, not OS-enforced. This machine's Windows container backend was not selected: ${why}. The tool-layer view: writes are ${SIMULATED_SANDBOX_DISCLAIMER}, for calls that arrive through the tools. The deny rules and the dangerous-command classifier are separate and still apply.`;
+				return `Sandbox: simulated, not OS-enforced. This machine's Windows container backend was not selected: ${why}. The tool-layer view: writes are ${SIMULATED_SANDBOX_DISCLAIMER}, for calls that arrive through the tools. ${separate}`;
 			}
 			// "Calls that arrive through the tools" is about `Write` and `Edit`, and
 			// not about `Bash` — which builds this same policy, hands it to `exec`, and
 			// has it dropped unread the moment the resolution is not `native`. The
 			// sentence is true as written; it is worth the comment here because the
 			// gap is the kind a reader assumes is closed.
-			return `Sandbox: simulated, not OS-enforced. This build ships no filesystem-sandbox backend for this platform, and adding one would mean a helper program, which is out of scope. Writes are ${SIMULATED_SANDBOX_DISCLAIMER}. The deny rules and the dangerous-command classifier are separate and still apply.`;
+			return `Sandbox: simulated, not OS-enforced. This build ships no filesystem-sandbox backend for this platform, and adding one would mean a helper program, which is out of scope. Writes are ${SIMULATED_SANDBOX_DISCLAIMER}. ${separate}`;
 		}
 	}
 }

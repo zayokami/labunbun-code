@@ -7,6 +7,20 @@ commands, and SHA-256 checksums.
 
 ### Added
 
+- **`/yolo` turns off the permission gates for one session, with a typed
+  confirmation.** Typing `/yolo` opens a dialog that names what stops — the
+  dangerous-command classifier, ask rules, and every approval prompt — and what
+  remains: deny rules, hooks, the sandbox and its network policy, plan mode's
+  read-only gate, tool validation, and MCP approvals. It takes the exact
+  sentence `I only live once`, capitalisation included, to enable; a mismatch
+  keeps the dialog open, and Escape cancels. The posture lives on the session
+  only: it is not a permission mode, is not in the picker, the settings, the
+  CLI or the policy snapshot, cannot be resumed, and ends with `/yolo`,
+  `/yolo off`, any mode change, or a single Shift+Tab. Escalated Bash calls,
+  which ask to leave the sandbox, are denied while it is on. Subagents and
+  beetle members follow the root session live, and hosts without an interactive
+  phrase surface cannot enter it. See `docs/dev/yolo-mode.md`.
+
 - **The built-in skills ship inside the binary.** Release artifacts carry the
   skill files from `.labunbun/skills` (bodies and `references/`) embedded in the
   executable instead of expecting a directory beside it. They are written once

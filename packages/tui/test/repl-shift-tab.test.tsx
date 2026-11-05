@@ -40,7 +40,11 @@ const SHIFT_TAB = "\x1b[Z";
  */
 const COMMANDS: Array<[string, string]> = [["/help", "show the help list"]];
 
-function setup(pair?: { mode: PermissionMode; sandbox: SandboxMode }, onModeChange?: (choice: ModeChoice) => void) {
+function setup(
+	pair?: { mode: PermissionMode; sandbox: SandboxMode },
+	onModeChange?: (choice: ModeChoice) => void,
+	options: { yolo?: boolean; label?: string } = {},
+) {
 	const faux = fauxProvider([{ text: "unused" }]);
 	const session = new AgentSession({
 		model: FAUX_MODEL,
@@ -48,9 +52,11 @@ function setup(pair?: { mode: PermissionMode; sandbox: SandboxMode }, onModeChan
 		deps: { streamFn: (model, context, streamOptions) => faux.streamFn(model, context, streamOptions) },
 		...(pair ? { permissionMode: pair.mode, sandbox: pair.sandbox } : {}),
 	});
+	// Set before the first frame, the way `/yolo` leaves it mid-session.
+	if (options.yolo) session.enableYolo();
 	// Seeded the way `mountRepl` seeds it, not left at the default "". Otherwise the
 	// badge assertions would pass on a store that never got a label at all.
-	const store = createStore<UiState>(initialUiState(false, false, MODE_CHOICES[0].label));
+	const store = createStore<UiState>(initialUiState(false, false, options.label ?? MODE_CHOICES[0].label));
 	const view = render(
 		<REPL
 			getSession={() => session}
@@ -121,7 +127,7 @@ describe("Shift+Tab in the prompt", () => {
 			await h.press(SHIFT_TAB);
 			walked.push(h.store.get().modeLabel);
 		}
-		expect(walked).toEqual(["Plan", "Agent", "Agent 无沙箱", "Ask"]);
+		expect(walked).toEqual(["Plan", "Agent", "Agent (no sandbox)", "Ask"]);
 		expect(h.axes()).toEqual({ mode: "ask", sandbox: "workspace-write" });
 		h.unmount();
 	}, 20_000);
@@ -203,6 +209,43 @@ describe("Shift+Tab in the prompt", () => {
 		await delay(40);
 		expect(/│ > ([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "))?.[1]?.trim()).toBe("/help");
 		view.unmount();
+	}, 20_000);
+
+	/**
+	 * YOLO's brake, at the key.
+	 *
+	 * The first press must only exit YOLO. A press that disarmed *and* moved
+	 * would make the safety brake and a mode change the same gesture, leaving
+	 * the user to predict the next row to know whether they actually stopped.
+	 * The callback is checked too: no mode changed, so nothing is reported as
+	 * one and no session-file policy entry is written for it.
+	 */
+	test("while YOLO is on, one press exits it without cycling, and the next press cycles", async () => {
+		const changes: ModeChoice[] = [];
+		const h = setup({ mode: "ask", sandbox: "workspace-write" }, (choice) => changes.push(choice), {
+			yolo: true,
+			label: "YOLO",
+		});
+		await delay(40);
+		expect(h.frame()).toContain("[YOLO]");
+
+		await h.press(SHIFT_TAB);
+
+		expect(h.session.yolo).toBe(false);
+		// The underlying pair never moved, so the label is that pair's own name.
+		expect(h.axes()).toEqual({ mode: "ask", sandbox: "workspace-write" });
+		expect(h.store.get().modeLabel).toBe("Ask");
+		expect(h.frame()).toContain("[Ask]");
+		expect(h.frame()).not.toContain("[YOLO]");
+		expect(changes).toHaveLength(0);
+
+		// The control: the *next* press is an ordinary cycle, so the brake did not
+		// swallow the key or leave the cycle armed on a stale row.
+		await h.press(SHIFT_TAB);
+		expect(h.axes()).toEqual({ mode: "plan", sandbox: "workspace-write" });
+		expect(h.store.get().modeLabel).toBe("Plan");
+		expect(changes).toHaveLength(1);
+		h.unmount();
 	}, 20_000);
 
 	/**

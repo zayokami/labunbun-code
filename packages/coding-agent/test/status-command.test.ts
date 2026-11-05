@@ -75,7 +75,7 @@ describe("/status", () => {
 		expect(card?.directory).toBe(`~${sep}project`);
 		// The card names the *pair*, using the picker's label for it. A card that
 		// printed only the mode could not distinguish `Agent` from
-		// `Agent 无沙箱` — the two rows differ only in confinement, and that is the
+		// `Agent (no sandbox)` — the two rows differ only in confinement, and that is the
 		// one fact on this card a user cannot infer from the rest of it.
 		expect(card?.permissions).toBe("Agent");
 		// The tail of the id, not the head: ids start with a timestamp, so the

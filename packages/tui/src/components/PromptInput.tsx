@@ -43,7 +43,7 @@ export interface PromptInputProps {
 	 * The permission mode, by name, drawn beside the editor badge.
 	 *
 	 * A name rather than the pair because the pair is four facts and the prompt
-	 * has one dim row: `Agent 无沙箱` says the thing, and `agent` +
+	 * has one dim row: `Agent (no sandbox)` says the thing, and `agent` +
 	 * `danger-full-access` says the same thing while implying there is a fifth
 	 * mode. It is drawn here rather than in the status line because the status
 	 * line collapses to nothing at an idle prompt with no context meter and no
@@ -168,14 +168,17 @@ function isHostCommand(text: string): boolean {
  * picker never offered. The rows read by meaning: Ask is the resting mode and
  * stays as quiet as the row around it; Plan is where design happens and takes
  * the accent; Agent runs without asking, so it takes the one shade that asks to
- * be noticed; and `Agent 无沙箱` is that same run with no confinement at all —
- * the one thing on this row worth the permission colour.
+ * be noticed; and `Agent (no sandbox)` is that same run with no confinement at all —
+ * the one thing on this row worth the permission colour. `YOLO` takes the same
+ * colour for the same reason: it is the widest posture the prompt can name,
+ * and it is never in the table because it is an overlay, not a mode.
  */
 export const MODE_BADGE_COLOR: Readonly<Record<string, "textMuted" | "accent" | "warning" | "permission">> = {
 	Ask: "textMuted",
 	Plan: "accent",
 	Agent: "warning",
-	"Agent 无沙箱": "permission",
+	"Agent (no sandbox)": "permission",
+	YOLO: "permission",
 };
 
 /**

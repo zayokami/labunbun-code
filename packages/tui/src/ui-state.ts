@@ -190,6 +190,13 @@ export interface UiState {
 	planReview: PlanReviewDialogState | null;
 	/** Pick-one dialog (resume, model switch). Like `question`, carries a resolve closure. */
 	picker: ListPickerState | null;
+	/**
+	 * The YOLO phrase confirmation, when `/yolo` is asking for one. Its own
+	 * surface rather than the question dialog: the answer only counts when it is
+	 * typed exactly, and a mismatch has to keep the dialog up rather than resolve
+	 * whatever was typed.
+	 */
+	phraseConfirm: PhraseConfirmState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
 	/**
 	 * What the app is doing to the context while it does it — a summarization in
@@ -385,6 +392,34 @@ export interface QuestionDialogState {
 }
 
 /**
+ * What a phrase confirmation asks for, and what it says while asking.
+ *
+ * The command supplies the two lists — they are the feature's own description,
+ * not the dialog's copy — so the surface stays generic and the safety argument
+ * lives beside the thing it describes. `sandbox` is the active sandbox's name,
+ * shown because it is the confinement that remains.
+ */
+export interface PhraseConfirmRequest {
+	/** The heading, e.g. "YOLO mode". */
+	title: string;
+	/** The exact phrase the user has to type, case included. */
+	phrase: string;
+	/** What stops running once the phrase is accepted. */
+	off: string[];
+	/** What still applies. */
+	on: string[];
+	/** The active sandbox, named. */
+	sandbox: string;
+	/** One line about who else is affected — workers already running, for YOLO. */
+	note?: string;
+}
+
+export interface PhraseConfirmState extends PhraseConfirmRequest {
+	/** Resolves true only for the exact phrase; false on Esc, abort or replacement. */
+	resolve: (confirmed: boolean) => void;
+}
+
+/**
  * What the reviewer said about a plan.
  *
  * `approved: false` with no feedback is "keep planning, no note"; with feedback
@@ -422,6 +457,7 @@ export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiSt
 		question: null,
 		planReview: null,
 		picker: null,
+		phraseConfirm: null,
 		statusCard: null,
 		activity: null,
 		backgroundShells: [],

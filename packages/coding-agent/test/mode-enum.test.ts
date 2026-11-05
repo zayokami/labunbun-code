@@ -205,7 +205,7 @@ describe("a retired value is refused with a sentence to act on", () => {
 	 * the assertion is that the message names the replacement.
 	 *
 	 * `bypassPermissions` is the one that has to be careful. It is the old name
-	 * for the posture this build calls "Agent 无沙箱", so the suggestion has to
+	 * for the posture this build calls "Agent (no sandbox)", so the suggestion has to
 	 * carry *both* halves — a message that named only the mode would walk a
 	 * scripted user into the sandboxed pairing, which is the one change here
 	 * that could quietly narrow a run rather than widen it.

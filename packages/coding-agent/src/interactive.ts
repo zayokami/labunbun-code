@@ -1302,6 +1302,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
 		network: () => sessionRef?.network ?? effectiveNetwork,
 		thinkingLevel: () => thinkingLevel,
+		// The session's YOLO posture, read at every evaluation: a worker spawned
+		// while it was on and answering after `/yolo off` must follow the root.
+		yolo: () => sessionRef?.yolo ?? false,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 		trimOldToolResults: settings.trimOldToolResults,
 		compactionTuning,
@@ -1519,6 +1522,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				rules: [...baseRules, ...sessionRules],
 				cwd,
 				readOnlyToolNames,
+				// Read live, not from `ctx`: YOLO is a session posture, not part of the
+				// permission context the engine receives, and a copy here would go stale
+				// the moment `/yolo` or a mode change landed.
+				yolo: sessionRef?.yolo ?? false,
 			});
 			if (decision.behavior !== "ask") return decision;
 			// No handle means nothing can answer — a `-p` run reached this code, or
@@ -1595,6 +1602,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					rules: [...baseRules, ...sessionRules],
 					cwd,
 					readOnlyToolNames: collectReadOnlyToolNames(live.tools),
+					yolo: live.yolo,
 				});
 				if (after.behavior === "deny") return after;
 			}
@@ -2057,6 +2065,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
 		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
 		network: () => sessionRef?.network ?? effectiveNetwork,
+		// A member inherits the root's posture, live: the band outlives a `/yolo`
+		// change, and a member evaluating a call after the root left must not keep
+		// the old answer.
+		yolo: () => sessionRef?.yolo ?? false,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 		noteToolChange: (cause) => {
 			toolChangeLatch.arm(cause);
@@ -2210,6 +2222,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				sandbox: sessionRef?.sandbox ?? effectiveSandbox,
 				rules: [...baseRules, ...sessionRules],
 				cwd,
+				yolo: sessionRef?.yolo ?? false,
 			}).behavior === "allow",
 		onSubmitText: async (text) => {
 			appendHistory(text, cwd);
@@ -2232,6 +2245,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 							sandbox: sessionRef?.sandbox ?? effectiveSandbox,
 							rules: [...baseRules, ...sessionRules],
 							cwd,
+							yolo: sessionRef?.yolo ?? false,
 						},
 					);
 					if (verdict.behavior === "deny") {
@@ -3370,7 +3384,7 @@ function choiceForMode(mode: string): (typeof MODE_CHOICES)[number] | undefined 
  *
  * It is `describeModeChoice` — the same function the prompt's badge and
  * Shift+Tab's label go through. It used to be a second copy living here, which
- * meant the name of a mode had two answers: a card could say "Agent 无沙箱"
+ * meant the name of a mode had two answers: a card could say "Agent (no sandbox)"
  * while the prompt under it said `agent · danger-full-access`, and nothing in
  * either file would have noticed, because each was right on its own. The table
  * is in `@labunbun/agent` and so is the one function that reads it.
@@ -3458,6 +3472,10 @@ export function appCommandTable(): Array<[string, string]> {
 		["/todo", "Show the full task board: every task, its status, owner, blockers, and description"],
 		["/tree", "Show the session branch tree"],
 		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
+		[
+			"/yolo",
+			"YOLO mode: classifier off, approvals suppressed, sandbox kept — typing the confirmation phrase enables it: /yolo [on|off]",
+		],
 	];
 }
 
@@ -3751,10 +3769,26 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			const behaviorLabel = (behavior: PermissionRule["behavior"]): string => {
 				if (behavior === "allow") return "allow";
 				if (behavior === "deny") return "deny ";
-				return "ask  ";
+				// The rule is still listed — it remains the user's intent and comes
+				// back the moment YOLO ends — but the screen must not describe it as
+				// something that will stop a call while it is ignored.
+				return session.yolo ? "ask (ignored under YOLO)" : "ask  ";
 			};
 			const lines = [
 				`Mode: ${session.permissionMode} · sandbox: ${session.sandbox}`,
+				// The policy tier outranks the phrase, so the screen a user opens to
+				// find out what holds the session in has to say when it is the reason
+				// `/yolo` will refuse. Without this, `/permissions` would describe a
+				// session that looks eligible and leave the refusal unexplained.
+				...(ctx.loadedSettings.perSource.policy?.disableBypassPermissionsMode === true
+					? ["Managed policy: bypass-permission modes are disabled — /yolo cannot be entered."]
+					: []),
+				...(session.yolo
+					? [
+							"YOLO: on — classifier off, ask rules ignored, approvals suppressed.",
+							"Deny rules, hooks, and the sandbox still apply.",
+						]
+					: []),
 				// Printed here rather than left to the mode hints, because this is
 				// the screen a user opens to find out what is actually holding the
 				// session in. The wording is not this file's to choose: the same
@@ -3762,12 +3796,21 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// cannot say "enforced" on a machine where nothing wraps the shell.
 				// What the sentence never covers is the deny rules and the
 				// classifier below — those apply in every case, including the
-				// unrestricted one, and they are not the sandbox. The Windows
+				// unrestricted one, and they are not the sandbox. The one exception
+				// is YOLO, which turns the classifier off by design and says so in
+				// the lines above; the deny rules beneath are still the floor this
+				// screen describes. The Windows
 				// probe's own reason travels beside the backend for the same
 				// purpose: on a machine that has a container backend and did
 				// not select it, the sentence is owed the machine's why, not
 				// the build's.
-				describeSandboxBackend(ctx.sandboxBackend, session.sandbox, process.platform, ctx.appContainerReason),
+				describeSandboxBackend(
+					ctx.sandboxBackend,
+					session.sandbox,
+					process.platform,
+					ctx.appContainerReason,
+					!session.yolo,
+				),
 				// The third axis, from the same source as the other two — read off
 				// the session rather than off settings, so a session that changed it
 				// mid-run reports what it is actually running under. The caveat is
@@ -4008,10 +4051,16 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				vimMode: live?.vim ?? ctx.settings.vimMode === true,
 				emacsMode: live?.emacs ?? ctx.settings.emacsMode === true,
 			});
+			// YOLO is named in front of the pair rather than instead of it: the
+			// underlying mode is still what runs the moment the override ends, and
+			// a row that printed only `YOLO` would hide the posture it returns to.
+			const permissions = session.yolo
+				? `YOLO · ${describeAxes(session.permissionMode, session.sandbox)}`
+				: describeAxes(session.permissionMode, session.sandbox);
 			ctx.handle?.setStatusCard({
 				model: `${session.model.provider}/${session.model.id}`,
 				directory: shortenHome(ctx.cwd, ctx.home),
-				permissions: describeAxes(session.permissionMode, session.sandbox),
+				permissions,
 				session: storeId ? shortSessionId(storeId) : "(not persisted)",
 				context: info,
 				details: [
@@ -4037,7 +4086,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// fact that it was asked for is still in the session's own history.
 			pushInfo(
 				ctx.handle,
-				`Status: ${session.model.provider}/${session.model.id} · ${describeAxes(session.permissionMode, session.sandbox)} · ${
+				`Status: ${session.model.provider}/${session.model.id} · ${permissions} · ${
 					storeId ? shortSessionId(storeId) : "not persisted"
 				}`,
 			);
@@ -4517,7 +4566,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				if (!handleRef) return true;
 				void (async () => {
 					// The tick marks the *pair* the session is in, not just the mode:
-					// `agent` and `Agent 无沙箱` share a mode and differ only here, and
+					// `agent` and `Agent (no sandbox)` share a mode and differ only here, and
 					// a star on both of them would be a lie.
 					const active = MODE_CHOICES.findIndex(
 						(c) => c.mode === session?.permissionMode && c.sandbox === session.sandbox,
@@ -5321,9 +5370,135 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return applyEditorCommand(ctx, text, "vimMode");
 		case "/emacs":
 			return applyEditorCommand(ctx, text, "emacsMode");
+		case "/yolo":
+			applyYoloCommand(ctx, text);
+			return true;
 		default:
 			return false;
 	}
+}
+
+/**
+ * The sentence that arms YOLO. Exact match after trimming, case included.
+ *
+ * Exported for tests and for anything that needs to display it; it is a warning,
+ * not a secret, so it is shown verbatim in the dialog. There is deliberately one
+ * spelling of it in the codebase.
+ */
+export const YOLO_CONFIRMATION_PHRASE = "I only live once";
+
+/**
+ * `/yolo`: the interactive door to the session-only override.
+ *
+ * Every refusal happens before the phrase dialog opens. That order is the point:
+ * asking a user to type a sentence and then telling them the policy forbids it
+ * would spend the one acknowledgment in the app on a door that was never going
+ * to open.
+ *
+ * What is deliberately absent is any persistence. The flag lives on the session,
+ * `setMode` clears it, and nothing here writes the policy or the settings file.
+ */
+function applyYoloCommand(ctx: AppCommandContext, text: string): void {
+	const arg = text.split(/\s+/)[1]?.toLowerCase();
+	if (arg && arg !== "on" && arg !== "off") {
+		pushInfo(ctx.handle, "Usage: /yolo [on|off] — with no argument it toggles");
+		return;
+	}
+	const session = ctx.getSession();
+	if (!session) {
+		pushInfo(ctx.handle, "No live session.");
+		return;
+	}
+	const wantOn = arg === "on" ? true : arg === "off" ? false : !session.yolo;
+	if (!wantOn) {
+		if (!session.yolo) {
+			pushInfo(ctx.handle, "YOLO is not on.");
+			return;
+		}
+		session.disableYolo();
+		// The badge is a copy; the session has no event for this. The underlying
+		// pair never moved, so the label goes back to its own name.
+		const label = describeModeChoice(session.permissionMode, session.sandbox);
+		publishModeLabel(ctx.handle, label);
+		// The exit line names the pair that now applies, not only the word "off":
+		// it is the durable trace in the transcript, and the next turn's posture is
+		// the fact a reader of it needs.
+		pushInfo(ctx.handle, `YOLO off · ${label} (${session.permissionMode} · sandbox ${session.sandbox})`);
+		return;
+	}
+	if (session.yolo) {
+		pushInfo(ctx.handle, "YOLO is already on. Run /yolo off to stop it.");
+		return;
+	}
+	// The same three session-level refusals `enableYolo` owns, asked here so the
+	// reason can be printed before the dialog rather than after it.
+	if (session.isRunning) {
+		pushInfo(ctx.handle, "YOLO cannot be entered while a turn is running. Wait for it to finish, then run /yolo.");
+		return;
+	}
+	if (session.permissionMode === "plan") {
+		pushInfo(ctx.handle, "YOLO is not available in plan mode. Leave plan mode first, then run /yolo.");
+		return;
+	}
+	if (session.sandbox === "danger-full-access") {
+		pushInfo(
+			ctx.handle,
+			"YOLO keeps the sandbox on, and this session has no sandbox. Switch to a confined mode (Agent) first, then run /yolo.",
+		);
+		return;
+	}
+	// The policy tier outranks the phrase: a managed file that forbids bypass
+	// postures forbids this one too, and a typed acknowledgment cannot lift it.
+	if (ctx.loadedSettings.perSource.policy?.disableBypassPermissionsMode === true) {
+		pushInfo(
+			ctx.handle,
+			"YOLO is disabled by managed settings (disableBypassPermissionsMode is set in the policy tier).",
+		);
+		return;
+	}
+	const handle = ctx.handle;
+	// The confirmation is the door. A host with no phrase surface — headless, ACP,
+	// an embedder's handle — has no way to satisfy it, so it has no way in.
+	if (!handle || typeof handle.confirmPhrase !== "function") {
+		pushInfo(ctx.handle, "YOLO needs an interactive phrase confirmation, and this host has none.");
+		return;
+	}
+	const opening = {
+		title: "YOLO mode — You Only Live Once",
+		phrase: YOLO_CONFIRMATION_PHRASE,
+		off: ["Dangerous-command classifier", "Ask rules", "Approval prompts for every tool"],
+		on: [
+			"Deny rules",
+			"Hooks",
+			"The sandbox and its network policy",
+			"Plan mode's read-only gate, and the read-only sandbox's write refusal",
+			"Tool validation and MCP server approvals",
+		],
+		sandbox: session.sandbox,
+		// The band outlives a decision, so the dialog says what this changes for
+		// work already in flight rather than leaving it to be discovered.
+		note: "Running subagents and band members adopt YOLO from their next permission decision.",
+	};
+	void (async () => {
+		const confirmed = await handle.confirmPhrase(opening);
+		if (!confirmed) {
+			pushInfo(ctx.handle, "YOLO not enabled.");
+			return;
+		}
+		// Asked again after the wait: the dialog is a blocking wait, and the state
+		// it was opened under can be gone by the time it closes. A refusal here is
+		// the same refusal, printed a moment later.
+		const entered = session.enableYolo();
+		if (!entered.ok) {
+			pushInfo(ctx.handle, entered.reason);
+			return;
+		}
+		publishModeLabel(ctx.handle, "YOLO");
+		pushInfo(
+			ctx.handle,
+			`YOLO on · classifier and approvals off · sandbox ${session.sandbox} · deny rules still apply`,
+		);
+	})();
 }
 
 /**

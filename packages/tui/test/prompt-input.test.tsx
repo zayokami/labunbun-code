@@ -1158,7 +1158,7 @@ describe("the permission mode badge", () => {
 		expect(MODE_BADGE_COLOR.Ask).toBe("textMuted");
 		expect(MODE_BADGE_COLOR.Plan).toBe("accent");
 		expect(MODE_BADGE_COLOR.Agent).toBe("warning");
-		expect(MODE_BADGE_COLOR["Agent 无沙箱"]).toBe("permission");
+		expect(MODE_BADGE_COLOR["Agent (no sandbox)"]).toBe("permission");
 		expect(modeBadgeColor("Ask", DARK_THEME)).toBe(DARK_THEME.textMuted);
 		expect(modeBadgeColor("Plan", DARK_THEME)).toBe(DARK_THEME.accent);
 		// `describeModeChoice` spells out a pair the picker has no row for. It is

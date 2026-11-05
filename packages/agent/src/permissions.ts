@@ -59,6 +59,15 @@
  * there — it is not a whitelist, and nothing upstream treats its silence as
  * safety.
  *
+ * YOLO (`config.yolo`) is the one input that changes this order, and it changes
+ * exactly three rows: step 3's classifier is skipped (its Bash shape check
+ * stays), step 4's ask rules are skipped, and step 6 answers `allow` whatever
+ * the mode. Escalated Bash at step 3b is *denied* rather than approved, because
+ * escalation is a request to leave the sandbox YOLO keeps. Deny rules, the plan
+ * gate, the read-only write-tool gate, allow rules and the sandbox all remain.
+ * The flag is session-only and can only be set by the interactive `/yolo`
+ * command — see docs/dev/yolo-mode.md.
+ *
  * What "a rule matches" means widens only in the direction that refuses. A deny or
  * ask rule for Bash matches a chained line when any one command in it does
  * (`bashRuleMatches`), and a file deny or ask rule also covers the sibling tools
@@ -436,6 +445,17 @@ export interface PermissionEngineConfig {
 	 * working — and `plan-mode-allowlist.test.ts` holds the two in step.
 	 */
 	readOnlyToolNames?: ReadonlySet<string>;
+	/**
+	 * The session-only YOLO override, set by `/yolo` after a typed confirmation.
+	 * Absent means false, and every host that cannot enable YOLO omits it — the
+	 * safe default is the one the type system gives for free.
+	 *
+	 * It is deliberately not a `PermissionMode`: it composes with the two axes
+	 * rather than replacing them, it cannot be persisted or resumed, and adding it
+	 * to `PERMISSION_MODES` would put it in the settings schema, the CLI and the
+	 * picker by construction. See docs/dev/yolo-mode.md.
+	 */
+	yolo?: boolean;
 }
 
 /**
@@ -523,8 +543,12 @@ export function evaluatePermissions(
 				message: `Bash: the call carries no readable string command, so nothing can be classified. Refused rather than treated as safe — a call that is not shaped like a Bash call should have failed schema validation first.`,
 			};
 		}
-		const match = classifyDangerousCommand(command, config.platform);
-		if (match) return decideDangerous(match, config.mode);
+		// The shape check above is not a classifier decision, so YOLO keeps it. Only
+		// the classification itself is skipped.
+		if (!config.yolo) {
+			const match = classifyDangerousCommand(command, config.platform);
+			if (match) return decideDangerous(match, config.mode);
+		}
 	}
 
 	// 3b. An escalated shell command runs outside the sandbox, so no rule and no mode decides it: it asks,
@@ -547,6 +571,16 @@ export function evaluatePermissions(
 					"Escalated command refused: it needs a justification, one sentence on why it cannot run inside the sandbox",
 			};
 		}
+		// YOLO keeps the sandbox, and the only thing an escalated call asks for is
+		// to leave it. There is no dialog left to judge that request, so the answer
+		// is no — approving it would quietly undo the one confinement YOLO retains.
+		if (config.yolo) {
+			return {
+				behavior: "deny",
+				message:
+					"Escalated command refused: YOLO mode keeps the sandbox, and this call asks to run outside it. Remove `escalate` to run it inside the sandbox, or leave YOLO with `/yolo off`.",
+			};
+		}
 		return { behavior: "ask", message: `Runs outside the sandbox: ${justification}` };
 	}
 
@@ -557,21 +591,28 @@ export function evaluatePermissions(
 	//    come to me" is expressed, and it is checked before the allow loop below
 	//    for the reason the file header pins down: an ask rule is written to
 	//    survive the broad grants that would otherwise swallow it.
-	for (const rule of config.rules) {
-		if (rule.behavior !== "ask") continue;
-		if (ruleMatches(rule, toolName, input, config.cwd)) {
-			return { behavior: "ask", message: `Asked by ${rule.source} rule: ${formatRule(rule)}` };
-		}
-		// The deny loop's Bash cross-check, asked of ask rules too: a file the
-		// user wants to be consulted about is one the shell should not reach
-		// silently either.
-		if (toolName === "Bash") {
-			const path = bashHitsFileRule(rule, input, config.cwd);
-			if (path !== null) {
-				return {
-					behavior: "ask",
-					message: `Asked by ${rule.source} rule: ${formatRule(rule)} (command accesses "${path}")`,
-				};
+	//
+	//    Under YOLO there is no dialog, so an ask rule has nothing left to do. It is
+	//    skipped rather than turned into a deny: the user wrote it to be consulted,
+	//    not refused, and a deny would make YOLO stop on rules it was chosen to
+	//    spend. The deny loop at step 1 is not an ask and is untouched.
+	if (!config.yolo) {
+		for (const rule of config.rules) {
+			if (rule.behavior !== "ask") continue;
+			if (ruleMatches(rule, toolName, input, config.cwd)) {
+				return { behavior: "ask", message: `Asked by ${rule.source} rule: ${formatRule(rule)}` };
+			}
+			// The deny loop's Bash cross-check, asked of ask rules too: a file the
+			// user wants to be consulted about is one the shell should not reach
+			// silently either.
+			if (toolName === "Bash") {
+				const path = bashHitsFileRule(rule, input, config.cwd);
+				if (path !== null) {
+					return {
+						behavior: "ask",
+						message: `Asked by ${rule.source} rule: ${formatRule(rule)} (command accesses "${path}")`,
+					};
+				}
 			}
 		}
 	}
@@ -590,8 +631,10 @@ export function evaluatePermissions(
 	}
 
 	// 6. The mode's own answer to "nothing decided it": `agent` runs it,
-	//    `ask` brings it to a person.
-	return { behavior: config.mode === "agent" ? "allow" : "ask" };
+	//    `ask` brings it to a person. YOLO is the standing answer to every
+	//    question this step would have asked.
+	if (config.yolo || config.mode === "agent") return { behavior: "allow" };
+	return { behavior: "ask" };
 }
 
 /** The Bash tool's `command` field, when this call really is a Bash call. */

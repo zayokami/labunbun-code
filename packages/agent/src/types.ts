@@ -100,7 +100,7 @@ export const MODE_CHOICES: readonly ModeChoice[] = [
 		id: "agentNoSandbox",
 		mode: "agent",
 		sandbox: "danger-full-access",
-		label: "Agent 无沙箱",
+		label: "Agent (no sandbox)",
 		hint: "the same, with the sandbox axis set to no confinement",
 	},
 ];
@@ -123,7 +123,7 @@ export function findModeChoice(id: string): ModeChoice | undefined {
 /**
  * The pairing a session is in, named for a human.
  *
- * Prefers the choice's own label, so the answer is "Agent 无沙箱" rather than
+ * Prefers the choice's own label, so the answer is "Agent (no sandbox)" rather than
  * "agent · danger-full-access" — the second is a fact and the first is what the
  * user asked for, and naming a combination the picker has no row for would
  * suggest a fifth mode exists. Falls back to the raw pair for a combination the
