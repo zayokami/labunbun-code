@@ -26,7 +26,15 @@ import { PromptInput } from "./PromptInput.tsx";
 import { QuestionDialog } from "./QuestionDialog.tsx";
 import { QueuedMessages } from "./QueuedMessages.tsx";
 import { ShortcutOverlay } from "./ShortcutOverlay.tsx";
-import { SplitWorkspace, workspaceFits, workspaceHeight } from "./SplitWorkspace.tsx";
+import {
+	buildConversation,
+	SplitWorkspace,
+	scrollWorkspace,
+	splitBodySize,
+	type WorkspaceScroll,
+	workspaceFits,
+	workspaceHeight,
+} from "./SplitWorkspace.tsx";
 import { StatusCard } from "./StatusCard.tsx";
 import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
@@ -343,6 +351,21 @@ export function REPL({
 	const lastCtrlCAtRef = useRef(0);
 	const ctrlCTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const [ctrlCHint, setCtrlCHint] = useState(false);
+	// The watch panel's open state, and only that: what it draws comes from the
+	// store's `backgroundShells`, so there is no second copy of the shells to keep
+	// in step. It is kept — not remounted — across a visit to the transcript, so a
+	// panel left open is a panel still open when the screen closes. Declared here,
+	// above the submit handlers, because sending a message is also an instruction
+	// to return the split to the tail.
+	const [watchOpen, setWatchOpen] = useState(false);
+	// Which stop of the ring the panel is on; `null` is the automatic shell the
+	// panel picks by itself until the first Ctrl+V. Kept across a close and a
+	// reopen, like the open state itself.
+	const [watchSelection, setWatchSelection] = useState<WatchSelection | null>(null);
+	// The split view's scroll position. `null` follows the newest entry; a value
+	// pins the pane to an entry index so output arriving below cannot slide the
+	// page out from under a reader. See `scrollWorkspace`.
+	const [workspaceScroll, setWorkspaceScroll] = useState<WorkspaceScroll | null>(null);
 	/** Escape routing into the prompt editor — see the Esc branch below. */
 	const escapeRef = useRef<(() => boolean) | null>(null);
 	/** The same hand-off for the pad: the editor claims what it can use. */
@@ -430,6 +453,9 @@ export function REPL({
 	 */
 	const enqueue = useCallback(
 		(text: string, mode: QueuedMessage["mode"]) => {
+			// Sending is also "show me the tail": a split left scrolled back would
+			// hide the message just written and the answer to it.
+			setWorkspaceScroll(null);
 			const session = getSession();
 			queuedIdRef.current += 1;
 			store.set((s) => ({ ...s, queued: [...s.queued, { id: `q${queuedIdRef.current}`, text, mode }] }));
@@ -488,6 +514,9 @@ export function REPL({
 	const handleSubmit = useCallback(
 		(text: string) => {
 			const trimmed = text.trim();
+			// Sending returns a scrolled split to the tail for the same reason a
+			// mid-run send does: the reply belongs where the reader is looking.
+			setWorkspaceScroll(null);
 			// Anything the user sends dismisses the status card: it is a snapshot of
 			// the moment it was asked for, and the work they are about to start
 			// invalidates it. Clearing before dispatch is also what lets `/status`
@@ -560,21 +589,21 @@ export function REPL({
 	// window would skip entries that were never on screen.
 	const transcriptWindow = frameCap === undefined ? 25 : Math.max(1, Math.min(25, Math.floor((frameCap - 1) / 2)));
 	const TRANSCRIPT_PAGE = Math.min(10, transcriptWindow);
-	// The watch panel's open state, and only that: what it draws comes from the
-	// store's `backgroundShells`, so there is no second copy of the shells to keep
-	// in step. It is kept — not remounted — across a visit to the transcript, so a
-	// panel left open is a panel still open when the screen closes.
-	const [watchOpen, setWatchOpen] = useState(false);
-	// Which stop of the ring the panel is on; `null` is the automatic shell the
-	// panel picks by itself until the first Ctrl+V. Kept across a close and a
-	// reopen, like the open state itself — a view the user aimed somewhere is
-	// not re-aimed behind their back — and the panel still falls back to the
-	// automatic answer if the picked shell has since ended out of the list.
-	const [watchSelection, setWatchSelection] = useState<WatchSelection | null>(null);
-	// The split view's scroll position, in entries back from the newest.
-	// `Ctrl+T` opens the view; on a wide enough terminal that view is the two
-	// columns, and the transcript side can then be paged with PgUp/PgDn.
-	const [workspaceOffset, setWorkspaceOffset] = useState(0);
+	// The split view's scroll position as the pane sees it. A pinned `end` is an
+	// index into `entries`, not a distance from the newest: entries appended
+	// below must not slide the page out from under a reader. `total` at pin time
+	// is the baseline for the "N new" badge. `Ctrl+T` opens the view; on a wide
+	// enough terminal that view is the two columns, paged with PgUp/PgDn.
+	const workspaceTotal = entries.length;
+	const workspaceAnchor = workspaceScroll !== null && workspaceScroll.end <= workspaceTotal ? workspaceScroll : null;
+	const workspaceOffset = workspaceAnchor === null ? 0 : Math.max(0, workspaceTotal - workspaceAnchor.end);
+	const workspaceNewBelow = workspaceAnchor === null ? 0 : Math.max(0, workspaceTotal - workspaceAnchor.total);
+	// An anchor from before a `/clear` names an entry that is no longer there.
+	// Treated as "follow" for the frame above, and cleared here so it cannot
+	// come back to life when the conversation grows past the old index.
+	useEffect(() => {
+		if (workspaceScroll !== null && workspaceScroll.end > entries.length) setWorkspaceScroll(null);
+	}, [entries.length, workspaceScroll]);
 	// What the terminal can hold. `windowRows` is undefined under the test
 	// harness and on some hosts, so 24 is the same fallback the transcript
 	// screen uses; the split appears only where both panes stay readable.
@@ -665,7 +694,7 @@ export function REPL({
 		// behind the transcript, exactly as it was.
 		if (watchOpen && !transcriptMode && key.escape) {
 			setWatchOpen(false);
-			setWorkspaceOffset(0);
+			setWorkspaceScroll(null);
 			return;
 		}
 		if (key.ctrl && input === "o") {
@@ -686,8 +715,8 @@ export function REPL({
 			setWatchOpen((v) => !v);
 			// A view that opens on the tail and remembers a scroll from last time
 			// would open somewhere the user did not leave it; the panel has no
-			// scroll, so the offset only exists for this one layout.
-			setWorkspaceOffset(0);
+			// scroll, so the anchor only exists for this one layout.
+			setWorkspaceScroll(null);
 			return;
 		}
 		// Ctrl+V walks the watch panel's source ring: each shell's tail in the
@@ -735,9 +764,23 @@ export function REPL({
 		// was never on screen (the transcript screen's rule).
 		if (splitActive && (key.pageUp || key.pageDown)) {
 			if (dialog || question || planReview || picker) return;
-			const page = Math.max(1, splitHeight - 4);
-			if (key.pageUp) setWorkspaceOffset((o) => Math.min(o + page, entries.length));
-			else setWorkspaceOffset((o) => Math.max(0, o - page));
+			// The page is the entries the pane is showing right now, measured by
+			// the same line model that draws them: a press moves roughly one
+			// screenful, never a fixed number of entries that could leap over a
+			// wrapped message the reader never saw.
+			const body = splitBodySize(workspaceColumns, splitHeight);
+			const view = buildConversation({
+				entries,
+				theme,
+				width: body.bodyWidth,
+				rows: body.bodyRows,
+				offset: workspaceOffset,
+				streamingText,
+				thinkingText,
+				liveOutputs,
+			});
+			const page = Math.max(1, view.lastEntry - view.firstEntry);
+			setWorkspaceScroll((current) => scrollWorkspace(current, entries.length, page, key.pageUp ? "up" : "down"));
 			return;
 		}
 		if (transcriptMode) {
@@ -1080,6 +1123,7 @@ export function REPL({
 						columns={workspaceColumns}
 						height={splitHeight}
 						offset={workspaceOffset}
+						newBelow={workspaceNewBelow}
 					/>
 				)}
 				<Box marginBottom={1} flexDirection="column">

@@ -747,6 +747,62 @@ describe("the split view at the REPL", () => {
 		});
 	}, 20_000);
 
+	// A pane pinned to an entry index, not to a distance from the newest: output
+	// arriving while the reader is back must not slide the page under their eyes.
+	// The badge says how much arrived, and paging down catches up to the tail.
+	test("new entries do not move a scrolled pane, and the header counts them", async () => {
+		await withTerminalSize(100, 24, async () => {
+			const h = replSetup();
+			h.store.set((s) => ({
+				...s,
+				entries: Array.from({ length: 30 }, (_, i) => ({ kind: "user" as const, text: `message ${i + 1}` })),
+			}));
+			await delay(30);
+			await h.write(CTRL_T);
+			await h.write(PAGE_UP);
+			const range = /Conversation (\d+-\d+) of 30/.exec(h.frame())?.[1];
+			expect(range).toBeDefined();
+			expect(h.frame()).toContain("scrolled");
+
+			h.store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user", text: "arrived later" }] }));
+			await delay(30);
+			// The same window, now with one arrival reported below it.
+			expect(h.frame()).toContain(`Conversation ${range}`);
+			expect(h.frame()).toContain("1 new");
+			expect(h.frame()).not.toContain("arrived later");
+
+			// Pages to the tail, where following resumes over the new entry.
+			for (let press = 0; press < 4 && h.frame().includes("scrolled"); press++) await h.write(PAGE_DOWN);
+			expect(h.frame()).not.toContain("scrolled");
+			expect(h.frame()).toContain("arrived later");
+			h.finish();
+		});
+	}, 20_000);
+
+	// Sending is an instruction to look at the newest thing: the reply. A pane
+	// left scrolled back would hide the message just written and the answer to it.
+	test("sending a message returns a scrolled pane to the tail", async () => {
+		await withTerminalSize(100, 24, async () => {
+			const h = replSetup();
+			h.store.set((s) => ({
+				...s,
+				entries: Array.from({ length: 30 }, (_, i) => ({ kind: "user" as const, text: `message ${i + 1}` })),
+			}));
+			await delay(30);
+			await h.write(CTRL_T);
+			await h.write(PAGE_UP);
+			expect(h.frame()).toContain("scrolled");
+
+			await h.write("fresh question");
+			await h.write("\r");
+			await waitFor(() => h.asked().includes("fresh question"));
+			await delay(30);
+			expect(h.frame()).not.toContain("scrolled");
+			expect(h.frame()).toContain("fresh question");
+			h.finish();
+		});
+	}, 20_000);
+
 	// The split's rows and an overlay's rows are both charged to one capped frame,
 	// and ink garbles a frame it has to clip (measured — see
 	// `docs/dev/split-pane-design.md`). So the panes stand down while an overlay
