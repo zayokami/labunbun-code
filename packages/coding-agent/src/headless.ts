@@ -749,7 +749,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// the gated loader above, never re-read here. No output style and no
 		// language line: a subagent's output is a report to its parent, so a voice
 		// instruction belongs to the parent.
-		systemPromptFor: (definition) =>
+		systemPromptFor: (definition, workerModel) =>
 			[
 				agentSystemPrompt(definition),
 				buildSubagentContext({
@@ -758,6 +758,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 					isTTY: process.stdout.isTTY ?? false,
 					memory: memory.content,
 					skills: skillsBlock,
+					model: workerModel,
 				}),
 			]
 				.filter(Boolean)
@@ -908,6 +909,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			language: settings.language,
 			outputStyle: resolveOutputStyle(settings.outputStyle, outputStyles.styles)?.content,
 			skills: skillsBlock,
+			model,
 		}),
 		tools: allTools,
 		store,
