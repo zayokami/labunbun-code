@@ -141,7 +141,30 @@ commands, and SHA-256 checksums.
   queues, when it cannot be steered) and Tab queues behind it. It now names
   those meanings while busy and returns to the idle legend when the turn ends.
 
+- **Two working directories no longer share one project key.** The key was the
+  absolute path with every `:`, `/` and `\` folded to `-`, so `/srv/a-b` and
+  `/srv/a/b` named one directory: sessions, project trust, MCP approvals, costs
+  and tool output all landed in the same store. The key now percent-escapes
+  those characters along with `%` itself, which is reversible and therefore
+  distinct for every path. A session listed under the old key is moved to the
+  new one when the `cwd` in its header matches, and a cost ledger under the old
+  key is read once — but project trust and MCP approvals are not carried over:
+  the old name cannot say which project granted them, so they are asked for once
+  more rather than widening a grant to a neighbour.
+
 ### Fixed
+
+- **A deny or ask rule sees the command the shell would run.** Quoting,
+  backslash escapes and runs of whitespace were invisible to the matcher — `git
+  pu"sh" origin main` did not match `git push *` — and a command substitution
+  inside an allowed command inherited the allow. Deny and ask now match the line
+  as written and normalized, and recurse into nested scripts; allow still has to
+  match the whole line, and refuses a line whose substitution it cannot read.
+
+- **A file rule reaches the shell's other readers and writers.** A `Read(...)`
+  deny covered the Read tool but not `grep`, `rg`, `sed`, `awk`, `dd if=`, `mv`
+  or `tar`, which open the same path from Bash. Their path operands are now
+  checked too.
 
 - **A sign-in that cannot reach the session's model says so.** `/login chatgpt`
   (or `gemini`, or the bare Claude form) on a session still on the default
