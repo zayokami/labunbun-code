@@ -149,9 +149,12 @@ export class CostTracker {
 	#session: CostState = emptyCostState();
 	#path: string | null = null;
 
-	constructor(cwd?: string) {
+	constructor(cwd?: string, home: string = homedir()) {
 		if (cwd) {
-			const root = join(homedir(), ".labunbun", "projects");
+			// `home` is a parameter for the reason the rest of the package takes one:
+			// a test can name a temp directory, and a host that moves the user's home
+			// moves the ledger with it. A call in the body would ignore both.
+			const root = join(home, ".labunbun", "projects");
 			this.#path = join(root, sanitizeCwd(cwd), "costs.json");
 			// A ledger written before the project key became injective sits under the
 			// old, shared name. Read it when the new name has nothing, so `/cost` does

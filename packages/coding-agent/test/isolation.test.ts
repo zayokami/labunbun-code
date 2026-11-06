@@ -143,14 +143,16 @@ describe("test suite isolation", () => {
 		expect(offenders, "pass a temp home in the options of writeToolOutput/pruneToolOutput").toEqual([]);
 	});
 
-	// `new CostTracker(cwd)` resolves homedir() in its constructor, so it needs
-	// the env override rather than an argument.
-	test("every test constructing a cost tracker with a cwd also overrides HOME", () => {
-		const offenders = FILES.filter(({ source }) => {
-			const body = code(source);
-			return /new CostTracker\(\s*[^)\s]/.test(body) && !body.includes("process.env.HOME");
-		}).map((f) => f.name);
-		expect(offenders, "set process.env.HOME to a temp dir around CostTracker(cwd)").toEqual([]);
+	// `new CostTracker(cwd, home)` names the store's root; the second argument is
+	// the home override. An env override cannot stand in for it: on POSIX Bun
+	// reads HOME once at startup, so a test that sets process.env.HOME still
+	// writes into the operator's real home. A call with no cwd persists nothing
+	// and may stay one-argument.
+	test("every test constructing a cost tracker with a cwd also names a home", () => {
+		const offenders = FILES.filter(({ source }) =>
+			callArguments(code(source), "CostTracker").some((args) => argumentCount(args) === 1),
+		).map((f) => f.name);
+		expect(offenders, "pass a temp home as the second argument to CostTracker").toEqual([]);
 	});
 
 	// `runDoctorChecks(settings, cwd)` probes ~/.labunbun/projects to see whether

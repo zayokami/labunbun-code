@@ -297,28 +297,18 @@ describe("CostTracker", () => {
 	});
 
 	test("persists and reloads per-project state", () => {
-		// HOME decides where costs.json lands, and CostTracker reads it in its
-		// constructor. Without the override the suite writes into the real
-		// ~/.labunbun/projects/ and leaves a directory behind on every run.
+		// The second argument decides where costs.json lands. Omitting it writes
+		// into the real ~/.labunbun/projects/ and leaves a directory behind on
+		// every run.
 		const home = mkdtempSync(join(tmpdir(), "lbb-cost-home-"));
 		const dir = mkdtempSync(join(tmpdir(), "lbb-cost-"));
-		const previousHome = process.env.HOME;
-		const previousProfile = process.env.USERPROFILE;
-		process.env.HOME = home;
-		process.env.USERPROFILE = home;
-		try {
-			const first = new CostTracker(dir);
-			first.recordUsage("faux", "faux-1", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 });
-			first.persist();
 
-			const reloaded = new CostTracker(dir);
-			expect(reloaded.state.modelsUsage["faux/faux-1"].inputTokens).toBe(10);
-		} finally {
-			if (previousHome === undefined) delete process.env.HOME;
-			else process.env.HOME = previousHome;
-			if (previousProfile === undefined) delete process.env.USERPROFILE;
-			else process.env.USERPROFILE = previousProfile;
-		}
+		const first = new CostTracker(dir, home);
+		first.recordUsage("faux", "faux-1", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 });
+		first.persist();
+
+		const reloaded = new CostTracker(dir, home);
+		expect(reloaded.state.modelsUsage["faux/faux-1"].inputTokens).toBe(10);
 	});
 });
 

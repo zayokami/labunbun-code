@@ -318,44 +318,23 @@ describe("CostTracker persistence", () => {
 	test("persists to the project directory and reloads on the next tracker", () => {
 		const home = mkdtempSync(join(tmpdir(), "lbb-cost-home-"));
 		const cwd = mkdtempSync(join(tmpdir(), "lbb-cost-cwd-"));
-		const previous = process.env.HOME;
-		const previousProfile = process.env.USERPROFILE;
-		process.env.HOME = home;
-		process.env.USERPROFILE = home;
-		try {
-			const first = new CostTracker(cwd);
-			first.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1000, output: 2000, cacheRead: 30 }), 500);
-			first.persist();
 
-			const second = new CostTracker(cwd);
-			expect(second.state.modelsUsage["anthropic/claude-sonnet-5"]).toEqual(
-				first.state.modelsUsage["anthropic/claude-sonnet-5"],
-			);
-			expect(second.state.totalDurationMs).toBe(500);
-			expect(second.state.totalCostUSD).toBeCloseTo(first.state.totalCostUSD, 10);
-		} finally {
-			if (previous === undefined) delete process.env.HOME;
-			else process.env.HOME = previous;
-			if (previousProfile === undefined) delete process.env.USERPROFILE;
-			else process.env.USERPROFILE = previousProfile;
-		}
+		const first = new CostTracker(cwd, home);
+		first.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1000, output: 2000, cacheRead: 30 }), 500);
+		first.persist();
+
+		const second = new CostTracker(cwd, home);
+		expect(second.state.modelsUsage["anthropic/claude-sonnet-5"]).toEqual(
+			first.state.modelsUsage["anthropic/claude-sonnet-5"],
+		);
+		expect(second.state.totalDurationMs).toBe(500);
+		expect(second.state.totalCostUSD).toBeCloseTo(first.state.totalCostUSD, 10);
 	});
 
 	test("a fresh project starts from zero", () => {
 		const home = mkdtempSync(join(tmpdir(), "lbb-cost-home2-"));
 		const cwd = mkdtempSync(join(tmpdir(), "lbb-cost-cwd2-"));
-		const previous = process.env.HOME;
-		const previousProfile = process.env.USERPROFILE;
-		process.env.HOME = home;
-		process.env.USERPROFILE = home;
-		try {
-			expect(new CostTracker(cwd).state).toEqual(emptyCostState());
-		} finally {
-			if (previous === undefined) delete process.env.HOME;
-			else process.env.HOME = previous;
-			if (previousProfile === undefined) delete process.env.USERPROFILE;
-			else process.env.USERPROFILE = previousProfile;
-		}
+		expect(new CostTracker(cwd, home).state).toEqual(emptyCostState());
 	});
 
 	test("a ledger under the old project name is read once, then filed under the new one", () => {
@@ -365,23 +344,12 @@ describe("CostTracker persistence", () => {
 		const legacyPath = join(home, ".labunbun", "projects", legacyCwdSlug(cwd), "costs.json");
 		mkdirSync(dirname(legacyPath), { recursive: true });
 		writeFileSync(legacyPath, JSON.stringify({ totalCostUSD: 3.5, totalDurationMs: 10, modelsUsage: {} }));
-		const previous = process.env.HOME;
-		const previousProfile = process.env.USERPROFILE;
-		process.env.HOME = home;
-		process.env.USERPROFILE = home;
-		try {
-			const tracker = new CostTracker(cwd);
-			expect(tracker.state.totalCostUSD).toBe(3.5);
-			tracker.persist();
-			// The next run reads the new file, not the shared old one.
-			expect(existsSync(join(home, ".labunbun", "projects", sanitizeCwd(cwd), "costs.json"))).toBe(true);
-			expect(new CostTracker(cwd).state.totalCostUSD).toBe(3.5);
-		} finally {
-			if (previous === undefined) delete process.env.HOME;
-			else process.env.HOME = previous;
-			if (previousProfile === undefined) delete process.env.USERPROFILE;
-			else process.env.USERPROFILE = previousProfile;
-		}
+		const tracker = new CostTracker(cwd, home);
+		expect(tracker.state.totalCostUSD).toBe(3.5);
+		tracker.persist();
+		// The next run reads the new file, not the shared old one.
+		expect(existsSync(join(home, ".labunbun", "projects", sanitizeCwd(cwd), "costs.json"))).toBe(true);
+		expect(new CostTracker(cwd, home).state.totalCostUSD).toBe(3.5);
 	});
 });
 

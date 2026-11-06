@@ -1293,7 +1293,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * construction reads nothing but cwd, and the session seeding happens below,
 	 * where the store knows what the conversation holds.
 	 */
-	const costTracker = new CostTracker(cwd);
+	const costTracker = new CostTracker(cwd, home);
 	const [taskTool, sendMessageTool, taskStopTool, subagentControl] = createSubagentTools({
 		streamFn,
 		// Read through the session, not captured: /model swaps the model and
