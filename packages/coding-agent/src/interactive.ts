@@ -115,6 +115,7 @@ import {
 	resolveBuiltInTheme,
 	resolveEditingMode,
 	ruleSpecifierFor,
+	type UiStartupNote,
 } from "@labunbun/tui";
 import { activitySummaryLine } from "./activity-report.ts";
 import { createAskUserQuestionTool } from "./ask-user.ts";
@@ -444,6 +445,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * fact, and the same line twice would read as two.
 	 */
 	const startupNotices: string[] = [];
+	/**
+	 * Notes found before the mount, held for the same reason. They are not
+	 * transcript lines even after it: they belong to the greeting's one-line
+	 * summary, and their sentences live in `/doctor`.
+	 */
+	const pendingStartupNotes: UiStartupNote[] = [];
 
 	// ---- first-run setup (before settings load, so it can create them) ----
 	// `home` is threaded through both halves: the wizard reads and writes the
@@ -816,6 +823,35 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		if (printedNotices.has(line)) return;
 		printedNotices.add(line);
 		pushInfo(handle, line);
+	}
+
+	/**
+	 * One startup fact that belongs in the greeting's summary rather than in a
+	 * row of its own.
+	 *
+	 * These are the ambient notices — a controller that is not attached, a skill
+	 * folder that failed validation, a catalog refresh. Printed raw between the
+	 * greeting and the prompt they read as a broken start, and they are also the
+	 * rows that pushed the greeting up on the machines with the most to say.
+	 * `label` is what the summary names; `text` is the full sentence `/doctor`
+	 * answers with. Deduped through the same set as `sayNotice`: a fact reported
+	 * twice is still one fact.
+	 */
+	function noteNotice(label: string, line: string): void {
+		if (!handle) {
+			pendingStartupNotes.push({ label, text: line });
+			return;
+		}
+		if (printedNotices.has(line)) return;
+		printedNotices.add(line);
+		// The summary belongs to the greeting. A late note — a catalog refresh
+		// that took longer than the user's first message — has no summary to join,
+		// so it is said as a row rather than folded out of sight.
+		if (greetingHasGone(handle)) {
+			pushInfo(handle, line);
+			return;
+		}
+		pushStartupNote(handle, { label, text: line });
 	}
 
 	/** Open a registry command's run; the REPL routes Esc here while it lasts. */
@@ -2455,7 +2491,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	}
 	// Held-back skill folders, one line each: the same "a definition that was not
 	// loaded looks identical from the prompt" reason as the withheld tier above.
-	for (const note of skillNotes) sayNotice(`Skill not loaded: ${note}`);
+	for (const note of skillNotes) noteNotice("skill not loaded", `Skill not loaded: ${note}`);
 
 	// MCP config that could not be read, said at startup for the same reason: a
 	// `.mcp.json` with a typo used to read as "no servers configured", and the
@@ -2467,6 +2503,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// warning from a session restored into. Flushed through `sayNotice`, so a
 	// line that survived two readers is shown once.
 	for (const line of startupNotices.splice(0)) sayNotice(line);
+	for (const note of pendingStartupNotes.splice(0)) noteNotice(note.label, note.text);
 
 	// A model the machine cannot run fails its first prompt — and that failure
 	// is where the story ends unless someone says so first. One line, before
@@ -2489,10 +2526,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// is a status, not an exception.
 	if (padWanted) {
 		void pad.setEnabled(true).then(() => {
-			const notice = padStartupNotice(pad.service.status());
+			const status = pad.service.status();
+			const notice = padStartupNotice(status);
 			// Silence when it worked: the pad buzzes to say hello, and an unasked-for
-			// line on every startup is how a feature becomes noise.
-			if (notice) pushInfo(handle, notice);
+			// line on every startup is how a feature becomes noise. When there is one,
+			// the same distinction the notice draws — a search that retries itself,
+			// against a pad that will not open — is what the summary names.
+			if (notice) noteNotice(status.phase === "searching" ? "gamepad idle" : "gamepad unavailable", notice);
 		});
 	} else {
 		// The flag is the run's answer even when it is "no": a session started with
@@ -2650,7 +2690,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		void catalogRefresh
 			.then((refresh) => {
 				const notice = formatCatalogNotice(refresh);
-				if (notice) pushInfo(handle, notice);
+				if (notice) noteNotice("catalog refreshed", notice);
 			})
 			.catch((error: unknown) => {
 				// Fire-and-forget, but not silent: the refresh promises not to throw,
@@ -4824,7 +4864,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					ctx.sandboxBackend,
 					ctx.appContainerReason,
 				);
-				pushInfo(ctx.handle, formatDoctorReport(checks));
+				// The startup facts the greeting folded away are part of what this
+				// report is for: the summary named their subjects, and this is where
+				// the sentences are kept.
+				const notes = ctx.handle?.store.get().startupNotes ?? [];
+				pushInfo(
+					ctx.handle,
+					formatDoctorReport(
+						checks,
+						notes.map((note) => note.text),
+					),
+				);
 			})();
 			return true;
 		}
@@ -5586,6 +5636,30 @@ export interface BackgroundShellAccess {
 
 function pushInfo(handle: ReplAppHandle | null, text: string): void {
 	handle?.store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text }] }));
+}
+
+/**
+ * Fold a startup note into the greeting's summary.
+ *
+ * The slice is read with a fallback because a state fed to this by a harness is
+ * not always the whole model — a fake handle may carry only `entries`, and a
+ * notice arriving there is not a reason for the run to throw. The real store
+ * always has the field.
+ */
+function pushStartupNote(handle: ReplAppHandle, note: UiStartupNote): void {
+	handle.store.set((s) => ({ ...s, startupNotes: [...(s.startupNotes ?? []), note] }));
+}
+
+/**
+ * Whether the greeting has already gone.
+ *
+ * Info rows do not count, the same reading the REPL makes when it decides to
+ * draw the welcome. Read through the store so a fake handle without a `get`
+ * (a harness that only fakes `set`) answers "not yet" rather than throwing.
+ */
+function greetingHasGone(handle: ReplAppHandle): boolean {
+	const entries = handle.store.get?.().entries;
+	return Array.isArray(entries) && entries.some((entry) => entry.kind !== "info");
 }
 
 /**

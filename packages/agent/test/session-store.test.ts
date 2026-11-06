@@ -9,11 +9,11 @@
  * damaged line hiding every message written before it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
-import { newEntryId, SessionReadError, SessionStore } from "../src/session-store.ts";
+import { legacyCwdSlug, newEntryId, SessionReadError, SessionStore, sanitizeCwd } from "../src/session-store.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -369,6 +369,69 @@ describe("where an append writes", () => {
 		// The file went with the directory, so only the new line is readable —
 		// what matters is that the append did not fail and did not go nowhere.
 		expect(texts(SessionStore.load(store.path).messages())).toEqual(["second"]);
+	});
+});
+
+describe("the project key", () => {
+	const PROJECTS = tmpDir("lbb-store-projects-");
+	// The two spellings the old key folded together: one has `-` where the other
+	// has a separator. Neither has to exist for the key to be computed.
+	const a = join(PROJECTS, "a-b");
+	const b = join(PROJECTS, "a", "b");
+
+	test("the key names one project, and the old spelling is the reason that matters", () => {
+		expect(sanitizeCwd(a)).not.toBe(sanitizeCwd(b));
+		// The defect, kept visible: this is what made `/a-b` and `/a/b` one
+		// directory, and one trust ledger, in every build before the fix.
+		expect(legacyCwdSlug(a)).toBe(legacyCwdSlug(b));
+	});
+
+	test("the key is reversible, so a literal escape cannot spell another path", () => {
+		// The `%` in the input is escaped first, so the `2F` after it stays text.
+		expect(sanitizeCwd("/srv/a%2Fb")).toBe("%2Fsrv%2Fa%252Fb");
+		expect(sanitizeCwd("/srv/a%2Fb")).not.toBe(sanitizeCwd("/srv/a/b"));
+		// Windows and POSIX spellings of the same path are different strings, and
+		// different projects on this key — the key never guesses that they match.
+		expect(sanitizeCwd("C:\\work\\a")).toBe("C%3A%5Cwork%5Ca");
+	});
+
+	/** A session file as the pre-fix build wrote it: header first, then one message. */
+	function writeLegacySession(dir: string, sessionId: string, cwd: string): void {
+		mkdirSync(dir, { recursive: true });
+		const header = { id: `${sessionId}-h`, parentId: null, type: "header", version: 1, sessionId, cwd, createdAt: 0 };
+		const message = {
+			id: `${sessionId}-m`,
+			parentId: `${sessionId}-h`,
+			type: "message",
+			timestamp: 1,
+			message: user(sessionId),
+		};
+		writeFileSync(join(dir, `${sessionId}.jsonl`), `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`, "utf8");
+	}
+
+	test("a pre-fix session is listed by the project its header names, and only by that one", () => {
+		const home = tmpDir("lbb-store-home-");
+		const legacyDir = join(home, ".labunbun", "projects", legacyCwdSlug(a));
+		// Both files live in the one directory the old key gave them.
+		writeLegacySession(legacyDir, "session-a", a);
+		writeLegacySession(legacyDir, "session-b", b);
+		// This one cannot be attributed: a header that never landed, or a session
+		// damaged beyond reading, names no project and is shown to neither.
+		writeFileSync(join(legacyDir, "orphan.jsonl"), '{"id":"torn"\n', "utf8");
+
+		expect(SessionStore.listSessions(a, home).map((row) => row.sessionId)).toEqual(["session-a"]);
+		// The move is a rename, not a copy: the other project's directory must not
+		// still hold a readable copy of this one's transcript.
+		const currentA = join(home, ".labunbun", "projects", sanitizeCwd(a), "session-a.jsonl");
+		expect(existsSync(currentA)).toBe(true);
+		expect(existsSync(join(legacyDir, "session-a.jsonl"))).toBe(false);
+		// And the other project's file was not carried along with it.
+		expect(existsSync(join(legacyDir, "session-b.jsonl"))).toBe(true);
+
+		// The second run has nothing to move and does not duplicate the row.
+		expect(SessionStore.listSessions(a, home).map((row) => row.sessionId)).toEqual(["session-a"]);
+		expect(SessionStore.listSessions(b, home).map((row) => row.sessionId)).toEqual(["session-b"]);
+		expect(existsSync(join(home, ".labunbun", "projects", sanitizeCwd(b), "session-b.jsonl"))).toBe(true);
 	});
 });
 

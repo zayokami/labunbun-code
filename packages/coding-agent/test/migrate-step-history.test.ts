@@ -1488,13 +1488,18 @@ function projectDir(home: string, name = "demo"): string {
 	return dir;
 }
 
+/** The project directory name, written out so a change to the key fails here (`sanitizeCwd`). */
+function projectSlug(cwd: string): string {
+	return cwd.replace(/%/g, "%25").replace(/:/g, "%3A").replace(/\//g, "%2F").replace(/\\/g, "%5C");
+}
+
 /** The session file a converted Step session is written to, spelled out. */
 function expectedHistoryPath(project: string, home: string): string {
 	return join(
 		home,
 		".labunbun",
 		"projects",
-		project.replace(/[:\\/]/g, "-"),
+		projectSlug(project),
 		`${importedSessionId("step-code", SESSION_ID)}.jsonl`,
 	);
 }
@@ -1625,7 +1630,7 @@ describe("the Step source in a migration run", () => {
 			const result = runMigration({ home, from: "step-code", only: ["history"], historyScope: "all", apply: true });
 			expect(result.error).toBeUndefined();
 			expect(historyWrites(result, home)).toEqual([
-				`~/.labunbun/projects/${project.replace(/[:\\/]/g, "-")}/${importedSessionId("step-code", SESSION_ID)}.jsonl`,
+				`~/.labunbun/projects/${projectSlug(project)}/${importedSessionId("step-code", SESSION_ID)}.jsonl`,
 			]);
 			const path = result.plan.writes.find((write) => write.kind === "history")?.path ?? "";
 			expect(path).toBe(expectedHistoryPath(project, home));

@@ -93,6 +93,17 @@ commands, and SHA-256 checksums.
   nothing rather than promising a grant the engine would not honour. The legend
   names `y` and `a`; Esc already stands for deny.
 
+- **The first screen folds its startup notices into one dim line.** Notices
+  that used to print raw between the greeting and the prompt — a controller
+  that is not attached, skill folders that failed validation, a catalog refresh
+  — are summarised under the greeting (`ℹ gamepad idle · skill not loaded ·
+  /doctor for details`). None of them needs an answer before the first prompt,
+  and unboxed between the two things that do, they read as a broken start.
+  `/doctor` prints the full sentences after its health rows. A notice that
+  carries something to act on still gets its own transcript row, and one that
+  arrives after the conversation has started is said there instead, because
+  there is no greeting left to fold it into.
+
 ### Changed
 
 - **Interactive mode says why it needs a terminal.** When stdin is not a TTY

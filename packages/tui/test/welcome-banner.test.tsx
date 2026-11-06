@@ -13,6 +13,7 @@ import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import type React from "react";
 import { REPL } from "../src/components/REPL.tsx";
+import { startupNotesSummary } from "../src/components/StartupNotes.tsx";
 import { fitPath, TIPS, WelcomeBanner, welcomeLayout } from "../src/components/WelcomeBanner.tsx";
 import { createStore } from "../src/store.ts";
 import { DARK_THEME, type Theme, ThemeContext } from "../src/theme.ts";
@@ -160,6 +161,24 @@ describe("the welcome panel", () => {
 	});
 });
 
+describe("the folded startup notes", () => {
+	// The summary is the whole of what the first screen says about them: the
+	// subjects, once each, and where the sentences are.
+	test("names each subject once and points at /doctor", () => {
+		const summary = startupNotesSummary([
+			{ label: "gamepad idle" },
+			{ label: "skill not loaded" },
+			{ label: "skill not loaded" },
+		]);
+		expect(summary).toBe("ℹ gamepad idle · skill not loaded · /doctor for details");
+	});
+
+	test("counts the subjects it cannot name", () => {
+		const summary = startupNotesSummary([{ label: "a" }, { label: "b" }, { label: "c" }, { label: "d" }]);
+		expect(summary).toBe("ℹ a · b · c · +1 more · /doctor for details");
+	});
+});
+
 describe("the REPL's first frame", () => {
 	function setup(state: Partial<UiState> = {}) {
 		const faux = fauxProvider([{ text: "n/a" }]);
@@ -199,6 +218,42 @@ describe("the REPL's first frame", () => {
 		await new Promise((r) => setTimeout(r, 40));
 		expect(h.frame()).toContain("Welcome to LaBunbun Code");
 		expect(h.frame()).toContain("no controller attached");
+		h.view.unmount();
+	});
+
+	// The ambient notices — no controller, a skill that failed validation, a
+	// catalog refresh — used to be raw rows here too. They are one dim line now:
+	// three unboxed diagnostics between the greeting and the prompt read as a
+	// broken start, not as a report.
+	test("folds the startup notes into one line under the greeting", async () => {
+		const h = setup({
+			startupNotes: [
+				{ label: "gamepad idle", text: "Gamepad: no controller attached — looking again every few seconds" },
+				{ label: "skill not loaded", text: 'Skill not loaded: skill "x" must match the directory name' },
+				{ label: "catalog refreshed", text: "Model catalog refreshed: 1 added." },
+			],
+		});
+		await new Promise((r) => setTimeout(r, 40));
+		const frame = h.frame();
+		expect(frame).toContain("gamepad idle");
+		expect(frame).toContain("skill not loaded");
+		expect(frame).toContain("catalog refreshed");
+		expect(frame).toContain("/doctor for details");
+		// The full sentences are `/doctor`'s, not the first screen's.
+		expect(frame).not.toContain("no controller attached");
+		expect(frame).not.toContain("Model catalog refreshed");
+		h.view.unmount();
+	});
+
+	// The summary is part of the greeting, not a row of its own: once the
+	// conversation starts the same facts belong to `/doctor`.
+	test("the folded summary goes with the greeting", async () => {
+		const h = setup({
+			entries: [{ kind: "user", text: "hello" }],
+			startupNotes: [{ label: "gamepad idle", text: "Gamepad: no controller attached" }],
+		});
+		await new Promise((r) => setTimeout(r, 40));
+		expect(h.frame()).not.toContain("gamepad idle");
 		h.view.unmount();
 	});
 

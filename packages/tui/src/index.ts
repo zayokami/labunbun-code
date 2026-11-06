@@ -1,4 +1,4 @@
-export const TUI_PACKAGE_VERSION = "0.1.0.3";
+export const TUI_PACKAGE_VERSION = "0.1.0.4";
 
 export {
 	mountRepl,
@@ -142,5 +142,6 @@ export {
 	toolPreview,
 	type UiBackgroundShell,
 	type UiEntry,
+	type UiStartupNote,
 	type UiState,
 } from "./ui-state.ts";

@@ -36,6 +36,7 @@ import {
 	workspaceFits,
 	workspaceHeight,
 } from "./SplitWorkspace.tsx";
+import { StartupNotesLine, startupNotesSummary } from "./StartupNotes.tsx";
 import { StatusCard } from "./StatusCard.tsx";
 import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
@@ -232,6 +233,7 @@ export function REPL({
 	pad,
 }: ReplProps) {
 	const entries = useStore(store, (s) => s.entries);
+	const startupNotes = useStore(store, (s) => s.startupNotes);
 	const streamingText = useStore(store, (s) => s.streamingText);
 	const thinkingText = useStore(store, (s) => s.thinkingText);
 	const statusPhase = useStore(store, (s) => s.statusPhase);
@@ -1045,11 +1047,13 @@ export function REPL({
 	// screen that is not doing anything. Read here, after every piece of state
 	// it asks about has been declared.
 	//
-	// Info rows are not the conversation. A session opens with a few of them —
-	// a controller that is not attached, a skill that failed validation, a
-	// catalog refresh — and counting those as "already talking" hid the panel on
-	// nearly every real machine. They stay on screen under it; only a row
-	// somebody authored or received, or a failure, ends the greeting.
+	// Info rows are not the conversation. A session can open with a few of them
+	// — a missing credential, an unreadable memory file, withheld definitions —
+	// and counting those as "already talking" hid the panel on nearly every real
+	// machine. They stay on screen under it; only a row somebody authored or
+	// received, or a failure, ends the greeting. The ambient notices — no
+	// controller, a skill that failed validation, a catalog refresh — are not
+	// rows at all; they are the folded summary drawn below the panel.
 	const conversationStarted = entries.some((entry) => entry.kind !== "info");
 	const showWelcome =
 		!conversationStarted &&
@@ -1068,8 +1072,14 @@ export function REPL({
 		!statusCard;
 	// What the notices under the panel cost the terminal. Only info rows can be
 	// here while the greeting shows, each one line plus the run's trailing gap,
-	// and a long notice wraps at the frame width. Handed to the banner so its
-	// size ladder spends the room that is actually left.
+	// and a long notice wraps at the frame width. The folded startup notes cost
+	// one summary line — however many notices it speaks for — plus its own gap.
+	// Handed to the banner so its size ladder spends the room that is actually
+	// left.
+	const startupNotesRows =
+		startupNotes.length === 0
+			? 0
+			: Math.max(1, Math.ceil(startupNotesSummary(startupNotes).length / Math.max(1, windowColumns ?? 80))) + 1;
 	const welcomeNoticeRows = !showWelcome
 		? 0
 		: entries.reduce(
@@ -1077,7 +1087,9 @@ export function REPL({
 					sum +
 					Math.max(1, Math.ceil((entry.kind === "info" ? entry.text.length : 0) / Math.max(1, windowColumns ?? 80))),
 				0,
-			) + (entries.length > 0 ? 1 : 0);
+			) +
+			(entries.length > 0 ? 1 : 0) +
+			startupNotesRows;
 
 	return (
 		<Box
@@ -1104,14 +1116,20 @@ export function REPL({
 					actionRequired={awaitingUser}
 				/>
 				{showWelcome ? (
-					<WelcomeBanner
-						columns={windowColumns ?? 80}
-						rows={windowRows ?? 24}
-						noticeRows={welcomeNoticeRows}
-						version={version}
-						cwd={cwd}
-						modelName={modelName}
-					/>
+					<>
+						<WelcomeBanner
+							columns={windowColumns ?? 80}
+							rows={windowRows ?? 24}
+							noticeRows={welcomeNoticeRows}
+							version={version}
+							cwd={cwd}
+							modelName={modelName}
+						/>
+						{/* One dim line in place of the notices themselves. It goes
+						    with the greeting: past the first screen the same facts are
+						    `/doctor`'s, not the transcript's. */}
+						<StartupNotesLine notes={startupNotes} />
+					</>
 				) : null}
 				{/* The split view replaces the live transcript with the panes. The
 				    list itself stays mounted at zero height so its Static index

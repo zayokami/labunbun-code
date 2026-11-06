@@ -256,20 +256,21 @@ function textOf(message: AgentMessage): string {
 }
 
 /**
- * The session file a converted session is written to.
- *
- * The shape is `sessionFilePath`'s: `<home>/.labunbun/projects/<sanitized
- * cwd>/<id>.jsonl`, where the directory is the working directory with every
- * separator and drive colon folded to `-` (`sanitizeCwd`). Written out here
- * rather than called, so a change to either half is a failing test and not a
- * test that follows the change.
+ * The project directory name, written out rather than imported, so a change to
+ * the key (`sanitizeCwd`) is a failing test and not a test that follows it.
+ * The shape is injective: `%` escaped first, then `:`, `/` and `\`.
  */
+function projectSlug(cwd: string): string {
+	return cwd.replace(/%/g, "%25").replace(/:/g, "%3A").replace(/\//g, "%2F").replace(/\\/g, "%5C");
+}
+
+/** The session file a converted session is written to, as `sessionFilePath` builds it. */
 function expectedHistoryPath(project: string, sourceId: string, home: string): string {
 	return join(
 		home,
 		".labunbun",
 		"projects",
-		project.replace(/[:\\/]/g, "-"),
+		projectSlug(project),
 		`${importedSessionId("minimax-code", sourceId)}.jsonl`,
 	);
 }
@@ -451,7 +452,7 @@ describe("migrate: minimax session conversion", () => {
 		// The target is the project the session ran in, named after the source session
 		// so a second run is a no-op rather than a second copy of the conversation.
 		expect(historyWrites(result, home)).toEqual([
-			`~/.labunbun/projects/${project.replace(/[:\\/]/g, "-")}/${importedSessionId("minimax-code", "session-1")}.jsonl`,
+			`~/.labunbun/projects/${projectSlug(project)}/${importedSessionId("minimax-code", "session-1")}.jsonl`,
 		]);
 		const path = result.plan.writes.find((write) => write.kind === "history")?.path ?? "";
 		expect(path).toBe(expectedHistoryPath(project, "session-1", home));

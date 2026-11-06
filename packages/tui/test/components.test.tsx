@@ -824,6 +824,32 @@ describe("PermissionDialog", () => {
 		unmount();
 	});
 
+	test("a modified key is not an answer", async () => {
+		// Ink hands Ctrl+Y and Alt+Y to the handler with input "y"; a key meant
+		// for the terminal or the shell must not grant the call, and the same
+		// guard keeps a stray Ctrl/Alt+A from writing a standing rule.
+		const decisions: Array<[boolean, boolean, boolean | undefined]> = [];
+		const { stdin, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Bash"
+					inputPreview="git status"
+					options={permissionOptions("Bash", { command: "git status" }, process.cwd())}
+					onResolve={(allow, always, ask) => decisions.push([allow, always, ask])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("\u0019"); // Ctrl+Y
+		await delay(30);
+		stdin.write("\u001by"); // Alt+Y
+		await delay(30);
+		stdin.write("\u0001"); // Ctrl+A (expands the preview, answers nothing)
+		await delay(30);
+		expect(decisions).toEqual([]);
+		unmount();
+	});
+
 	test("the fourth answer opens a field instead of denying on the spot", async () => {
 		// The row promises to tell the model what to do differently; a denial that
 		// resolved before anything was typed would leave that promise unkept.

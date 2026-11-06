@@ -1,4 +1,4 @@
-export const AGENT_PACKAGE_VERSION = "0.1.0.3";
+export const AGENT_PACKAGE_VERSION = "0.1.0.4";
 
 // Activity heatmap and streaks, aggregated from the session files on disk
 export {
@@ -126,6 +126,7 @@ export { AgentSession, type AgentSessionOptions } from "./session.ts";
 export {
 	type CompactionRecord,
 	type CompactionTrigger,
+	legacyCwdSlug,
 	newEntryId,
 	type PreservedFile,
 	parseSessionLine,

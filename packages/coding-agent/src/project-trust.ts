@@ -44,6 +44,15 @@ export type DefinitionKind = "agents" | "skills" | "memory" | "styles";
 /** Fixed order, so repeated approvals write the same bytes. */
 const KINDS: DefinitionKind[] = ["agents", "skills", "memory", "styles"];
 
+/**
+ * The trust ledger, keyed by the project's directory name.
+ *
+ * The name became injective (`sanitizeCwd`), so a ledger written under the old
+ * shared name is no longer found. That is deliberate: the old name cannot say
+ * which of two colliding directories approved the definitions, and re-asking
+ * once is the only answer that is true for both. The next approval writes a
+ * ledger that names this project alone.
+ */
 function trustStorePath(cwd: string, home: string): string {
 	return join(home, ".labunbun", "projects", sanitizeCwd(cwd), "trusted-definitions.json");
 }

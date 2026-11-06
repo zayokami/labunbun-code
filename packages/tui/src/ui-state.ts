@@ -58,6 +58,19 @@ export type UiEntry =
 	| { kind: "error"; text: string }
 	| { kind: "info"; text: string };
 
+/**
+ * A startup fact the first screen folds into one line.
+ *
+ * `label` is the fragment the welcome's summary draws (`gamepad idle`); `text`
+ * is the sentence itself, which `/doctor` prints. Two fields rather than one
+ * because the summary has to stay short and a detail the user goes looking for
+ * has to stay exact.
+ */
+export interface UiStartupNote {
+	label: string;
+	text: string;
+}
+
 export interface PendingTool {
 	callId: string;
 	toolName: string;
@@ -156,6 +169,21 @@ export interface UiRetry {
 
 export interface UiState {
 	entries: UiEntry[];
+	/**
+	 * Startup facts that are not rows of their own.
+	 *
+	 * The first screen is a greeting and a prompt. Three diagnostics between them
+	 * — a controller that is not attached, a skill folder that failed its
+	 * validation, a catalog refresh — read as a start that went wrong rather
+	 * than as a report, and they pushed the greeting up. Folded here instead: the
+	 * welcome draws one dim summary and `/doctor` prints the lines.
+	 *
+	 * Not transcript entries on purpose. A folded notice should not reappear in
+	 * the scrollback the moment the conversation starts, which is what hiding an
+	 * entry in the transcript would do. The slice survives `/clear`, the same way
+	 * the environment it describes does.
+	 */
+	startupNotes: UiStartupNote[];
 	streamingText: string;
 	thinkingText: string;
 	pendingTools: PendingTool[];
@@ -448,6 +476,7 @@ export const RESULT_TEXT_CAP = 16_000;
 export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiState {
 	return {
 		entries: [],
+		startupNotes: [],
 		streamingText: "",
 		thinkingText: "",
 		pendingTools: [],

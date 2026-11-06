@@ -161,6 +161,10 @@ export function PlanReviewDialog({ plan, resolve, pad }: PlanReviewDialogState &
 			confirm();
 			return;
 		}
+		// Modifier combinations are not answers. Ink reports Ctrl+Y as input
+		// "y" with `ctrl` set, and Alt+Y as "y" with `meta`; approving a plan
+		// on one of those would be a grant nobody asked for.
+		if (key.ctrl || key.meta || key.super || key.hyper) return;
 		// y/n are shortcuts for the two plain answers, and only here: in the
 		// feedback input they are letters like any other, which is the whole
 		// reason the shortcuts are gated on the option list.

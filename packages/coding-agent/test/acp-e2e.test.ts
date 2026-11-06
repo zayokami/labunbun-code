@@ -447,10 +447,13 @@ describe("the ACP server, end to end", () => {
 				toolCall: { toolCallId: string; status?: string };
 				options: Array<{ kind: string; optionId: string }>;
 			};
-			// The four answers, in the protocol's four kinds.
+			// The REPL's answers, each in the protocol's nearest kind. "Ask me every
+			// time" is a yes-once answer at the protocol level (`allow_once`) with a
+			// standing ask rule behind it; its id is what carries that half back.
 			expect(params.options.map((option) => option.kind)).toEqual([
 				"allow_once",
 				"allow_always",
+				"allow_once",
 				"reject_once",
 				"reject_always",
 			]);

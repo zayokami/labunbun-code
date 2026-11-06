@@ -33,7 +33,9 @@ async function startup(
 		let reason = null;
 		const taskCalls = [];
 		const catalogCalls = [];
-		const entries = [];
+		// The same shape the real store starts from: the catalog notice is folded
+		// into startupNotes rather than pushed as a transcript row.
+		let state = { entries: [], startupNotes: [] };
 		mock.module("@labunbun/ai", () => ({
 			...ai,
 			resolveApiKey: () => "local-test-key",
@@ -56,7 +58,7 @@ async function startup(
 					setTasks(tasks) { taskCalls.push(tasks); }, setContextInfo() {}, setBackgroundShells() {},
 					store: { set(updater) {
 						if (typeof updater !== "function") return;
-						for (const entry of updater({ entries: [] }).entries ?? []) entries.push(entry);
+						state = updater(state);
 					} },
 					waitUntilExit: async () => { reason = await session.prompt("new question"); }
 				};
@@ -64,7 +66,7 @@ async function startup(
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		const exitCode = await runInteractive(${JSON.stringify({ ...options, cwd, theme: "dark" })});
-		console.log(JSON.stringify({ exitCode, mountedMessages, requests, reason, taskCalls, catalogCalls, entries }));
+		console.log(JSON.stringify({ exitCode, mountedMessages, requests, reason, taskCalls, catalogCalls, entries: state.entries, startupNotes: state.startupNotes }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
@@ -88,6 +90,7 @@ async function startup(
 			taskCalls: Array<Array<{ id: string; subject: string; status: string; activeForm?: string }>>;
 			catalogCalls: string[];
 			entries: Array<{ kind: string; text?: string }>;
+			startupNotes: Array<{ label: string; text: string }>;
 		}),
 		stderr,
 	};
@@ -405,7 +408,7 @@ describe("the catalog refresh at startup", () => {
 		expect(result.catalogCalls).toEqual([]);
 	}, 30_000);
 
-	test("what the refresh changed is said out loud, once the transcript can hold it", async () => {
+	test("what the refresh changed is folded into the startup summary", async () => {
 		const { home, cwd } = fixture();
 
 		const result = await startup(
@@ -422,9 +425,11 @@ describe("the catalog refresh at startup", () => {
 		);
 
 		expect(result.exitCode).toBe(0);
-		// The refresh starts before the REPL exists, and `pushInfo` on no handle is
-		// a silent no-op — so the answer has to be held until there is a screen.
-		expect(result.entries.map((entry) => entry.text)).toContainEqual(
+		// The refresh starts before the REPL exists. Its answer is a folded startup
+		// note — the greeting names the subject and `/doctor` prints the sentence —
+		// rather than a transcript row of its own.
+		const note = result.startupNotes.find((entry) => entry.label === "catalog refreshed");
+		expect(note?.text).toBe(
 			"Model catalog refreshed: anthropic/claude-fable-5 not listed by the provider any more — hidden from /model, still usable by name.",
 		);
 	}, 30_000);

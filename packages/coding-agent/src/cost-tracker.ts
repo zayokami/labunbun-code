@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { sanitizeCwd } from "@labunbun/agent";
+import { legacyCwdSlug, sanitizeCwd } from "@labunbun/agent";
 import { type AgentMessage, computeCost, resolveModel, type Usage } from "@labunbun/ai";
 import { ROLE_NAMES, type RoleName } from "./model-roles.ts";
 
@@ -151,8 +151,15 @@ export class CostTracker {
 
 	constructor(cwd?: string) {
 		if (cwd) {
-			this.#path = join(homedir(), ".labunbun", "projects", sanitizeCwd(cwd), "costs.json");
-			this.#state = loadCostState(this.#path);
+			const root = join(homedir(), ".labunbun", "projects");
+			this.#path = join(root, sanitizeCwd(cwd), "costs.json");
+			// A ledger written before the project key became injective sits under the
+			// old, shared name. Read it when the new name has nothing, so `/cost` does
+			// not start at zero after an upgrade; the next persist writes it under the
+			// key that names this project alone. Money is accounting, not a decision,
+			// so the ambiguity of the old name is harmless here.
+			const legacy = join(root, legacyCwdSlug(cwd), "costs.json");
+			this.#state = loadCostState(existsSync(this.#path) || !existsSync(legacy) ? this.#path : legacy);
 		}
 	}
 

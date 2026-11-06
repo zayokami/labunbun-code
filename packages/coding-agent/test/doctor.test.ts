@@ -79,6 +79,23 @@ describe("runDoctorChecks", () => {
 		expect(report).toMatch(/[✓!✗] Runtime:/);
 	});
 
+	// The greeting folds ambient startup notices into one summary line and
+	// points here; this is the half that turns the pointer into the sentences.
+	test("the report carries the startup notices the greeting folded away", () => {
+		const report = formatDoctorReport(
+			[{ name: "Runtime", status: "ok", detail: "Bun 1.4.4" }],
+			["Gamepad: no controller attached — looking again every few seconds", 'Skill not loaded: skill "x"'],
+		);
+		expect(report).toContain("✓ Runtime: Bun 1.4.4");
+		expect(report).toContain("Startup notices (folded into the greeting summary):");
+		expect(report).toContain("· Gamepad: no controller attached — looking again every few seconds");
+		expect(report).toContain('· Skill not loaded: skill "x"');
+	});
+
+	test("without folded notices the report is exactly the rows", () => {
+		expect(formatDoctorReport([{ name: "Runtime", status: "ok", detail: "Bun 1.4.4" }])).toBe("✓ Runtime: Bun 1.4.4");
+	});
+
 	// A sign-in is a credential the environment cannot show; the row used to
 	// call a signed-in machine's Auth a failure. The sign-ins are passed as a
 	// value rather than asked of the real keychain — see the `signIns` parameter.

@@ -190,15 +190,84 @@ const FILE_READING_COMMANDS = new Set([
 	"tac",
 	"cp",
 	"install",
+	// The same list is the shell's reach into a *write* deny as well (`mv`,
+	// `tee`), and a deny that covers only `cat` is a deny with a manual page.
+	"grep",
+	"egrep",
+	"fgrep",
+	"rg",
+	"ag",
+	"ack",
+	"sed",
+	"awk",
+	"gawk",
+	"mawk",
+	"dd",
+	"mv",
+	"tee",
+	"tar",
+	"zip",
+	"unzip",
+	"7z",
+	"rsync",
+	"scp",
+	"diff",
+	"cmp",
+	"sort",
+	"uniq",
+	"cut",
+	"wc",
+	"comm",
+	"join",
+	"paste",
+	"split",
+	"gzip",
+	"gunzip",
+	"bzip2",
+	"bunzip2",
+	"xz",
+	"unxz",
+	"zstd",
+	"unzstd",
+	"shasum",
+	"sha1sum",
+	"sha256sum",
+	"sha512sum",
+	"md5sum",
+	"b2sum",
 ]);
 
 /** Shell metacharacters that separate one command from the next. */
 export { COMMAND_SEPARATOR_RE, tokenizeShell } from "./shell-tokens.ts";
 
 // Long-form design notes: docs/dev/command-classifier.md
+/**
+ * The scripts hidden inside one shell segment: `$(...)`, backticks, and process
+ * substitution. They run as part of the same segment, so a command the outer
+ * splitter sees as `git status` can be `git status $(rm -rf ~)`.
+ */
+const NESTED_SCRIPT_RE = /\$\(([^()]*)\)|`([^`]*)`|[<>]\(([^()]*)\)/g;
+
+/** Whether the line hides a command inside another one, in any of the three spellings. */
+const NESTED_COMMAND_RE = /\$\(|`|[<>]\(/;
+
+function nestedShellScripts(command: string): string[] {
+	const scripts: string[] = [];
+	for (const match of command.matchAll(NESTED_SCRIPT_RE)) {
+		const script = match[1] ?? match[2] ?? match[3];
+		if (script) scripts.push(script);
+	}
+	return scripts;
+}
+
+// Long-form design notes: docs/dev/command-classifier.md
 /** Best-effort extraction of file paths a shell command would read or write. */
 export function extractBashFilePaths(command: string): string[] {
 	const found: string[] = [];
+
+	// A substitution runs a command of its own; its operands are paths this
+	// command reaches just as surely as its visible arguments are.
+	for (const script of nestedShellScripts(command)) found.push(...extractBashFilePaths(script));
 
 	for (const segment of splitShellCommands(command)) {
 		const tokens = tokenizeShell(segment);
@@ -219,6 +288,14 @@ export function extractBashFilePaths(command: string): string[] {
 		// path so `/bin/cat` and `cat` are treated alike.
 		const program = (tokens[0].split("/").pop() ?? "").replace(/\.exe$/i, "").toLowerCase();
 		if (!FILE_READING_COMMANDS.has(program)) continue;
+		// `dd` names its operand instead of taking it positionally.
+		if (program === "dd") {
+			for (const token of tokens.slice(1)) {
+				const operand = /^(?:if|of)=(.+)$/.exec(token);
+				if (operand?.[1]) found.push(operand[1]);
+			}
+			continue;
+		}
 		for (const token of tokens.slice(1)) {
 			if (token.startsWith("-")) continue; // flag
 			if (/^\d*(?:>>|>|<)/.test(token)) continue; // redirection, handled above
@@ -272,6 +349,64 @@ function bashWildcardMatches(specifier: string, command: string): boolean {
 	return new RegExp(`^${escaped}$`).test(command);
 }
 
+/**
+ * The command the shell will actually run, with quoting and escapes removed and
+ * whitespace folded.
+ *
+ * Used only to widen deny/ask matching: `git pu"sh" origin`, `git\ push origin`
+ * and `git push origin` are one command to the shell, and a deny written
+ * against the last one must not be escaped by spelling the first. Allow
+ * matching deliberately keeps the literal text — widening an allow is the
+ * direction that grants a call the person did not name.
+ */
+function normalizeShellCommand(command: string): string {
+	let out = "";
+	let quote: '"' | "'" | null = null;
+	for (let i = 0; i < command.length; i++) {
+		const char = command[i] ?? "";
+		if (quote === "'") {
+			if (char === "'") quote = null;
+			else out += char;
+			continue;
+		}
+		if (quote === '"') {
+			if (char === '"') {
+				quote = null;
+				continue;
+			}
+			if (char === "\\" && i + 1 < command.length) {
+				out += command[++i];
+				continue;
+			}
+			out += char;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			continue;
+		}
+		if (char === "\\" && i + 1 < command.length) {
+			out += command[++i];
+			continue;
+		}
+		out += char;
+	}
+	return out.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Does a deny or ask rule cover this text in either spelling? The raw form
+ * keeps the wildcard grammar exact; the normalized form catches the quoting
+ * that would otherwise make the same command unrecognizable.
+ */
+function bashRuleCoversText(specifier: string, text: string): boolean {
+	if (bashWildcardMatches(specifier, text)) return true;
+	const normalizedSpecifier = normalizeShellCommand(specifier);
+	const normalizedText = normalizeShellCommand(text);
+	if (normalizedSpecifier === specifier.trim() && normalizedText === text.trim()) return false;
+	return bashWildcardMatches(normalizedSpecifier, normalizedText);
+}
+
 /** Stands in for the `&` of a redirection while a line is split, so `2>&1` is not read as a separator. */
 const REDIRECT_AMPERSAND = "\u0000";
 
@@ -305,13 +440,32 @@ function bashRuleCommands(command: string): string[] {
  *
  * A line of one command is matched exactly as it always was, by the whole line
  * alone.
+ *
+ * Two asymmetries beyond the split:
+ *
+ *   - deny and ask compare the command with quoting and escapes removed as well
+ *     as literally, because `git pu"sh"` and `git\ push` are the command the
+ *     rule names to the shell. Allow keeps the literal text only: widening a
+ *     grant is the one direction that hands over a call nobody named.
+ *   - a substitution (`$(...)`, backticks, process substitution) runs inside a
+ *     segment the splitter sees as one command. For deny and ask its script is
+ *     tested as a command of its own. For allow it is the opposite: a standing
+ *     grant (`git *`) must not cover a line that runs something else inside it,
+ *     so such a line is only allowed by a rule that spells it exactly.
  */
 function bashRuleMatches(behavior: PermissionRule["behavior"], specifier: string, input: unknown): boolean {
 	if (typeof input !== "object" || input === null) return false;
 	const command = String((input as Record<string, unknown>).command ?? "").trim();
-	const whole = bashWildcardMatches(specifier, command);
 	const parts = bashRuleCommands(command);
-	if (behavior !== "allow") return whole || parts.some((part) => bashWildcardMatches(specifier, part));
+
+	if (behavior !== "allow") {
+		if (bashRuleCoversText(specifier, command)) return true;
+		if (parts.some((part) => bashRuleCoversText(specifier, part))) return true;
+		return nestedShellScripts(command).some((script) => bashRuleMatches(behavior, specifier, { command: script }));
+	}
+
+	if (NESTED_COMMAND_RE.test(command) && specifier.trim() !== command) return false;
+	const whole = bashWildcardMatches(specifier, command);
 	if (!whole || parts.length <= 1 || bashRuleCommands(specifier).length > 1) return whole;
 	return parts.every((part) => bashWildcardMatches(specifier, part));
 }
@@ -363,8 +517,11 @@ function resolveExistingPrefix(absolutePath: string): string {
 	for (;;) {
 		try {
 			// A Windows realpath can come back extended-length prefixed; strip it so
-			// the result still compares equal to the paths callers spell.
-			const real = realpathSync(current).replace(/^\\\\\?\\/, "");
+			// the result still compares equal to the paths callers spell. `.native`
+			// is what expands an 8.3 short name to the long one — the JS fallback
+			// returns `PROGRA~1` verbatim, so a rule naming `Program Files` and a
+			// call spelling the alias would otherwise be two different paths.
+			const real = realpathSync.native(current).replace(/^\\\\\?\\/, "");
 			return missing.length > 0 ? join(real, ...missing.reverse()) : real;
 		} catch {
 			const parent = dirname(current);

@@ -1,4 +1,4 @@
-export const TOOLS_PACKAGE_VERSION = "0.1.0.3";
+export const TOOLS_PACKAGE_VERSION = "0.1.0.4";
 
 export { createInspectArtifactTool } from "./artifact.ts";
 export {

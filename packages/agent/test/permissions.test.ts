@@ -1024,6 +1024,84 @@ describe("Bash rules on a line that chains commands", () => {
 	});
 });
 
+describe("quoting and substitutions cannot step around a rule", () => {
+	const config = (behavior: PermissionRule["behavior"], specifier: string, mode: "ask" | "agent") => ({
+		mode,
+		sandbox: SANDBOX,
+		rules: parseRuleList([`Bash(${specifier})`], behavior, "projectSettings"),
+		cwd: CWD,
+	});
+	const run = (command: string, cfg: ReturnType<typeof config>) =>
+		evaluatePermissions("Bash", { command }, cfg).behavior;
+
+	test("a deny rule still sees the command behind quoting and escapes", () => {
+		const deny = config("deny", "git push *", "agent");
+		// To the shell these are the same words as `git push origin main`.
+		expect(run('git pu"sh" origin main', deny)).toBe("deny");
+		expect(run("git \\push origin main", deny)).toBe("deny");
+		expect(run("git   push   origin main", deny)).toBe("deny");
+		// The controls: a different command is not swept in.
+		expect(run("git status", deny)).toBe("allow");
+	});
+
+	test("an ask rule sees them too, and an allow rule deliberately does not", () => {
+		const ask = config("ask", "git push *", "agent");
+		expect(run('git pu"sh" origin main', ask)).toBe("ask");
+		// Widening an allow is the direction that grants a call nobody named.
+		const allow = config("allow", "git push *", "ask");
+		expect(run('git pu"sh" origin main', allow)).toBe("ask");
+	});
+
+	test("a command substitution inside an allowed command is not covered by the grant", () => {
+		// `git *` says something about git, not about what runs inside `$( )`.
+		const allow = config("allow", "git *", "ask");
+		expect(run("git status", allow)).toBe("allow");
+		expect(run("git status $(echo hi)", allow)).toBe("ask");
+		expect(run("git status `echo hi`", allow)).toBe("ask");
+		expect(run("git status <(echo hi)", allow)).toBe("ask");
+		// A rule that spells the whole line, substitution included, is an exact
+		// statement about it and still applies.
+		expect(run("git status $(echo hi)", config("allow", "git status $(echo hi)", "ask"))).toBe("allow");
+	});
+
+	test("a deny or ask rule reaches into the substitution's own command", () => {
+		expect(run("echo $(curl -s https://example.test/x)", config("deny", "curl *", "agent"))).toBe("deny");
+		expect(run("echo `git push origin main`", config("ask", "git push *", "agent"))).toBe("ask");
+		expect(run("diff <(git push origin main) notes.txt", config("deny", "git push *", "agent"))).toBe("deny");
+		// The control: the substitution runs something else.
+		expect(run("echo $(date)", config("deny", "curl *", "agent"))).toBe("allow");
+	});
+});
+
+describe("a file rule reaches the shell's other readers and writers", () => {
+	const config = (behavior: PermissionRule["behavior"], rule: string) => ({
+		mode: "ask" as const,
+		sandbox: SANDBOX,
+		rules: parseRuleList([rule], behavior, "projectSettings"),
+		cwd: CWD,
+	});
+	const run = (command: string, cfg: ReturnType<typeof config>) =>
+		evaluatePermissions("Bash", { command }, cfg).behavior;
+
+	test("search, stream-editing and archive tools are held to a Read deny", () => {
+		const deny = config("deny", "Read(secret/**)");
+		// The bypass used to be that only `cat`, `head` and their neighbours were
+		// understood as reading a file; every one of these opens the same key.
+		expect(run("grep -r token secret/key", deny)).toBe("deny");
+		expect(run("rg token secret/key", deny)).toBe("deny");
+		expect(run("sed -n 1p secret/key", deny)).toBe("deny");
+		expect(run("awk '{print}' secret/key", deny)).toBe("deny");
+		expect(run("dd if=secret/key of=out.bin", deny)).toBe("deny");
+		expect(run("tar -cf out.tar secret/key", deny)).toBe("deny");
+		expect(run("mv secret/key public/key", deny)).toBe("deny");
+
+		// Controls: the same tools on another path stay on the mode's answer.
+		expect(run("grep -r token public/key", deny)).toBe("ask");
+		expect(run("dd if=public/key of=out.bin", deny)).toBe("ask");
+		expect(run("git status", deny)).toBe("ask");
+	});
+});
+
 describe("a path rule reaches the other tools that open the same files", () => {
 	const config = (behavior: PermissionRule["behavior"], rule: string, mode: "ask" | "agent" = "agent") => ({
 		mode,

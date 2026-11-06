@@ -735,7 +735,7 @@ export async function connectMcpServer(
 					);
 
 		const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-		const client = new Client({ name: "labunbun", version: "0.1.0.3" });
+		const client = new Client({ name: "labunbun", version: "0.1.0.4" });
 		opened = client;
 		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
 		/** The object the host holds; the notification handlers refresh it in place. */
@@ -1015,6 +1015,13 @@ export function loadProjectMcpServerNames(cwd: string): Set<string> {
  *
  * The directory is keyed with `sanitizeCwd` exactly as SessionStore keys its
  * sessions, so a project's approvals land next to that project's history.
+ *
+ * The key is injective, and a store written under the old, shared name is
+ * deliberately not read: an approval recorded under a name that two
+ * directories could both claim cannot say which project granted it. One
+ * re-approval per server after the upgrade is the whole cost, and it is the
+ * same trade this file already makes for approvals from the old in-repo
+ * location.
  */
 function approvalStorePath(cwd: string, home: string): string {
 	return join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");

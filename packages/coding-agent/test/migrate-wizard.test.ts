@@ -88,9 +88,14 @@ function claudeRows(cwd: string, startedAt: string): string {
 		.join("\n")}\n`;
 }
 
+/** The project directory name, written out so a change to the key fails here (`sanitizeCwd`). */
+function projectSlug(cwd: string): string {
+	return cwd.replace(/%/g, "%25").replace(/:/g, "%3A").replace(/\//g, "%2F").replace(/\\/g, "%5C");
+}
+
 /** Where a Claude Code session's transcript would land in the target. */
 function importedPath(home: string, sessionId: string, cwd = CWD): string {
-	const project = cwd.replace(/[:\\/]/g, "-");
+	const project = projectSlug(cwd);
 	return join(home, ".labunbun", "projects", project, `${importedSessionId("claude-code", sessionId)}.jsonl`);
 }
 

@@ -270,35 +270,57 @@ function pathFromUri(uri: string): string {
 }
 
 /**
- * The four answers an approval request offers, in the protocol's own four kinds.
+ * The answers an approval request offers, in the protocol's own kinds.
  *
- * The first three labels are the REPL's (`permissionOptions` in @labunbun/tui),
- * so the same question reads the same way in a terminal and in an editor — and
- * so the "always" answer says the scope it actually grants. The fourth kind,
- * `reject_always`, has no REPL counterpart (the dialog's "no" is once per call);
- * its label says so.
+ * The labels are the REPL's (`permissionOptions` in @labunbun/tui), so the same
+ * question reads the same way in a terminal and in an editor — and so the
+ * "always" answer says the scope it actually grants.
+ *
+ * The mapping is by what an answer *means*, never by its position. An escalated
+ * Bash call offers only two rows — yes once, and no with feedback — and the old
+ * positional mapping read the second of those as `allow_always`: an editor user
+ * choosing the row labelled "No, and tell the model what to do differently"
+ * granted the command, outside the sandbox, with a standing session rule.
+ *
+ * `alwaysAsk` has no protocol kind of its own. Its option id exists so the
+ * answer survives the round trip; the `allow_once` kind is the honest half —
+ * this call runs, and the standing rule keeps the next match asking.
  */
 export function acpPermissionOptions(toolName: string, input: unknown, cwd: string): acp.PermissionOption[] {
-	const [once, always, never] = permissionOptions(toolName, input, cwd);
-	return [
-		{ optionId: "allow_once", name: once?.label ?? "Allow once", kind: "allow_once" },
-		{ optionId: "allow_always", name: always?.label ?? "Always allow", kind: "allow_always" },
-		{ optionId: "reject_once", name: never?.label ?? "Reject", kind: "reject_once" },
-		{
-			optionId: "reject_always",
-			name: `No, and don't ask again for ${toolName} (this session)`,
-			kind: "reject_always",
-		},
-	];
+	const options: acp.PermissionOption[] = permissionOptions(toolName, input, cwd).map((option) => {
+		if (!option.allow || option.collectsFeedback) {
+			return { optionId: "reject_once", name: option.label, kind: "reject_once" as const };
+		}
+		if (option.alwaysAllow) {
+			return { optionId: "allow_always", name: option.label, kind: "allow_always" as const };
+		}
+		if (option.alwaysAsk) {
+			return { optionId: "allow_always_ask", name: option.label, kind: "allow_once" as const };
+		}
+		return { optionId: "allow_once", name: option.label, kind: "allow_once" as const };
+	});
+	// No REPL counterpart: the dialog's "no" is once per call. Its label says
+	// what it does differently, or two "no" answers look identical and one of
+	// them is permanent.
+	options.push({
+		optionId: "reject_always",
+		name: `No, and don't ask again for ${toolName} (this session)`,
+		kind: "reject_always",
+	});
+	return options;
 }
 
 /** What `optionId` means for the tool pipeline. Unknown ids fail closed. */
-export function permissionFromOptionId(optionId: string): { allow: boolean; remember: boolean } | null {
+export function permissionFromOptionId(
+	optionId: string,
+): { allow: boolean; remember: boolean; alwaysAsk?: boolean } | null {
 	switch (optionId) {
 		case "allow_once":
 			return { allow: true, remember: false };
 		case "allow_always":
 			return { allow: true, remember: true };
+		case "allow_always_ask":
+			return { allow: true, remember: false, alwaysAsk: true };
 		case "reject_once":
 			return { allow: false, remember: false };
 		case "reject_always":
@@ -860,6 +882,38 @@ class AcpAgent implements acp.Agent {
 				behavior: "allow",
 				source: "session",
 			});
+		}
+		if (meaning.alwaysAsk) {
+			// The REPL's mirror answer: yes to this call, and a session rule that
+			// brings the next match of the same scope back to a person.
+			permissions.rules.push({
+				toolName,
+				specifier: ruleSpecifierFor(toolName, input, permissions.cwd),
+				behavior: "ask",
+				source: "session",
+			});
+		}
+		if (meaning.allow) {
+			// The dialog is a round trip, and `session/set_mode` can move the session
+			// while it is open. The answer was given under the mode that asked; if the
+			// mode has changed since, a stricter one must still win. A re-check that
+			// now says `ask` is not a refusal — the person just answered it — but an
+			// explicit `deny` is.
+			const live = this.#sessions.get(sessionId)?.session;
+			const liveMode = live?.permissionMode ?? ctx.mode;
+			const liveSandbox = live?.sandbox ?? ctx.sandbox;
+			if (liveMode !== ctx.mode || liveSandbox !== ctx.sandbox) {
+				const after = evaluatePermissions(toolName, input, {
+					mode: liveMode,
+					sandbox: liveSandbox,
+					rules: permissions.rules,
+					cwd: permissions.cwd,
+					readOnlyToolNames: permissions.readOnlyToolNames,
+				});
+				if (after.behavior === "deny") {
+					return { behavior: "deny", message: `Permission changed while the answer was pending — ${after.message}` };
+				}
+			}
 		}
 		return meaning.allow ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
 	}

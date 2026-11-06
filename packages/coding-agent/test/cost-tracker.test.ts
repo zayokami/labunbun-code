@@ -6,9 +6,10 @@
  * notices until the total is questioned.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { legacyCwdSlug, sanitizeCwd } from "@labunbun/agent";
 import { assistantMessage, type Usage, userMessage } from "@labunbun/ai";
 import {
 	CostTracker,
@@ -349,6 +350,32 @@ describe("CostTracker persistence", () => {
 		process.env.USERPROFILE = home;
 		try {
 			expect(new CostTracker(cwd).state).toEqual(emptyCostState());
+		} finally {
+			if (previous === undefined) delete process.env.HOME;
+			else process.env.HOME = previous;
+			if (previousProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousProfile;
+		}
+	});
+
+	test("a ledger under the old project name is read once, then filed under the new one", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-cost-home3-"));
+		// The old key folded the separator into `-`; the new one keeps the path.
+		const cwd = join(home, "work", "a-b");
+		const legacyPath = join(home, ".labunbun", "projects", legacyCwdSlug(cwd), "costs.json");
+		mkdirSync(dirname(legacyPath), { recursive: true });
+		writeFileSync(legacyPath, JSON.stringify({ totalCostUSD: 3.5, totalDurationMs: 10, modelsUsage: {} }));
+		const previous = process.env.HOME;
+		const previousProfile = process.env.USERPROFILE;
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		try {
+			const tracker = new CostTracker(cwd);
+			expect(tracker.state.totalCostUSD).toBe(3.5);
+			tracker.persist();
+			// The next run reads the new file, not the shared old one.
+			expect(existsSync(join(home, ".labunbun", "projects", sanitizeCwd(cwd), "costs.json"))).toBe(true);
+			expect(new CostTracker(cwd).state.totalCostUSD).toBe(3.5);
 		} finally {
 			if (previous === undefined) delete process.env.HOME;
 			else process.env.HOME = previous;

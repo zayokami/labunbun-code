@@ -392,11 +392,24 @@ export async function runDoctorChecks(
 	return checks;
 }
 
-export function formatDoctorReport(checks: DoctorCheck[]): string {
-	return checks
+/**
+ * The health rows, with the startup notices the greeting folded away beneath
+ * them.
+ *
+ * The welcome names the *subjects* of those notices and points at `/doctor`;
+ * this is the half that turns the pointer into the sentences. They are printed
+ * after the checks rather than woven into them because they are a record of
+ * what happened at startup, not a reading of the machine now — the list is
+ * empty on a session with nothing to report.
+ */
+export function formatDoctorReport(checks: DoctorCheck[], startupNotes: string[] = []): string {
+	const report = checks
 		.map((c) => {
 			const icon = c.status === "ok" ? "✓" : c.status === "warn" ? "!" : "✗";
 			return `${icon} ${c.name}: ${c.detail}`;
 		})
 		.join("\n");
+	if (startupNotes.length === 0) return report;
+	const notes = startupNotes.map((text) => `· ${text}`).join("\n");
+	return `${report}\n\nStartup notices (folded into the greeting summary):\n${notes}`;
 }

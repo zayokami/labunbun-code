@@ -9,10 +9,11 @@ import {
 	readdirSync,
 	readFileSync,
 	readSync,
+	renameSync,
 	statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
 
 export type SessionEntry =
@@ -95,9 +96,128 @@ function sameMessage(stored: AgentMessage | undefined, live: AgentMessage | unde
 	);
 }
 
-/** Sanitize a cwd into a filesystem-safe project directory name. */
+/**
+ * The name of a project's directory under `~/.labunbun/projects`.
+ *
+ * It is a key for five stores — sessions, project trust, MCP approvals, costs
+ * and spilled tool output — so it has to name exactly one project. The old
+ * form replaced `:`, `/` and `\` with `-`, which made `/srv/a-b` and
+ * `/srv/a/b` one directory: a trust decision or MCP approval given in the
+ * first applied in the second.
+ *
+ * Only the four characters a path can carry and a directory name should not
+ * are escaped, and `%` is escaped too, which is what makes the result
+ * reversible — and therefore injective. A literal `%` never appears in the
+ * output, so every `%XX` is unambiguously one of the four.
+ */
 export function sanitizeCwd(cwd: string): string {
+	return cwd.replace(/[%:\\/]/g, (char) => {
+		switch (char) {
+			case "%":
+				return "%25";
+			case ":":
+				return "%3A";
+			case "/":
+				return "%2F";
+			default:
+				return "%5C"; // `\`
+		}
+	});
+}
+
+/**
+ * The name the old encoder produced. Read-only legacy.
+ *
+ * It is not injective, so a directory under this name can hold facts about
+ * more than one project. Nothing new is written there: it is read only to
+ * carry a project's own session history across the change
+ * ({@link SessionStore.listSessions}). A trust or approval decision is never
+ * carried over — an ambiguous name cannot say which project made it, and
+ * asking again is the only honest answer.
+ */
+export function legacyCwdSlug(cwd: string): string {
 	return cwd.replace(/[:\\/]/g, "-");
+}
+
+/** Whether two spellings name one project, folding the case the filesystem folds. */
+function sameProjectPath(a: string, b: string): boolean {
+	const trim = (value: string) => value.replace(/[\\/]+$/, "");
+	const left = trim(a);
+	const right = trim(b);
+	// Windows and default APFS are case-insensitive, so the same directory can be
+	// spelled two ways; `sanitizeCwd` keeps that spelling, and a migration has to
+	// see through it.
+	return process.platform === "win32" || process.platform === "darwin"
+		? left.toLowerCase() === right.toLowerCase()
+		: left === right;
+}
+
+/** The cwd a session file's header names, or undefined when it has no readable header. */
+function sessionHeaderCwd(path: string): string | undefined {
+	for (const line of readHead(path, 16 * 1024).split("\n")) {
+		const entry = parseSessionLine(line);
+		if (entry?.type === "header") return entry.cwd;
+	}
+	return undefined;
+}
+
+/**
+ * Move a project's pre-fix sessions out of the directory the old key shared
+ * with any colliding path, and into the one that names the project itself.
+ *
+ * A session file records its cwd in the header, so this is the only legacy
+ * store whose entries can be attributed. A file without a readable header, or
+ * one whose header names another project, stays where it is: guessing is the
+ * failure this migration exists to undo. The move is a rename inside one root,
+ * so it leaves no copy behind for the other project to read.
+ *
+ * Returns the files whose move failed; the caller still lists them where they
+ * are, because a session a person can resume must not disappear from the
+ * picker over a filesystem error.
+ */
+function adoptLegacySessions(
+	current: string,
+	legacy: string,
+	cwd: string,
+	onWarning?: (path: string, error: unknown) => void,
+): string[] {
+	const kept: string[] = [];
+	if (legacy === current || !existsSync(legacy)) return kept;
+	let names: string[];
+	try {
+		names = readdirSync(legacy);
+	} catch (error) {
+		onWarning?.(legacy, error);
+		return kept;
+	}
+	for (const name of names) {
+		if (!name.endsWith(".jsonl")) continue;
+		const from = join(legacy, name);
+		let owner: string | undefined;
+		try {
+			owner = sessionHeaderCwd(from);
+		} catch (error) {
+			onWarning?.(from, error);
+			continue;
+		}
+		if (owner === undefined || !sameProjectPath(owner, cwd)) continue;
+		const to = join(current, name);
+		try {
+			// The id already names the file: under the new key it is either this same
+			// session (moved by an earlier listing) or one that started after the fix.
+			if (existsSync(to)) continue;
+			mkdirSync(current, { recursive: true });
+			renameSync(from, to);
+		} catch (error) {
+			// Another process may have moved it between the check and the rename. The
+			// file is where it belongs then, and keeping the old path would list the
+			// same session twice once the destination is read.
+			if (!existsSync(from)) continue;
+			onWarning?.(from, error);
+			kept.push(from);
+		}
+	}
+	return kept;
 }
 
 export function sessionsRoot(home = homedir()): string {
@@ -244,33 +364,41 @@ export class SessionStore {
 		onWarning?: (path: string, error: unknown) => void,
 	): Array<{ path: string; sessionId: string; mtimeMs: number }> {
 		const root = cwd ? join(sessionsRoot(home), sanitizeCwd(cwd)) : sessionsRoot(home);
-		if (!existsSync(root)) return [];
+		// Bring this project's pre-fix sessions across before listing, so the picker
+		// shows one directory's worth of history rather than an old one that may also
+		// hold a colliding project's transcripts.
+		const kept = cwd ? adoptLegacySessions(root, join(sessionsRoot(home), legacyCwdSlug(cwd)), cwd, onWarning) : [];
 		const out: Array<{ path: string; sessionId: string; mtimeMs: number }> = [];
-		for (const dir of [root]) {
+		const add = (full: string): void => {
+			// One file the process cannot stat must not erase the listing: it stays a
+			// row with no time, and the caller is told why. The loader will refuse it
+			// individually when it is picked.
+			const name = basename(full).replace(/\.jsonl$/, "");
 			try {
-				for (const name of readdirSync(dir)) {
-					if (!name.endsWith(".jsonl")) continue;
-					const full = join(dir, name);
-					// One file the process cannot stat must not erase the listing: it
-					// stays a row with no time, and the caller is told why. The loader
-					// will refuse it individually when it is picked.
-					try {
-						const stat = statSync(full);
-						out.push({ path: full, sessionId: name.replace(/\.jsonl$/, ""), mtimeMs: stat.mtimeMs });
-					} catch (error) {
-						onWarning?.(full, error);
-						out.push({ path: full, sessionId: name.replace(/\.jsonl$/, ""), mtimeMs: 0 });
-					}
-				}
+				out.push({ path: full, sessionId: name, mtimeMs: statSync(full).mtimeMs });
 			} catch (error) {
-				// Swallowed, a failed listing is indistinguishable from an empty one:
-				// /resume shows "no sessions" beside a directory full of transcripts.
-				// The listing still returns what it has; it just says so on the way.
+				onWarning?.(full, error);
+				out.push({ path: full, sessionId: name, mtimeMs: 0 });
+			}
+		};
+		try {
+			for (const name of readdirSync(root)) {
+				if (name.endsWith(".jsonl")) add(join(root, name));
+			}
+		} catch (error) {
+			// A missing directory is the ordinary state of a project with no history.
+			// Any other failure is not: swallowed, it is indistinguishable from an
+			// empty listing — /resume shows "no sessions" beside a directory full of
+			// transcripts. The listing still returns what it has; it says so on the way.
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 				console.error(
-					`Warning: could not list sessions in ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+					`Warning: could not list sessions in ${root}: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
+		// The files the migration could not move are still this project's, and they
+		// stay resumable from where they are.
+		for (const full of kept) add(full);
 		return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
 	}
 

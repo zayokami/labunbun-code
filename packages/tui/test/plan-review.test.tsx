@@ -113,6 +113,19 @@ describe("PlanReviewDialog", () => {
 		rejected.unmount();
 	});
 
+	test("a modified y is not an approval", async () => {
+		// Ink reports Ctrl+Y and Alt+Y as input "y"; a terminal shortcut must
+		// not approve a plan.
+		const d = open();
+		await delay(30);
+		d.stdin.write("\u0019"); // Ctrl+Y
+		await delay(30);
+		d.stdin.write("\u001by"); // Alt+Y
+		await delay(30);
+		expect(d.answers).toEqual([]);
+		d.unmount();
+	});
+
 	test("a number answers that row directly", async () => {
 		const d = open();
 		await delay(30);

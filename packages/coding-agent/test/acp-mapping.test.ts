@@ -346,22 +346,50 @@ describe("prompt blocks", () => {
 });
 
 describe("permission options", () => {
-	test("the four kinds are offered, and the labels are the REPL's", () => {
+	test("the answers are mapped by meaning, and the labels are the REPL's", () => {
 		const options = acpPermissionOptions("Write", { file_path: "/w/sub/out.txt", content: "x" }, "/w");
-		expect(options.map((o) => o.kind)).toEqual(["allow_once", "allow_always", "reject_once", "reject_always"]);
-		expect(options.map((o) => o.optionId)).toEqual(["allow_once", "allow_always", "reject_once", "reject_always"]);
+		expect(options.map((o) => o.kind)).toEqual([
+			"allow_once",
+			"allow_always",
+			"allow_once",
+			"reject_once",
+			"reject_always",
+		]);
+		expect(options.map((o) => o.optionId)).toEqual([
+			"allow_once",
+			"allow_always",
+			"allow_always_ask",
+			"reject_once",
+			"reject_always",
+		]);
 		// The shared table, not a second copy of it: the "always" label names the
 		// scope `ruleSpecifierFor` actually grants.
 		expect(options[1]?.name).toContain("files under `sub/`");
-		// The fourth kind has no REPL counterpart; its label has to say what it does
+		// "Ask me every time" is a yes — it must never be offered as a rejection.
+		expect(options[2]?.name).toContain("ask me every time");
+		// The last answer has no REPL counterpart; its label has to say what it does
 		// differently, or two "no" answers look identical and one of them is permanent.
-		expect(options[3]?.name).toContain("Write");
-		expect(options[3]?.name).toContain("this session");
+		expect(options[4]?.name).toContain("Write");
+		expect(options[4]?.name).toContain("this session");
+	});
+
+	test("an escalated call offers no standing grant", () => {
+		// Escalated Bash has two rows — yes once and no — and mapping by position
+		// used to turn the "no" into an `allow_always` that ran outside the sandbox.
+		const options = acpPermissionOptions(
+			"Bash",
+			{ command: "rm -rf build", escalate: true, justification: "needs to remove build output" },
+			"/w",
+		);
+		expect(options.map((o) => o.optionId)).toEqual(["allow_once", "reject_once", "reject_always"]);
+		expect(options.map((o) => o.kind)).toEqual(["allow_once", "reject_once", "reject_always"]);
+		expect(options[1]?.name).toContain("No, and tell the model");
 	});
 
 	test("option ids map back to allow/deny and remembering, and an unknown one fails closed", () => {
 		expect(permissionFromOptionId("allow_once")).toEqual({ allow: true, remember: false });
 		expect(permissionFromOptionId("allow_always")).toEqual({ allow: true, remember: true });
+		expect(permissionFromOptionId("allow_always_ask")).toEqual({ allow: true, remember: false, alwaysAsk: true });
 		expect(permissionFromOptionId("reject_once")).toEqual({ allow: false, remember: false });
 		expect(permissionFromOptionId("reject_always")).toEqual({ allow: false, remember: true });
 		expect(permissionFromOptionId("allow_everything_forever")).toBeNull();

@@ -25,6 +25,12 @@ export const TOOL_OUTPUT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
  * The root rather than the session directory, because it is also what Read is
  * allowed to open: a session that is swapped mid-run (`/resume`) keeps writing
  * to a directory the Read tool already trusts.
+ *
+ * Files spilled under the old, non-injective project key are left where they
+ * are: their absolute paths still name the bytes, and the retention window is
+ * days, so the old directory stops growing and its contents age out of use —
+ * merging it into a key that now names one project would do the opposite of
+ * what the key change is for.
  */
 export function toolOutputRoot(cwd: string, home?: string): string {
 	return join(sessionsRoot(home), sanitizeCwd(cwd), "tool-output");

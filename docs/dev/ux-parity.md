@@ -126,6 +126,19 @@ The diff was line-level: it said which line changed, not what in it. The bold ru
 | Word highlight | A paired removed/added line keeps its colour and draws the words that differ in bold. A pair with too little shared text, an unaligned body, and every `Write` line stay one colour. | `permission-diff.ts` (`markWordChanges`), `PermissionDialog.tsx:253` |
 | Quick answers | `y` allows once, `n` denies, and `a` takes the standing answer when the list offers one. The hint names `y` and `a`; Esc already stands for deny. | `PermissionDialog.tsx` (`input === "a"`) |
 
+## The quiet-start wave (2026-11-06)
+
+The first screen was three things stacked: the greeting, the startup notices, and the prompt. The notices were the wrong middle — unboxed, unindented and in the body weight, three of them read as a start that went wrong rather than as a report, and they pushed the greeting up on the machines with the most to say.
+
+| Area | What the user sees | Code |
+| --- | --- | --- |
+| Folded notices | The ambient startup facts — no controller, skill folders that failed validation, a catalog refresh — are one dim line under the greeting: `ℹ gamepad idle · skill not loaded · /doctor for details`. Labels are deduplicated and capped at three; the rest are counted rather than named. | `packages/tui/src/components/StartupNotes.tsx`, `packages/tui/src/ui-state.ts` (`startupNotes`) |
+| Where the sentences live | `/doctor` prints the folded notices under its health rows, so the pointer in the summary resolves to the exact line. | `packages/coding-agent/src/doctor.ts` (`formatDoctorReport`), `packages/coding-agent/src/interactive.ts` (`/doctor`) |
+| What is not folded | A notice that asks something of the user before the first prompt — a missing credential, an unreadable memory file, withheld definitions, a damaged approval store, an MCP config error — keeps its own row. | `packages/coding-agent/src/interactive.ts` (`sayNotice` vs `noteNotice`) |
+| A late notice | One that arrives after the conversation has started has no greeting to fold into, so it is said as a transcript row rather than dropped. | `noteNotice`/`greetingHasGone` in `packages/coding-agent/src/interactive.ts` |
+
+The rule this wave adds: a startup fact is folded when it describes the machine and asks nothing before the first prompt; it keeps a row when it is the reason the next prompt will fail or need an approval.
+
 ## Deliberately not built
 
 | Feature | Why not |
@@ -148,3 +161,4 @@ The diff was line-level: it said which line changed, not what in it. The bold ru
 - `packages/tui/test/permission-options.test.ts`, `packages/tui/test/question-dialog.test.tsx`, and `packages/tui/test/pad-dialogs.test.tsx`: the fourth option's feedback field, `Other…` on a single-select only, the empty-field and Esc rules, and the pad's plain deny.
 - `packages/tui/test/components.test.tsx`: the answer's dot and two-column gutter, in the sealed row and in the streaming preview. `packages/tui/test/shortcuts.test.ts` and `packages/tui/test/prompt-input.test.tsx`: the mid-turn legend names steer or queue and never `Enter send`. `packages/coding-agent/test/credential-presence.test.ts` and `packages/coding-agent/test/chatgpt-commands.test.ts`: the post-sign-in notice appears exactly when the sign-in's wire is not the session's model.
 - `packages/tui/test/split-workspace.test.tsx`: the split's clamps, the line model's exact row count and width, streaming only at the tail, the window's entry names, and the drawn frame at 100 columns and at the minimum size — both panes, no overflow, no merged rows. `packages/tui/test/watch-panel.test.tsx`: `Ctrl+T` splits at 100×24, keeps the band at 80 columns, `PgUp`/`PgDn` page back and forward, Escape closes, an overlay stands the panes down and returns them, and a queue that would make them unreadable yields the split until it drains.
+- `packages/tui/test/welcome-banner.test.tsx`: the folded summary names each subject once, counts past the cap, draws under the greeting, and leaves with it. `packages/coding-agent/test/doctor.test.ts` holds the folded sentences in the report, and `packages/coding-agent/test/continue.test.ts` holds the catalog refresh in the startup summary rather than the transcript.

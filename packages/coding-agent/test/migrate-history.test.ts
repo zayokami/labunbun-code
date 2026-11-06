@@ -13,6 +13,16 @@ import { borrowSourceEnv } from "./source-env.ts";
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
 
+/**
+ * The project directory name `sessionFilePath` builds, written out rather than
+ * imported so a change to the key is a failing test and not a test that follows
+ * the change. Injectivity is the point: `%` is escaped first, the four
+ * characters a path can carry and a name should not follow.
+ */
+function projectSlug(cwd: string): string {
+	return cwd.replace(/%/g, "%25").replace(/:/g, "%3A").replace(/\//g, "%2F").replace(/\\/g, "%5C");
+}
+
 function withHome(tree: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-history-"));
 	// `$CODEX_HOME` is part of the answer to "where does Codex keep this", and
@@ -124,7 +134,7 @@ describe("migrate: history from Claude Code", () => {
 			const result = runHistory(home, { apply: true });
 			expect(result.error).toBeUndefined();
 			expect(historyWrites(result, home)).toEqual([
-				`~/.labunbun/projects/${CWD.replace(/[:\\/]/g, "-")}/${importedSessionId("claude-code", "aaaa-1111")}.jsonl`,
+				`~/.labunbun/projects/${projectSlug(CWD)}/${importedSessionId("claude-code", "aaaa-1111")}.jsonl`,
 			]);
 
 			const store = SessionStore.load(result.plan.writes[0].path);

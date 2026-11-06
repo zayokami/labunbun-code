@@ -210,6 +210,13 @@ export function PermissionDialog({
 			choose(answers[selectedRef.current % answers.length]);
 		} else if (key.escape) {
 			onResolve(false, false);
+		} else if (key.ctrl || key.meta || key.super || key.hyper) {
+			// Modifier combinations are not answers. Ink hands Ctrl+Y to the
+			// handler as input "y" with `ctrl` set, and Alt+Y as "y" with
+			// `meta`; without this guard a key aimed at the terminal or the
+			// shell would grant the tool — and `a` would also write a standing
+			// rule the person never chose.
+			return;
 		} else if (input === "y") {
 			onResolve(true, false);
 		} else if (input === "a") {
