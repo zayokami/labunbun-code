@@ -1,0 +1,281 @@
+// P1 tags: what a file declares and what it calls. Aider's repository map
+// builds a file-level graph from exactly these two facts — a definition names a
+// symbol, a reference says another file needed it — and ranks the graph with
+// PageRank. The extraction here follows Aider's JavaScript tags query so the
+// two implementations can be compared on Aider's own fixture.
+//
+// Long-form design notes: docs/dev/repomap.md (P1).
+import { Parser, type Node as SyntaxNode, type Tree } from "web-tree-sitter";
+import {
+	InMemoryRepoMapCache,
+	loadRepoMapLanguages,
+	type RepoMapCache,
+	type RepoMapDefinitionKind,
+	type RepoMapLanguage,
+	type RepoMapOps,
+	type RepoMapOptions,
+	type RepoMapScanStats,
+	scanRepoFiles,
+} from "./repomap.ts";
+
+export type RepoMapTagDefinitionKind = RepoMapDefinitionKind | "method";
+
+/** One line of a definition's body, already trimmed and bounded in length. */
+export interface RepoMapSnippetLine {
+	/** One-based line number in the source file. */
+	line: number;
+	text: string;
+}
+
+export interface RepoMapTag {
+	/** Path relative to the map root, forward slashes. */
+	path: string;
+	name: string;
+	kind: "def" | "ref";
+	/** One-based line the tag occurs on. */
+	line: number;
+	definitionKind?: RepoMapTagDefinitionKind;
+	/** For definitions: the declaration and a bounded amount of its body. */
+	snippet?: RepoMapSnippetLine[];
+}
+
+export interface RepoMapFileTags {
+	path: string;
+	tags: RepoMapTag[];
+	/** Source lines, excluding the empty line a trailing newline produces. */
+	lineCount: number;
+}
+
+export interface RepoMapTagsOptions extends RepoMapOptions<RepoMapFileTags> {
+	/** Lines of a function or method kept in its snippet. Default: 12. */
+	maxSnippetLines?: number;
+}
+
+export interface RepoMapTagsStats extends RepoMapScanStats {
+	definitions: number;
+	references: number;
+}
+
+export interface RepoMapTagsResult {
+	files: RepoMapFileTags[];
+	stats: RepoMapTagsStats;
+}
+
+const DEFAULT_MAX_SNIPPET_LINES = 12;
+
+/** Aider's map truncates every rendered source line at 100 characters. */
+export const MAX_SNIPPET_LINE_CHARS = 100;
+
+const DECLARATION_KINDS: Record<string, RepoMapTagDefinitionKind> = {
+	function_declaration: "function",
+	generator_function_declaration: "function",
+	function_expression: "function",
+	generator_function: "function",
+	class_declaration: "class",
+	abstract_class_declaration: "class",
+	class: "class",
+	interface_declaration: "interface",
+	type_alias_declaration: "type",
+	enum_declaration: "enum",
+	function_signature: "function",
+	method_definition: "method",
+	method_signature: "method",
+};
+
+const FUNCTION_VALUES = new Set(["arrow_function", "function_expression", "generator_function"]);
+
+/** Types whose body is summarized by their members rather than repeated. */
+const HEADER_ONLY_KINDS = new Set<RepoMapTagDefinitionKind>(["class", "interface", "type", "enum"]);
+
+function nameOf(node: SyntaxNode): string | null {
+	const name = node.childForFieldName("name");
+	return name ? name.text : null;
+}
+
+function definitionOf(node: SyntaxNode): { name: string; kind: RepoMapTagDefinitionKind } | null {
+	switch (node.type) {
+		case "method_definition": {
+			const name = nameOf(node);
+			// A constructor is reachable through its class, which is already a tag.
+			return name && name !== "constructor" ? { name, kind: "method" } : null;
+		}
+		case "variable_declarator": {
+			// `const f = () => …` and `const f = function () { … }`.
+			const value = node.childForFieldName("value");
+			if (!value || !FUNCTION_VALUES.has(value.type)) return null;
+			const name = node.childForFieldName("name");
+			return name?.type === "identifier" ? { name: name.text, kind: "function" } : null;
+		}
+		case "assignment_expression": {
+			// `module.exports.f = () => …` and `exports.f = function () { … }`.
+			const right = node.childForFieldName("right");
+			if (!right || !FUNCTION_VALUES.has(right.type)) return null;
+			const left = node.childForFieldName("left");
+			if (!left) return null;
+			if (left.type === "identifier") return { name: left.text, kind: "function" };
+			if (left.type === "member_expression") {
+				const property = left.childForFieldName("property");
+				if (property?.type === "property_identifier") return { name: property.text, kind: "function" };
+			}
+			return null;
+		}
+		default: {
+			const kind = DECLARATION_KINDS[node.type];
+			if (!kind) return null;
+			const name = nameOf(node);
+			return name ? { name, kind } : null;
+		}
+	}
+}
+
+function calleeName(node: SyntaxNode): string | null {
+	if (node.type === "identifier") return node.text === "require" ? null : node.text;
+	if (node.type === "member_expression") {
+		const property = node.childForFieldName("property");
+		if (property?.type === "property_identifier") return property.text;
+		if (property?.type === "private_property_identifier") return property.text;
+	}
+	return null;
+}
+
+function referenceOf(node: SyntaxNode): string | null {
+	switch (node.type) {
+		case "call_expression": {
+			const fn = node.childForFieldName("function");
+			return fn ? calleeName(fn) : null;
+		}
+		case "new_expression": {
+			const constructorNode = node.childForFieldName("constructor");
+			return constructorNode ? calleeName(constructorNode) : null;
+		}
+		default:
+			return null;
+	}
+}
+
+const CLOSING_ONLY = /^\s*[})\];,]+\s*$/;
+
+/**
+ * A definition's declaration plus a bounded amount of its body. Classes and
+ * interfaces contribute only their header because their members are separate
+ * tags; functions and methods contribute their body up to `maxLines`. The
+ * function's own closing brace is left out, matching the shape Aider renders:
+ * a line that is nothing but delimiters says less than the line above it.
+ */
+function makeSnippet(
+	node: SyntaxNode,
+	lines: readonly string[],
+	kind: RepoMapTagDefinitionKind,
+	maxLines: number,
+): RepoMapSnippetLine[] {
+	const start = node.startPosition.row;
+	let end = HEADER_ONLY_KINDS.has(kind) ? start : node.endPosition.row;
+	if (end > start && CLOSING_ONLY.test(lines[end] ?? "")) end--;
+	const snippet: RepoMapSnippetLine[] = [];
+	for (let row = start; row <= end && snippet.length < maxLines; row++) {
+		const text = (lines[row] ?? "").replace(/\s+$/, "");
+		if (text === "") continue;
+		snippet.push({ line: row + 1, text: text.slice(0, MAX_SNIPPET_LINE_CHARS) });
+	}
+	return snippet;
+}
+
+/**
+ * Extract every definition and call reference in a parsed file.
+ *
+ * Unlike `extractDefinitions` in `repomap.ts`, this descends into class bodies
+ * and nested scopes: Aider's query matches declarations wherever they occur,
+ * and a method is a useful definition even though it is reachable through its
+ * class. Definitions carry a snippet; references carry only a name and a line.
+ */
+export function extractTags(
+	tree: Tree,
+	source: string,
+	path: string,
+	options: { maxSnippetLines?: number } = {},
+): RepoMapFileTags {
+	const lines = source.split(/\r?\n/);
+	const maxSnippetLines = options.maxSnippetLines ?? DEFAULT_MAX_SNIPPET_LINES;
+	const tags: RepoMapTag[] = [];
+	const stack: SyntaxNode[] = [];
+	const root = tree.rootNode;
+	for (let index = root.namedChildCount - 1; index >= 0; index--) {
+		const child = root.namedChild(index);
+		if (child) stack.push(child);
+	}
+	while (stack.length > 0) {
+		const node = stack.pop() as SyntaxNode;
+		const definition = definitionOf(node);
+		if (definition) {
+			tags.push({
+				path,
+				name: definition.name,
+				kind: "def",
+				line: node.startPosition.row + 1,
+				definitionKind: definition.kind,
+				snippet: makeSnippet(node, lines, definition.kind, maxSnippetLines),
+			});
+		}
+		const reference = referenceOf(node);
+		if (reference) tags.push({ path, name: reference, kind: "ref", line: node.startPosition.row + 1 });
+		for (let index = node.namedChildCount - 1; index >= 0; index--) {
+			const child = node.namedChild(index);
+			if (child) stack.push(child);
+		}
+	}
+	tags.sort((a, b) => {
+		if (a.line !== b.line) return a.line - b.line;
+		if (a.kind !== b.kind) return a.kind === "def" ? -1 : 1;
+		return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+	});
+	// A trailing newline produces one empty entry that is not a source line.
+	if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+	return { path, tags, lineCount: lines.length };
+}
+
+/** Parse and extract in one call. Convenient for tests and one-off files. */
+export async function tagsInSource(
+	source: string,
+	language: RepoMapLanguage,
+	options: { maxSnippetLines?: number; path?: string } = {},
+): Promise<RepoMapFileTags> {
+	const languages = await loadRepoMapLanguages();
+	const parser = new Parser();
+	try {
+		parser.setLanguage(languages[language]);
+		const tree = parser.parse(source);
+		if (!tree) return { path: options.path ?? "", tags: [], lineCount: 0 };
+		try {
+			return extractTags(tree, source, options.path ?? "", options);
+		} finally {
+			tree.delete();
+		}
+	} finally {
+		parser.delete();
+	}
+}
+
+/** Walk `root` and extract tags, using `cache` to skip unchanged files. */
+export async function buildRepoMapTags(
+	root: string,
+	ops: RepoMapOps,
+	options: RepoMapTagsOptions = {},
+): Promise<RepoMapTagsResult> {
+	const cache: RepoMapCache<RepoMapFileTags> = options.cache ?? new InMemoryRepoMapCache<RepoMapFileTags>();
+	const maxSnippetLines = options.maxSnippetLines ?? DEFAULT_MAX_SNIPPET_LINES;
+	const scan = await scanRepoFiles(root, ops, options, cache, (tree, source, _language: RepoMapLanguage, path) =>
+		extractTags(tree, source, path, { maxSnippetLines }),
+	);
+	let definitions = 0;
+	let references = 0;
+	for (const file of scan.files) {
+		for (const tag of file.data.tags) {
+			if (tag.kind === "def") definitions++;
+			else references++;
+		}
+	}
+	return {
+		files: scan.files.map(({ path, data }) => ({ path, tags: data.tags, lineCount: data.lineCount })),
+		stats: { ...scan.stats, definitions, references },
+	};
+}

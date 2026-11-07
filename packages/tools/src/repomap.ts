@@ -59,30 +59,31 @@ export interface RepoMapOps {
 	readTextFile(path: string): Promise<string>;
 }
 
-interface CacheEntry {
-	mtimeMs: number;
-	size: number;
-	definitions: RepoMapDefinition[];
+type CacheEntry<T> = { mtimeMs: number; size: number; data: T };
+
+/**
+ * Per-file cache. The payload is whatever the scan extracts: definitions for
+ * P0, tags and snippets for P1. Implementations are synchronous because both
+ * the in-memory map and `bun:sqlite` are.
+ */
+export interface RepoMapCache<T = RepoMapDefinition[]> {
+	get(path: string, mtimeMs: number, size: number): T | undefined;
+	set(path: string, mtimeMs: number, size: number, data: T): void;
 }
 
-export interface RepoMapCache {
-	get(path: string, mtimeMs: number, size: number): RepoMapDefinition[] | undefined;
-	set(path: string, mtimeMs: number, size: number, definitions: RepoMapDefinition[]): void;
-}
+/** The default cache. One process, one repository; see `repomap-sqlite.ts` for persistence. */
+export class InMemoryRepoMapCache<T = RepoMapDefinition[]> implements RepoMapCache<T> {
+	readonly #entries = new Map<string, CacheEntry<T>>();
 
-/** The P0 cache. One process, one repository; a persistent store replaces it later. */
-export class InMemoryRepoMapCache implements RepoMapCache {
-	readonly #entries = new Map<string, CacheEntry>();
-
-	get(path: string, mtimeMs: number, size: number): RepoMapDefinition[] | undefined {
+	get(path: string, mtimeMs: number, size: number): T | undefined {
 		const entry = this.#entries.get(path);
 		// Size as well as mtime: Windows timestamps can be too coarse to tell two
 		// edits in the same tick apart, and a changed size catches nearly all of them.
-		return entry && entry.mtimeMs === mtimeMs && entry.size === size ? entry.definitions : undefined;
+		return entry && entry.mtimeMs === mtimeMs && entry.size === size ? entry.data : undefined;
 	}
 
-	set(path: string, mtimeMs: number, size: number, definitions: RepoMapDefinition[]): void {
-		this.#entries.set(path, { mtimeMs, size, definitions });
+	set(path: string, mtimeMs: number, size: number, data: T): void {
+		this.#entries.set(path, { mtimeMs, size, data });
 	}
 
 	get size(): number {
@@ -94,7 +95,7 @@ export class InMemoryRepoMapCache implements RepoMapCache {
 	}
 }
 
-export interface RepoMapOptions {
+export interface RepoMapOptions<T = RepoMapDefinition[]> {
 	/** Files to consider; defaults to the TS/JS extension set. */
 	pattern?: Bun.Glob;
 	/** Honour `.gitignore` files; on by default, matching Glob. */
@@ -102,7 +103,7 @@ export interface RepoMapOptions {
 	/** Files above this size are skipped without being read. Default: 1 MiB. */
 	maxFileBytes?: number;
 	/** Share one cache across scans to get the hot path. A fresh cache is allocated otherwise. */
-	cache?: RepoMapCache;
+	cache?: RepoMapCache<T>;
 	onUnreadableDirectory?: (path: string) => void;
 }
 
@@ -261,24 +262,6 @@ export async function definitionsInSource(source: string, language: RepoMapLangu
 	}
 }
 
-function parseDefinitions(
-	parser: Parser,
-	languages: RepoMapLanguages,
-	language: RepoMapLanguage,
-	source: string,
-): RepoMapDefinition[] {
-	parser.setLanguage(languages[language]);
-	const tree = parser.parse(source);
-	if (!tree) return [];
-	try {
-		return extractDefinitions(tree);
-	} finally {
-		// Trees hold WASM memory until deleted; a 690-file scan would otherwise
-		// keep all of them alive until the next GC pass.
-		tree.delete();
-	}
-}
-
 function formatRepoMap(files: readonly RepoMapFile[]): string {
 	const lines: string[] = [];
 	for (const file of files) {
@@ -289,22 +272,52 @@ function formatRepoMap(files: readonly RepoMapFile[]): string {
 	return lines.join("\n");
 }
 
+export interface ScannedRepoFile<T> {
+	/** Path relative to the map root, forward slashes. */
+	path: string;
+	data: T;
+}
+
+export interface RepoMapScanStats {
+	/** Files included in the result (parsed plus cached). */
+	files: number;
+	/** Files read and parsed this run. */
+	parsed: number;
+	/** Files served from the cache without a read. */
+	cached: number;
+	/** Files skipped: too large, unreadable, or vanished mid-scan. */
+	skipped: number;
+	/** Source characters read; not bytes, but the right size for a token estimate. */
+	charsRead: number;
+	elapsedMs: number;
+}
+
+export interface RepoMapScanResult<T> {
+	files: ScannedRepoFile<T>[];
+	stats: RepoMapScanStats;
+}
+
+/** Turns one parsed file into the payload the caller wants to cache. */
+export type RepoMapExtractor<T> = (tree: Tree, source: string, language: RepoMapLanguage, path: string) => T;
+
 /**
- * Walk `root` and return every TS/JS file with its top-level definitions.
+ * Walk `root` and extract a payload from every TS/JS file.
  *
  * Files are processed a few at a time: the reads are I/O-bound and the parses
  * are synchronous, so a handful of in-flight reads keeps the disk busy without
  * interleaving parser state. The result is sorted by path, which is what makes
- * two runs comparable byte for byte.
+ * two runs comparable byte for byte, and the cache payload is whatever
+ * `extract` returns — definitions in P0, tags in P1.
  */
-export async function buildRepoMap(
+export async function scanRepoFiles<T>(
 	root: string,
 	ops: RepoMapOps,
-	options: RepoMapOptions = {},
-): Promise<RepoMapResult> {
+	options: RepoMapOptions<T>,
+	cache: RepoMapCache<T>,
+	extract: RepoMapExtractor<T>,
+): Promise<RepoMapScanResult<T>> {
 	const started = performance.now();
 	const languages = await loadRepoMapLanguages();
-	const cache = options.cache ?? new InMemoryRepoMapCache();
 	const paths = await walkProjectFiles(root, ops, {
 		pattern: options.pattern ?? CODE_FILES,
 		respectGitignore: options.respectGitignore ?? true,
@@ -313,11 +326,10 @@ export async function buildRepoMap(
 	const queue = [...paths].sort();
 	const maxBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
 	const parser = new Parser();
-	const files: RepoMapFile[] = [];
+	const files: ScannedRepoFile<T>[] = [];
 	let parsed = 0;
 	let cached = 0;
 	let skipped = 0;
-	let definitions = 0;
 	let charsRead = 0;
 	let cursor = 0;
 
@@ -333,10 +345,9 @@ export async function buildRepoMap(
 				continue;
 			}
 			const known = cache.get(full, stat.mtimeMs, stat.size);
-			if (known) {
+			if (known !== undefined) {
 				cached++;
-				definitions += known.length;
-				files.push({ path, definitions: known });
+				files.push({ path, data: known });
 				continue;
 			}
 			const source = await ops.readTextFile(full).catch(() => null);
@@ -344,12 +355,24 @@ export async function buildRepoMap(
 				skipped++;
 				continue;
 			}
-			const found = parseDefinitions(parser, languages, language, source);
-			cache.set(full, stat.mtimeMs, stat.size, found);
+			parser.setLanguage(languages[language]);
+			const tree = parser.parse(source);
+			if (!tree) {
+				skipped++;
+				continue;
+			}
+			let data: T;
+			try {
+				data = extract(tree, source, language, path);
+			} finally {
+				// Trees hold WASM memory until deleted; a 690-file scan would otherwise
+				// keep all of them alive until the next GC pass.
+				tree.delete();
+			}
+			cache.set(full, stat.mtimeMs, stat.size, data);
 			parsed++;
-			definitions += found.length;
 			charsRead += source.length;
-			files.push({ path, definitions: found });
+			files.push({ path, data });
 		}
 	}
 
@@ -361,15 +384,33 @@ export async function buildRepoMap(
 	files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 	return {
 		files,
-		text: formatRepoMap(files),
 		stats: {
 			files: files.length,
 			parsed,
 			cached,
 			skipped,
-			definitions,
 			charsRead,
 			elapsedMs: performance.now() - started,
 		},
+	};
+}
+
+/**
+ * Walk `root` and return every TS/JS file with its top-level definitions.
+ * This is the P0 report; `buildRepoMapTags` in `repomap-tags.ts` is the P1 one.
+ */
+export async function buildRepoMap(
+	root: string,
+	ops: RepoMapOps,
+	options: RepoMapOptions = {},
+): Promise<RepoMapResult> {
+	const cache = options.cache ?? new InMemoryRepoMapCache();
+	const scan = await scanRepoFiles(root, ops, options, cache, (tree) => extractDefinitions(tree));
+	const files: RepoMapFile[] = scan.files.map(({ path, data }) => ({ path, definitions: data }));
+	const definitions = files.reduce((count, file) => count + file.definitions.length, 0);
+	return {
+		files,
+		text: formatRepoMap(files),
+		stats: { ...scan.stats, definitions },
 	};
 }
