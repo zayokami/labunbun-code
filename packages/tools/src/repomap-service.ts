@@ -58,6 +58,8 @@ export interface RepoMapRequest {
 	maxTokens?: number;
 	/** Drop the cache before scanning, so every file is read again. */
 	refresh?: boolean;
+	/** Cancels the walk and the scan; the map rejects with the signal's reason. */
+	signal?: AbortSignal;
 	chatFiles?: readonly string[];
 	mentionedFiles?: readonly string[];
 	mentionedIdents?: readonly string[];
@@ -240,6 +242,7 @@ export class RepoMapService {
 				onTruncated: () => {
 					truncated = true;
 				},
+				signal: request.signal,
 			}),
 		);
 		const entries = rankRepoMap(scan.files, {

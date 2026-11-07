@@ -217,6 +217,17 @@ describe("createRepoMapTool", () => {
 		expect(result.isError).toBe(true);
 	});
 
+	test("a cancelled scan is an error result, not a map", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const tool = createRepoMapTool(fixtures, { operations: ops });
+
+		const result = await tool.call({}, { ...ctx(), signal: controller.signal });
+
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as { text: string }).text).toMatch(/abort/i);
+	});
+
 	test("is read-only and safe to run beside other reads", () => {
 		const tool = createRepoMapTool(fixtures, { operations: ops });
 

@@ -29,6 +29,7 @@ interface Call {
 	path?: string;
 	maxTokens?: number;
 	refresh?: boolean;
+	signal?: AbortSignal;
 }
 
 function harness() {
@@ -80,6 +81,43 @@ describe("/map", () => {
 
 		expect(calls[0]).toEqual({ path: "src", maxTokens: 2048, refresh: false });
 		expect(calls[1]).toEqual({ path: "src", maxTokens: undefined, refresh: false });
+	});
+
+	test("takes a quoted path with spaces", async () => {
+		const { calls, ctx } = harness();
+		await local("map").call(ctx, '"my folder" --tokens 512');
+
+		expect(calls[0]).toEqual({ path: "my folder", maxTokens: 512, refresh: false });
+	});
+
+	test("forwards the run's signal so Esc can stop the scan", async () => {
+		const { calls, ctx } = harness();
+		const controller = new AbortController();
+		(ctx as unknown as { signal: AbortSignal }).signal = controller.signal;
+
+		await local("map").call(ctx, "");
+
+		expect(calls[0]?.signal).toBe(controller.signal);
+	});
+
+	test("says the map was cancelled rather than failed", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const ctx = {
+			signal: controller.signal,
+			repoMap: {
+				map: async () => {
+					throw new DOMException("The operation was aborted.", "AbortError");
+				},
+			},
+		} as never;
+
+		expect(await local("map").call(ctx, "")).toBe("Repo map cancelled.");
+	});
+
+	test("is cancellable, so the REPL routes Esc to it", () => {
+		expect(local("map").cancellable).toBe(true);
+		expect(local("map-refresh").cancellable).toBe(true);
 	});
 
 	test("a partial map says how much it left out and how to see more", async () => {

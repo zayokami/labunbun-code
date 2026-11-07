@@ -288,11 +288,15 @@ memory.
 **The commands.** `/map [path] [--tokens N]` renders the map and a one-line
 summary; `/map-refresh` does the same after clearing the cache, for a file edited
 outside the session. The directory is positional and the budget needs its flag,
-because a bare number is indistinguishable from a path component. The command
-framework holds a structural `RepoMapCommand` handle rather than importing the
-scanner, and a context without one answers that maps are unavailable. Local
-commands exist only in the REPL; `-p` runs and ACP sessions still get the tool
-and the prompt section.
+because a bare number is indistinguishable from a path component. Arguments are
+split on whitespace outside quotes, so a path with spaces can be typed the way a
+shell would take it. Both commands are `cancellable`: Esc aborts the scan
+through the same `AbortSignal` the walk and the per-file loop check, and the
+report says the map was cancelled rather than failed. The command framework
+holds a structural `RepoMapCommand` handle rather than importing the scanner,
+and a context without one answers that maps are unavailable. Local commands
+exist only in the REPL; `-p` runs and ACP sessions still get the tool and the
+prompt section.
 
 ## Languages, subagents and large trees (P3)
 
@@ -306,7 +310,10 @@ map` the parent holds, between the environment section and project memory. The
 map is read at spawn time, so a subagent spawned after a `/map-refresh` sees the
 new one. It shares the parent's `RepoMap` tool and service already
 (`ctx.allTools()`); the prompt section is the half that was missing. As with the
-parent, a large checkout contributes no section and the worker uses the tool.
+parent, a large checkout contributes no section and the worker uses the tool —
+provided its definition's `tools:` list includes it. An agent restricted to
+`Read, Grep, Glob` gets neither the section nor the tool, so a workspace that
+relies on it should add `RepoMap` to that list.
 
 **Refreshing the prompt.** `/map-refresh` rebuilds the section from the cache the
 scan just filled and calls `sessionRef.setSystemPrompt(buildPrompt(memoryText))`
@@ -324,8 +331,10 @@ checkout reaches it. The walk now takes `maxFiles` and an optional
 and reports `truncated` in its summary. The tool footer and `/map` say the scan
 stopped at its ceiling and the rest of the tree is unindexed, which is a
 different claim from the budget note: one means "more exists but did not fit",
-the other "it was never looked at". `promptSection` is unaffected — it declines
-at 200 files long before either ceiling.
+the other "it was never looked at". The walk collects one match past the
+ceiling before it reports truncation, so a tree with exactly `maxFiles` files is
+complete and does not claim otherwise. `promptSection` is unaffected — it
+declines at 200 files long before either ceiling.
 
 ## Measurements
 

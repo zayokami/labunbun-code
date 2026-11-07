@@ -78,9 +78,9 @@ export function createRepoMapTool(cwd: string, options: RepoMapToolOptions): Any
 		isConcurrencySafe: () => true,
 		// A maximum-budget map is roughly 64,000 characters; the footer fits beside it.
 		maxResultSizeChars: 80_000,
-		call: async (input) => {
+		call: async (input, ctx) => {
 			try {
-				const summary = await service.map(input);
+				const summary = await service.map({ ...input, signal: ctx.signal });
 				return { content: [{ type: "text", text: formatRepoMapResult(summary) }] };
 			} catch (error) {
 				// A path outside the workspace or a directory that cannot be read is

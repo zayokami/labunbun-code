@@ -123,6 +123,8 @@ export interface RepoMapOptions<T = RepoMapDefinition[]> {
 	maxFiles?: number;
 	/** Called once when the walk stops at `maxFiles`, so the caller can say the tree is partial. */
 	onTruncated?: (maxFiles: number) => void;
+	/** Cancels the walk and the file loop. The scan rejects with the signal's reason. */
+	signal?: AbortSignal;
 }
 
 export type RepoMapLanguages = Record<RepoMapLanguage, Language>;
@@ -362,6 +364,7 @@ export async function scanRepoFiles<T>(
 		onUnreadableDirectory: options.onUnreadableDirectory,
 		maxFiles: options.maxFiles,
 		onTruncated: options.onTruncated,
+		signal: options.signal,
 		// The scan sorts by path below; a walk that stats every match only to have
 		// its mtime order discarded would pay the largest cost of a hot scan twice.
 		sortByMtime: false,
@@ -391,46 +394,55 @@ export async function scanRepoFiles<T>(
 	let cursor = 0;
 
 	async function worker(): Promise<void> {
-		while (cursor < queue.length) {
-			const full = queue[cursor++];
-			const path = relative(root, full).split("\\").join("/");
-			const language = repoMapLanguageFor(path);
-			const grammar = language ? languages.get(language) : undefined;
-			if (!language || !grammar) continue;
-			const stat = await ops.stat(full).catch(() => null);
-			if (!stat || stat.size > maxBytes) {
-				skipped++;
-				continue;
+		try {
+			while (cursor < queue.length) {
+				options.signal?.throwIfAborted();
+				const full = queue[cursor++];
+				const path = relative(root, full).split("\\").join("/");
+				const language = repoMapLanguageFor(path);
+				const grammar = language ? languages.get(language) : undefined;
+				if (!language || !grammar) continue;
+				const stat = await ops.stat(full).catch(() => null);
+				if (!stat || stat.size > maxBytes) {
+					skipped++;
+					continue;
+				}
+				const known = cache.get(full, stat.mtimeMs, stat.size);
+				if (known !== undefined) {
+					cached++;
+					files.push({ path, data: known });
+					continue;
+				}
+				const source = await ops.readTextFile(full).catch(() => null);
+				if (source === null) {
+					skipped++;
+					continue;
+				}
+				parser.setLanguage(grammar);
+				const tree = parser.parse(source);
+				if (!tree) {
+					skipped++;
+					continue;
+				}
+				let data: T;
+				try {
+					data = extract(tree, source, language, path);
+				} finally {
+					// Trees hold WASM memory until deleted; a 690-file scan would otherwise
+					// keep all of them alive until the next GC pass.
+					tree.delete();
+				}
+				cache.set(full, stat.mtimeMs, stat.size, data);
+				parsed++;
+				charsRead += source.length;
+				files.push({ path, data });
 			}
-			const known = cache.get(full, stat.mtimeMs, stat.size);
-			if (known !== undefined) {
-				cached++;
-				files.push({ path, data: known });
-				continue;
-			}
-			const source = await ops.readTextFile(full).catch(() => null);
-			if (source === null) {
-				skipped++;
-				continue;
-			}
-			parser.setLanguage(grammar);
-			const tree = parser.parse(source);
-			if (!tree) {
-				skipped++;
-				continue;
-			}
-			let data: T;
-			try {
-				data = extract(tree, source, language, path);
-			} finally {
-				// Trees hold WASM memory until deleted; a 690-file scan would otherwise
-				// keep all of them alive until the next GC pass.
-				tree.delete();
-			}
-			cache.set(full, stat.mtimeMs, stat.size, data);
-			parsed++;
-			charsRead += source.length;
-			files.push({ path, data });
+		} catch (error) {
+			// Cancellation is the caller's decision, not a scan failure: swallow it
+			// so every worker has settled before the parser is deleted, then rethrow
+			// below. A worker still running against a freed parser after
+			// `Promise.all` rejected would crash rather than stop.
+			if (!options.signal?.aborted) throw error;
 		}
 	}
 
@@ -442,6 +454,7 @@ export async function scanRepoFiles<T>(
 	} finally {
 		parser.delete();
 	}
+	options.signal?.throwIfAborted();
 	files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 	return {
 		files,

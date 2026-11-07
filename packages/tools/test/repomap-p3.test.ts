@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { walkProjectFiles } from "../src/glob.ts";
 import { NodeFileSystemOperations } from "../src/operations.ts";
-import { buildRepoMap, definitionsInSource, repoMapLanguageFor } from "../src/repomap.ts";
+import { buildRepoMap, definitionsInSource, REPO_MAP_CODE_FILES, repoMapLanguageFor } from "../src/repomap.ts";
 import { RepoMapService } from "../src/repomap-service.ts";
 import { buildRepoMapTags, tagsInSource } from "../src/repomap-tags.ts";
 import { formatRepoMapResult } from "../src/repomap-tool.ts";
@@ -198,6 +198,27 @@ describe("Java", () => {
 		]);
 		expect(references(tags)).toEqual(["helper", "make"]);
 	});
+
+	test("names annotation types, annotation uses and scoped constructors", async () => {
+		const annotated = [
+			"package demo;",
+			"@Marker",
+			"class Box {",
+			"    void run() { new java.util.ArrayList<String>(); }",
+			"}",
+			"@interface Marker { }",
+		].join("\n");
+
+		// The class node starts at its first annotation, which is also the first
+		// line a reader would call part of the declaration.
+		expect(await definitionsInSource(annotated, "java")).toEqual([
+			{ name: "Box", kind: "class", line: 2 },
+			{ name: "Marker", kind: "interface", line: 6 },
+		]);
+
+		const { tags } = await tagsInSource(annotated, "java", { path: "src/Box.java" });
+		expect(references(tags)).toEqual(["Marker", "ArrayList"]);
+	});
 });
 
 describe("C#", () => {
@@ -236,6 +257,23 @@ describe("C#", () => {
 			"class:Row",
 		]);
 		expect(references(tags)).toEqual(["Helper", "Make"]);
+	});
+
+	test("names generic invocations, properties and delegates", async () => {
+		const generic = [
+			"namespace Demo {",
+			"    class Box<T> {",
+			"        public int Count { get; set; }",
+			"        public void Add() { Helper<int>(); box.Save<string>(); }",
+			"    }",
+			"    delegate void Handler(int value);",
+			"}",
+		].join("\n");
+
+		const { tags } = await tagsInSource(generic, "c-sharp", { path: "src/Box.cs" });
+
+		expect(definitions(tags)).toEqual(["class:Box", "method:Count", "method:Add", "type:Handler"]);
+		expect(references(tags)).toEqual(["Helper", "Save"]);
 	});
 });
 
@@ -286,6 +324,38 @@ describe("C++", () => {
 			{ name: "ref_fn", kind: "function", line: 1 },
 			{ name: "operator=", kind: "function", line: 2 },
 		]);
+	});
+
+	test("names prototypes in headers and macros", async () => {
+		const header = [
+			"#define MAX(a, b) ((a) > (b) ? (a) : (b))",
+			"#define LIMIT 10",
+			"struct Box {",
+			"    int area() const;",
+			"    int *scan();",
+			"    ~Box();",
+			"};",
+			"int Box::area() const { return helper(); }",
+		].join("\n");
+
+		expect(await definitionsInSource(header, "cpp")).toEqual([
+			{ name: "MAX", kind: "function", line: 1 },
+			{ name: "LIMIT", kind: "type", line: 2 },
+			{ name: "Box", kind: "class", line: 3 },
+			{ name: "area", kind: "function", line: 8 },
+		]);
+
+		const { tags } = await tagsInSource(header, "cpp", { path: "include/box.hpp" });
+		expect(definitions(tags)).toEqual([
+			"function:MAX",
+			"type:LIMIT",
+			"class:Box",
+			"method:area",
+			"method:scan",
+			"method:~Box",
+			"function:area",
+		]);
+		expect(references(tags)).toEqual(["helper"]);
 	});
 
 	test("descends templates, extern C blocks and preprocessor branches", async () => {
@@ -403,6 +473,20 @@ describe("PHP", () => {
 			"function:free_function",
 		]);
 		expect(references(tags)).toEqual(["helper", "make", "helper"]);
+	});
+
+	test("reads qualified calls, qualified constructors and nullsafe calls", async () => {
+		const qualified = [
+			"<?php",
+			"\\App\\Sub\\helper();",
+			"new \\App\\Sub\\Braced();",
+			"$obj?->run();",
+			"$obj?->value;",
+		].join("\n");
+
+		const { tags } = await tagsInSource(qualified, "php", { path: "web/box.php" });
+
+		expect(references(tags)).toEqual(["helper", "Braced", "run"]);
 	});
 });
 
@@ -525,6 +609,24 @@ describe("a repository past the file ceiling", () => {
 		expect(reported).toEqual([2]);
 	});
 
+	test("a tree with exactly the ceiling is complete", async () => {
+		const root = tempDir();
+		for (const name of ["a.ts", "b.ts"]) write(root, name, "export function f() {}\n");
+		// A file the pattern does not match, so the walk has to look past the
+		// last match: seeing it must not be mistaken for seeing one match too many.
+		write(root, "notes.md", "# notes\n");
+		let reported = 0;
+
+		const paths = await walkProjectFiles(root, ops, {
+			pattern: new Bun.Glob("**/*.ts"),
+			maxFiles: 2,
+			onTruncated: () => reported++,
+		});
+
+		expect(paths).toHaveLength(2);
+		expect(reported).toBe(0);
+	});
+
 	test("a map that hits the ceiling says the tree is partial", async () => {
 		const root = tempDir();
 		for (const name of ["a.ts", "b.ts", "c.ts"]) write(root, name, `export function ${name[0]}() {}\n`);
@@ -601,6 +703,16 @@ describe("scan economics", () => {
 
 		expect(section).toBeUndefined();
 		expect(stats).toBe(0);
+	});
+
+	test("the default pattern walks code files whatever case their extension is", async () => {
+		const root = tempDir();
+		write(root, "A.C", "int main() { return 0; }\n");
+		write(root, "B.PY", "def main():\n    pass\n");
+
+		const paths = await walkProjectFiles(root, ops, { pattern: REPO_MAP_CODE_FILES });
+
+		expect(paths.map((path) => path.split("/").at(-1)).sort()).toEqual(["A.C", "B.PY"]);
 	});
 
 	test("a skipped file is reported instead of silently omitted", async () => {

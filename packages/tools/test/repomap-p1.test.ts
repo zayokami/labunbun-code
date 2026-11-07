@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { NodeFileSystemOperations } from "../src/operations.ts";
 import { generateRepoMap } from "../src/repomap-generate.ts";
-import { rankRepoMap } from "../src/repomap-rank.ts";
+import { cappedReferences, rankRepoMap } from "../src/repomap-rank.ts";
 import { estimateTokens, renderRepoMap, repoMapTokenBudget } from "../src/repomap-render.ts";
 import { SqliteRepoMapCache } from "../src/repomap-sqlite.ts";
 import {
@@ -67,6 +67,25 @@ describe("extractTags", () => {
 			"method:draw",
 		]);
 		expect(tags.filter((tag) => tag.kind === "ref").map((tag) => tag.name)).toEqual(["beta", "Widget", "run", "move"]);
+	});
+
+	test("tags function and class fields, and does not call module.exports a definition", async () => {
+		const source = [
+			"class Box {",
+			"  handler = () => 1;",
+			"  Child = class {};",
+			"}",
+			"module.exports = function () {};",
+			"module.exports.render = () => 1;",
+		].join("\n");
+		const { tags } = await tagsInSource(source, "typescript");
+
+		expect(tags.filter((tag) => tag.kind === "def").map((tag) => `${tag.definitionKind}:${tag.name}`)).toEqual([
+			"class:Box",
+			"method:handler",
+			"class:Child",
+			"function:render",
+		]);
 	});
 
 	test("keeps a function body but drops its closing brace and class bodies", async () => {
@@ -155,6 +174,35 @@ describe("rankRepoMap", () => {
 	test("keeps files that define and reference nothing as bare entries", () => {
 		const entries = rankRepoMap([...graph, { path: "readme.ts", lineCount: 1, tags: [] }]);
 		expect(entries.at(-1)).toMatchObject({ kind: "file", path: "readme.ts" });
+	});
+});
+
+describe("cappedReferences", () => {
+	test("keeps every referencer in insertion order under the cap", () => {
+		const counts = new Map([
+			["a.ts", 1],
+			["b.ts", 1],
+			["c.ts", 1],
+		]);
+		expect(cappedReferences(counts, 2, 100)).toEqual([
+			["a.ts", 1],
+			["b.ts", 1],
+			["c.ts", 1],
+		]);
+	});
+
+	test("keeps the strongest referencers over the cap", () => {
+		const counts = new Map([
+			["a.ts", 5],
+			["b.ts", 3],
+			["c.ts", 1],
+		]);
+		expect(cappedReferences(counts, 2, 2)).toEqual([["a.ts", 5]]);
+	});
+
+	test("keeps one referencer even when a single definer alone exceeds the cap", () => {
+		const counts = new Map([["a.ts", 1]]);
+		expect(cappedReferences(counts, 10, 1)).toEqual([["a.ts", 1]]);
 	});
 });
 

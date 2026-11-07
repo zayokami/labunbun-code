@@ -82,6 +82,12 @@ export async function walkProjectFiles(
 		 * cost of a hot scan.
 		 */
 		sortByMtime?: boolean;
+		/**
+		 * Cancels the walk. The check is per directory and per entry, so a stopped
+		 * `/map` stops reading the tree rather than finishing an index nobody is
+		 * waiting for.
+		 */
+		signal?: AbortSignal;
 	} = {},
 ): Promise<string[]> {
 	const glob = opts.pattern ?? null;
@@ -89,8 +95,11 @@ export async function walkProjectFiles(
 	const sortByMtime = opts.sortByMtime ?? true;
 	let truncated = false;
 
+	// The walk collects one match past the ceiling before it stops: a tree with
+	// exactly `maxFiles` matching files is complete, and only a sighting of the
+	// next match tells the difference between "that was all" and "that was cut".
 	function atLimit(): boolean {
-		if (matches.length < maxFiles) return false;
+		if (matches.length <= maxFiles) return false;
 		if (!truncated) {
 			truncated = true;
 			opts.onTruncated?.(maxFiles);
@@ -113,6 +122,7 @@ export async function walkProjectFiles(
 	const matches: Array<{ path: string; mtimeMs: number }> = [];
 
 	async function walk(dir: string, depth: number, chain: readonly IgnoreSet[]): Promise<void> {
+		opts.signal?.throwIfAborted();
 		if (depth > MAX_DEPTH || atLimit()) return;
 		const entries = await ops.readdir(dir).catch((error: unknown) => {
 			if (!isMissingPathError(error)) opts.onUnreadableDirectory?.(dir);
@@ -144,6 +154,7 @@ export async function walkProjectFiles(
 			}
 		}
 		for (const entry of entries) {
+			opts.signal?.throwIfAborted();
 			if (atLimit()) return;
 			const full = join(dir, entry.name);
 			const ignored = here.length > 0 && isIgnored(here, full, entry.isDirectory);
@@ -172,6 +183,13 @@ export async function walkProjectFiles(
 	}
 
 	await walk(root, 0, []);
+	if (matches.length > maxFiles) {
+		matches.length = maxFiles;
+		if (!truncated) {
+			truncated = true;
+			opts.onTruncated?.(maxFiles);
+		}
+	}
 	if (sortByMtime) matches.sort((a, b) => b.mtimeMs - a.mtimeMs);
 	return matches.map((m) => m.path.split("\\").join("/"));
 }

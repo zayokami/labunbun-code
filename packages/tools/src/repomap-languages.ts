@@ -46,9 +46,49 @@ export const REPO_MAP_LANGUAGES: readonly RepoMapLanguage[] = [
 	"powershell",
 ];
 
+/**
+ * The extensions a map parses, without the dot.
+ *
+ * The glob spells each one twice, in lower and upper case: `Bun.Glob` matches
+ * case-sensitively while `repoMapLanguageFor` lowercases, and a checkout with
+ * `foo.C`, `foo.H` (common for C/C++ on Windows) or a renamed `.PY` file must
+ * not disappear from the map.
+ */
+const REPO_MAP_CODE_EXTENSIONS = [
+	"ts",
+	"tsx",
+	"mts",
+	"cts",
+	"js",
+	"jsx",
+	"mjs",
+	"cjs",
+	"py",
+	"go",
+	"rs",
+	"java",
+	"cs",
+	"cpp",
+	"cc",
+	"cxx",
+	"hpp",
+	"hh",
+	"hxx",
+	"c",
+	"h",
+	"rb",
+	"rake",
+	"php",
+	"sh",
+	"bash",
+	"ps1",
+	"psm1",
+	"psd1",
+] as const;
+
 /** The files a map considers. Shared with the small-repository threshold, which must count the same set. */
 export const REPO_MAP_CODE_FILES = new Bun.Glob(
-	"**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,py,go,rs,java,cs,cpp,cc,cxx,hpp,hh,hxx,c,h,rb,rake,php,sh,bash,ps1,psm1,psd1}",
+	`**/*.{${REPO_MAP_CODE_EXTENSIONS.flatMap((extension) => [extension, extension.toUpperCase()]).join(",")}}`,
 );
 
 /** The grammar for a path, or null when the extension is not one a map parses. */
@@ -163,16 +203,31 @@ function jsDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
 			const name = node.childForFieldName("name");
 			return name?.type === "identifier" ? { name: name.text, kind } : null;
 		}
+		case "public_field_definition": {
+			// `handler = () => …` and `Child = class {}` inside a class body.
+			const value = node.childForFieldName("value");
+			if (!value) return null;
+			const kind: RepoMapTagDefinitionKind | undefined =
+				value.type === "class" ? "class" : JS_FUNCTION_VALUES.has(value.type) ? "method" : undefined;
+			const name = node.childForFieldName("name");
+			if (!kind || name?.type !== "property_identifier") return null;
+			return { name: name.text, kind };
+		}
 		case "assignment_expression": {
 			// `module.exports.f = () => …` and `exports.f = function () { … }`.
 			const right = node.childForFieldName("right");
-			if (!right || !JS_FUNCTION_VALUES.has(right.type)) return null;
+			if (!right || !(JS_FUNCTION_VALUES.has(right.type) || right.type === "class")) return null;
+			const kind: RepoMapTagDefinitionKind = right.type === "class" ? "class" : "function";
 			const left = node.childForFieldName("left");
 			if (!left) return null;
-			if (left.type === "identifier") return { name: left.text, kind: "function" };
+			if (left.type === "identifier") return { name: left.text, kind };
 			if (left.type === "member_expression") {
+				const object = left.childForFieldName("object");
 				const property = left.childForFieldName("property");
-				if (property?.type === "property_identifier") return { name: property.text, kind: "function" };
+				// `module.exports = …` declares no name called `exports`; the export
+				// target can only be read through the property.
+				if (object?.type === "identifier" && object.text === "module" && property?.text === "exports") return null;
+				if (property?.type === "property_identifier") return { name: property.text, kind };
 			}
 			return null;
 		}
@@ -319,6 +374,8 @@ function rustReference(node: SyntaxNode): string | null {
 const JAVA_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
 	class_declaration: "class",
 	interface_declaration: "interface",
+	// `@interface` is the source spelling of an annotation type.
+	annotation_type_declaration: "interface",
 	enum_declaration: "enum",
 	record_declaration: "class",
 	method_declaration: "method",
@@ -327,12 +384,21 @@ const JAVA_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
 /** The type of a `new X()`: a name, possibly generic or qualified. */
 function javaTypeName(node: SyntaxNode): string | null {
 	switch (node.type) {
+		case "identifier":
 		case "type_identifier":
 			return node.text;
-		case "generic_type":
-			return node.namedChildren.find((child) => child?.type === "type_identifier")?.text ?? null;
-		case "scoped_type_identifier":
-			return node.childForFieldName("name")?.text ?? null;
+		case "generic_type": {
+			const type = node.namedChildren.find((child) => child && child.type !== "type_arguments");
+			return type ? javaTypeName(type) : null;
+		}
+		// `java.util.ArrayList` has no `name` field in this grammar; the last
+		// segment is the type, whatever the scope nested inside it.
+		case "scoped_identifier":
+		case "scoped_type_identifier": {
+			const names = node.namedChildren.filter((child) => child !== null);
+			const last = names.length > 0 ? names[names.length - 1] : null;
+			return last ? javaTypeName(last) : null;
+		}
 		default:
 			return null;
 	}
@@ -346,6 +412,12 @@ function javaReference(node: SyntaxNode): string | null {
 		case "object_creation_expression": {
 			const type = node.childForFieldName("type");
 			return type ? javaTypeName(type) : null;
+		}
+		// `@Marker` and `@Marker(value)` reach the annotation type's file.
+		case "marker_annotation":
+		case "annotation": {
+			const name = node.childForFieldName("name");
+			return name ? javaTypeName(name) : null;
 		}
 		default:
 			return null;
@@ -363,6 +435,10 @@ const CSHARP_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
 	struct_declaration: "class",
 	record_declaration: "class",
 	method_declaration: "method",
+	// A property is a member like a method; the map does not distinguish them.
+	property_declaration: "method",
+	// A delegate declares a type, not a callable implementation.
+	delegate_declaration: "type",
 };
 
 /** A created type can be generic (`Widget<int>`) or qualified (`App.Widget`). */
@@ -372,8 +448,26 @@ function csharpTypeName(node: SyntaxNode): string | null {
 			return node.text;
 		case "generic_name":
 			return node.namedChildren.find((child) => child?.type === "identifier")?.text ?? null;
-		case "qualified_name":
-			return node.childForFieldName("name")?.text ?? null;
+		case "qualified_name": {
+			const name = node.childForFieldName("name");
+			return name ? csharpTypeName(name) : null;
+		}
+		default:
+			return null;
+	}
+}
+
+/** The name an invocation reaches: `f()`, `obj.f()`, `f<int>()` or `obj.f<int>()`. */
+function csharpCalleeName(node: SyntaxNode): string | null {
+	switch (node.type) {
+		case "identifier":
+			return node.text;
+		case "generic_name":
+			return csharpTypeName(node);
+		case "member_access_expression": {
+			const name = node.childForFieldName("name");
+			return name ? csharpTypeName(name) : null;
+		}
 		default:
 			return null;
 	}
@@ -383,10 +477,7 @@ function csharpReference(node: SyntaxNode): string | null {
 	switch (node.type) {
 		case "invocation_expression": {
 			const fn = node.childForFieldName("function");
-			if (!fn) return null;
-			if (fn.type === "identifier") return fn.text;
-			if (fn.type === "member_access_expression") return fn.childForFieldName("name")?.text ?? null;
-			return null;
+			return fn ? csharpCalleeName(fn) : null;
 		}
 		case "object_creation_expression": {
 			const type = node.childForFieldName("type");
@@ -436,6 +527,8 @@ function cppDeclaratorName(node: SyntaxNode): string | null {
 		case "field_identifier":
 		case "operator_name":
 			return current.text;
+		case "destructor_name":
+			return current.text;
 		case "qualified_identifier":
 			return current.childForFieldName("name")?.text ?? null;
 		default:
@@ -443,16 +536,54 @@ function cppDeclaratorName(node: SyntaxNode): string | null {
 	}
 }
 
-function cppDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
-	if (node.type === "function_definition") {
-		const declarator = node.childForFieldName("declarator");
-		const name = declarator ? cppDeclaratorName(declarator) : null;
-		return name ? { name, kind: "function" } : null;
+/** Whether a declarator spells a function rather than a variable. */
+function cppIsFunctionDeclarator(node: SyntaxNode): boolean {
+	let current = node;
+	for (;;) {
+		if (current.type === "function_declarator" || current.type === "destructor_name") return true;
+		const inner =
+			current.childForFieldName("declarator") ??
+			current.namedChildren.find((child) => child && CPP_DECLARATOR_WRAPPERS.has(child.type));
+		if (!inner || inner === current) return false;
+		current = inner;
 	}
-	const kind = CPP_DECLARATIONS[node.type];
-	if (!kind) return null;
-	const name = node.childForFieldName("name");
-	return name ? { name: name.text, kind } : null;
+}
+
+function cppDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
+	switch (node.type) {
+		case "function_definition": {
+			const declarator = node.childForFieldName("declarator");
+			const name = declarator ? cppDeclaratorName(declarator) : null;
+			return name ? { name, kind: "function" } : null;
+		}
+		// A prototype declares the same name the definition later spells out:
+		// `int area() const;` in a header, `int Box::area() { … }` in a source
+		// file. A plain variable declaration has no function declarator.
+		case "declaration":
+		case "field_declaration": {
+			const declarator = node.childForFieldName("declarator");
+			if (!declarator || !cppIsFunctionDeclarator(declarator)) return null;
+			const name = cppDeclaratorName(declarator);
+			if (!name) return null;
+			return { name, kind: node.parent?.type === "field_declaration_list" ? "method" : "function" };
+		}
+		case "preproc_function_def": {
+			const name = node.childForFieldName("name");
+			return name ? { name: name.text, kind: "function" } : null;
+		}
+		// An object-like macro names a constant; `type` is the nearest kind the
+		// map has for a value that is not callable.
+		case "preproc_def": {
+			const name = node.childForFieldName("name");
+			return name ? { name: name.text, kind: "type" } : null;
+		}
+		default: {
+			const kind = CPP_DECLARATIONS[node.type];
+			if (!kind) return null;
+			const name = node.childForFieldName("name");
+			return name ? { name: name.text, kind } : null;
+		}
+	}
 }
 
 /** `f()`, `obj.f()`, `A::f()` and the templated forms all name one callee. */
@@ -548,15 +679,38 @@ function phpDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
 	}
 }
 
+/** The last segment of a possibly qualified name: `\App\Sub\helper` names `helper`. */
+function phpNameText(node: SyntaxNode): string | null {
+	switch (node.type) {
+		case "name":
+			return node.text;
+		case "qualified_name": {
+			const names = node.namedChildren.filter((child) => child?.type === "name");
+			const last = names.length > 0 ? names[names.length - 1] : null;
+			return last ? last.text : null;
+		}
+		default:
+			return null;
+	}
+}
+
 function phpReference(node: SyntaxNode): string | null {
 	switch (node.type) {
-		case "function_call_expression":
-			return node.childForFieldName("function")?.text ?? null;
+		case "function_call_expression": {
+			const fn = node.childForFieldName("function");
+			return fn ? phpNameText(fn) : null;
+		}
+		// `$obj->f()` and `$obj?->f()` reach the same name.
 		case "member_call_expression":
+		case "nullsafe_member_call_expression":
 		case "scoped_call_expression":
 			return node.childForFieldName("name")?.text ?? null;
-		case "object_creation_expression":
-			return node.namedChildren.find((child) => child?.type === "name")?.text ?? null;
+		case "object_creation_expression": {
+			const type = node.namedChildren.find(
+				(child) => child && (child.type === "name" || child.type === "qualified_name"),
+			);
+			return type ? phpNameText(type) : null;
+		}
 		default:
 			return null;
 	}

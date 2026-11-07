@@ -34,6 +34,36 @@ export interface RankRepoMapOptions {
 	mentionedIdents?: readonly string[];
 	/** PageRank damping. Default: 0.85, the networkx default Aider relies on. */
 	alpha?: number;
+	/**
+	 * Edges one identifier may contribute. Default:
+	 * `REPO_MAP_MAX_IDENT_EDGES`. A name defined in a few files and referenced by
+	 * every file would otherwise materialize `definers × referencers` edges — a
+	 * million on a pathological tree, and gigabytes of memory. Over the cap, the
+	 * strongest referencers keep their edges.
+	 */
+	maxEdgesPerIdent?: number;
+}
+
+/** A helper name (`common`, `get`, `main`) referenced everywhere must not size the graph. */
+export const REPO_MAP_MAX_IDENT_EDGES = 20_000;
+
+/**
+ * The references that stay under the edge cap, strongest first. Under the cap
+ * this is every reference in insertion order, which keeps an ordinary map's
+ * graph byte-identical to the uncapped one.
+ */
+export function cappedReferences(
+	counts: ReadonlyMap<string, number>,
+	definers: number,
+	maxEdges: number = REPO_MAP_MAX_IDENT_EDGES,
+): Array<[string, number]> {
+	const entries = [...counts.entries()];
+	if (entries.length * definers <= maxEdges) return entries;
+	// At least one referencer survives even when one identifier alone exceeds the
+	// cap, so the name stays connected instead of vanishing from the graph.
+	const keep = Math.max(1, Math.floor(maxEdges / Math.max(1, definers)));
+	entries.sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+	return entries.slice(0, keep);
 }
 
 interface GraphEdge {
@@ -72,6 +102,7 @@ function buildGraph(
 	files: readonly RepoMapFileTags[],
 	chatFiles: ReadonlySet<string>,
 	mentionedIdents: ReadonlySet<string>,
+	maxEdgesPerIdent: number,
 ): { graph: RankedGraph; definitions: Map<string, RepoMapTag[]>; allPaths: string[] } {
 	const defines = new Map<string, Set<string>>();
 	const references = new Map<string, string[]>();
@@ -125,7 +156,7 @@ function buildGraph(
 			counts.set(referencer, (counts.get(referencer) ?? 0) + 1);
 		}
 		const mul = identifierMultiplier(ident, mentionedIdents, definers.size);
-		for (const [referencer, count] of counts) {
+		for (const [referencer, count] of cappedReferences(counts, definers.size, maxEdgesPerIdent)) {
 			const useMul = mul * (chatFiles.has(referencer) ? 50 : 1);
 			// Aider takes the square root inside the definer loop, so a name with
 			// several definers decays once per definer. That looks accidental; the
@@ -208,7 +239,12 @@ export function rankRepoMap(files: readonly RepoMapFileTags[], options: RankRepo
 	const chatFiles = toPathSet(options.chatFiles);
 	const mentionedFiles = toPathSet(options.mentionedFiles);
 	const mentionedIdents = new Set(options.mentionedIdents ?? []);
-	const { graph, definitions, allPaths } = buildGraph(files, chatFiles, mentionedIdents);
+	const { graph, definitions, allPaths } = buildGraph(
+		files,
+		chatFiles,
+		mentionedIdents,
+		options.maxEdgesPerIdent ?? REPO_MAP_MAX_IDENT_EDGES,
+	);
 	if (files.length === 0) return [];
 
 	const personalize = 100 / files.length;

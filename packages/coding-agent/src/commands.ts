@@ -53,7 +53,12 @@ export interface RepoMapCommandResult {
  * embedder) has none, and the commands answer that rather than throwing.
  */
 export interface RepoMapCommand {
-	map(options: { path?: string; maxTokens?: number; refresh?: boolean }): Promise<RepoMapCommandResult>;
+	map(options: {
+		path?: string;
+		maxTokens?: number;
+		refresh?: boolean;
+		signal?: AbortSignal;
+	}): Promise<RepoMapCommandResult>;
 }
 
 export interface LocalCommandContext {
@@ -363,12 +368,16 @@ export function builtInCommands(): Command[] {
 			name: "map",
 			description: "Show the ranked repository map: /map [path] [--tokens N]",
 			type: "local",
+			// Esc stops a cold scan of a large tree; the scan checks the signal per
+			// file and the walk checks it per entry.
+			cancellable: true,
 			call: (ctx, args) => showRepoMap(ctx, args, false),
 		},
 		{
 			name: "map-refresh",
 			description: "Rebuild the repository map from disk: /map-refresh [path] [--tokens N]",
 			type: "local",
+			cancellable: true,
 			call: (ctx, args) => showRepoMap(ctx, args, true),
 		},
 	];
@@ -383,7 +392,7 @@ export function builtInCommands(): Command[] {
  * still answers at the default, and the caller sees the token count it got.
  */
 function parseRepoMapArgs(args: string): { path?: string; maxTokens?: number } {
-	const tokens = args.split(/\s+/).filter(Boolean);
+	const tokens = splitQuotedArgs(args);
 	let path: string | undefined;
 	let maxTokens: number | undefined;
 	for (let index = 0; index < tokens.length; index++) {
@@ -401,6 +410,30 @@ function parseRepoMapArgs(args: string): { path?: string; maxTokens?: number } {
 		if (path === undefined) path = token;
 	}
 	return { path, maxTokens };
+}
+
+/** Split on whitespace, keeping a quoted path with spaces in it one token. */
+function splitQuotedArgs(args: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: '"' | "'" | null = null;
+	for (const char of args) {
+		if (quote) {
+			if (char === quote) quote = null;
+			else current += char;
+		} else if (char === '"' || char === "'") {
+			quote = char;
+		} else if (/\s/.test(char)) {
+			if (current !== "") {
+				tokens.push(current);
+				current = "";
+			}
+		} else {
+			current += char;
+		}
+	}
+	if (current !== "") tokens.push(current);
+	return tokens;
 }
 
 function formatRepoMapReport(result: RepoMapCommandResult): string {
@@ -432,9 +465,11 @@ async function showRepoMap(ctx: LocalCommandContext, args: string, refresh: bool
 	const { path, maxTokens } = parseRepoMapArgs(args);
 	let report: string;
 	try {
-		const result = await ctx.repoMap.map({ path, maxTokens, refresh });
+		const result = await ctx.repoMap.map({ path, maxTokens, refresh, signal: ctx.signal });
 		report = formatRepoMapReport(result);
 	} catch (error) {
+		// Esc is not a failure to report as one: the user stopped the scan.
+		if (ctx.signal?.aborted) return "Repo map cancelled.";
 		return `Repo map failed: ${error instanceof Error ? error.message : String(error)}`;
 	}
 	// Only a refresh offers the new map to the model; `/map` is a look. The
