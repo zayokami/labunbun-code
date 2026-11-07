@@ -63,6 +63,7 @@ export {
 	REPO_MAP_MIN_TOKENS,
 	REPO_MAP_PROMPT_MAX_BYTES,
 	REPO_MAP_PROMPT_MAX_FILES,
+	REPO_MAP_SCAN_MAX_FILES,
 	type RepoMapPromptOptions,
 	type RepoMapPromptSection,
 	type RepoMapRequest,

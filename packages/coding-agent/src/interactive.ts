@@ -1320,9 +1320,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		allTools: () => [...tools, skillTool, ...mcpConnections.flatMap((c) => c.tools)],
 		definitions: () => agentDefinitions,
 		// The role definition first, then the context every subagent shares with
-		// the session that spawned it: environment, project memory, skills. Memory
-		// is read through `memoryText`, the live value the `#` handler refreshes,
-		// so a note appended before a spawn reaches that subagent. `skillsBlock` is
+		// the session that spawned it: environment, repository map, project memory,
+		// skills. Memory is read through `memoryText`, the live value the `#`
+		// handler refreshes, and the map through `repoMapText`, which `/map-refresh`
+		// replaces, so a spawn after either sees the current text. `skillsBlock` is
 		// the startup discovery block, read through the arrow like `skillTool`
 		// above. No output style and no language line: a subagent's output is a
 		// report to its parent, so a voice instruction belongs to the parent.
@@ -1333,6 +1334,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					cwd,
 					platform: process.platform,
 					isTTY: true,
+					repoMap: repoMapText,
 					memory: memoryText,
 					skills: skillsBlock,
 					model: workerModel,
@@ -1493,17 +1495,19 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// The skill discovery block is built once at startup and shared by the main
 	// prompt and by every subagent's context block, so the two see one list.
 	const skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
-	// The repository's shape, when it fits the prompt. Computed once: the files
-	// do not change under a running prompt, and `/map-refresh` is the way to ask
-	// for a new one. A large checkout gets no section — the RepoMap tool answers
-	// there instead, with a budget the model can raise.
-	const repoMapText = await repoMapPromptSection(repoMap);
+	// The repository's shape, when it fits the prompt. Computed at startup and
+	// replaced by `/map-refresh`: the section is part of the live system prompt,
+	// so a refresh has to rebuild the prompt rather than only the screen. A
+	// large checkout gets no section — the RepoMap tool answers there instead,
+	// with a budget the model can raise.
+	let repoMapText = await repoMapPromptSection(repoMap);
 	/**
 	 * The system prompt for a given memory text. Built once at startup, then
 	 * rebuilt by the `#` shortcut after it re-reads the memory files: the note
 	 * has to be in the next request, not the next process, because the output
-	 * already tells the user it was remembered. The options are otherwise the
-	 * same as the startup build, so only the memory section differs.
+	 * already tells the user it was remembered. `/model` and `/map-refresh`
+	 * rebuild through the same function, with the same options as the startup
+	 * build — so only the section each one changed differs from the last prompt.
 	 */
 	const buildPrompt = (currentMemory: string, activeModel: Model = sessionRef?.model ?? model) => {
 		// The style files are loaded through the same trust gate as the rest of
@@ -2382,6 +2386,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				settings,
 				cwd,
 				repoMap,
+				// `/map-refresh` has already dropped the cache and re-read the tree;
+				// the section is rebuilt from that warm cache, so this is a prompt
+				// swap rather than a second cold scan. A declined section (too many
+				// files) becomes `undefined`, which removes a map the session may no
+				// longer deserve to carry.
+				onRepoMapRefreshed: async () => {
+					repoMapText = await repoMapPromptSection(repoMap);
+					sessionRef?.setSystemPrompt(buildPrompt(memoryText));
+				},
 				sandboxBackend: ops.sandboxBackend,
 				appContainerReason: ops.appContainerReason,
 				spawnConfine,
@@ -3117,6 +3130,12 @@ interface AppCommandContext {
 	 */
 	repoMap?: RepoMapCommand;
 	/**
+	 * Recompute the prompt's repository map after `/map-refresh` and swap it into
+	 * the live session. The closure lives here, not in the command framework,
+	 * because only the REPL owns the prompt builder and the session handle.
+	 */
+	onRepoMapRefreshed?(): Promise<void> | void;
+	/**
 	 * What confines commands run through this session's exec backend, if it can
 	 * say. `/permissions` is the screen a user opens to find out what is actually
 	 * holding the session in, and the sandbox axis is half of the answer — so it
@@ -3400,6 +3419,7 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 				(await ctx.preCompact?.(trigger, customInstructions)) ?? { blocked: false },
 			cwd: ctx.cwd,
 			repoMap: ctx.repoMap,
+			onRepoMapRefreshed: () => ctx.onRepoMapRefreshed?.(),
 			pushInfo: (info) => pushInfo(ctx.handle, info),
 			home: ctx.home,
 			dialog: ctx.handle ?? undefined,

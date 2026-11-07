@@ -23,6 +23,13 @@ export const REPO_MAP_DEFAULT_TOKENS = 1024;
 export const REPO_MAP_PROMPT_MAX_FILES = 200;
 export const REPO_MAP_PROMPT_MAX_BYTES = 512 * 1024;
 
+/**
+ * Files one map will scan. The walker's own default is 5,000, which a
+ * million-line checkout reaches; a map may look further because it reports what
+ * it stopped at rather than presenting a prefix of the tree as the whole.
+ */
+export const REPO_MAP_SCAN_MAX_FILES = 20_000;
+
 export interface RepoMapServiceOptions {
 	/** Workspace root. Every map path is resolved and contained against this. */
 	root: string;
@@ -40,6 +47,8 @@ export interface RepoMapServiceOptions {
 	/** Files above this size are skipped without being read. */
 	maxFileBytes?: number;
 	onUnreadableDirectory?: (path: string) => void;
+	/** Files one map scans before it reports a truncated tree. Default: `REPO_MAP_SCAN_MAX_FILES`. */
+	maxFiles?: number;
 }
 
 export interface RepoMapRequest {
@@ -67,6 +76,12 @@ export interface RepoMapSummary {
 	totalFiles: number;
 	/** Whether the budget cut the map short. */
 	partial: boolean;
+	/**
+	 * Whether the walk stopped at the scan ceiling before it had seen the whole
+	 * tree. A truncated map still ranks what it read; it just cannot claim the
+	 * repository has nothing else in it.
+	 */
+	truncated: boolean;
 	elapsedMs: number;
 }
 
@@ -112,6 +127,7 @@ export class RepoMapService {
 	readonly #respectGitignore: boolean;
 	readonly #maxFileBytes: number | undefined;
 	readonly #onUnreadableDirectory: ((path: string) => void) | undefined;
+	readonly #maxFiles: number;
 	readonly #cachePath: string | undefined;
 	#explicitCache: RepoMapCache<RepoMapFileTags> | undefined;
 	#cache: RepoMapCache<RepoMapFileTags> | undefined;
@@ -124,6 +140,7 @@ export class RepoMapService {
 		this.#respectGitignore = options.respectGitignore ?? true;
 		this.#maxFileBytes = options.maxFileBytes;
 		this.#onUnreadableDirectory = options.onUnreadableDirectory;
+		this.#maxFiles = options.maxFiles ?? REPO_MAP_SCAN_MAX_FILES;
 		this.#cachePath = options.cachePath;
 		this.#explicitCache = options.cache;
 	}
@@ -199,6 +216,7 @@ export class RepoMapService {
 			throw new Error(`RepoMap: cannot read ${root}: ${errorMessage(error)}`);
 		}
 		if (request.refresh) this.#resetCache();
+		let truncated = false;
 		const scan = await this.#withCache((cache) =>
 			buildRepoMapTags(root, this.#ops, {
 				cache,
@@ -206,6 +224,10 @@ export class RepoMapService {
 				respectGitignore: this.#respectGitignore,
 				maxFileBytes: this.#maxFileBytes,
 				onUnreadableDirectory: this.#onUnreadableDirectory,
+				maxFiles: this.#maxFiles,
+				onTruncated: () => {
+					truncated = true;
+				},
 			}),
 		);
 		const entries = rankRepoMap(scan.files, {
@@ -223,6 +245,7 @@ export class RepoMapService {
 			totalDefinitions: scan.stats.definitions,
 			totalFiles: scan.stats.files,
 			partial: rendered.definitions < scan.stats.definitions,
+			truncated,
 			elapsedMs: performance.now() - started,
 		};
 	}

@@ -1,0 +1,269 @@
+// Per-language tag rules for the repository map: which node types declare a
+// name, and where a call names the thing it reaches. Every grammar in
+// `@vscode/tree-sitter-wasm` exposes the same tree-sitter API but its own node
+// vocabulary, so the rules live beside each other here rather than in the walk
+// that applies them.
+//
+// The TypeScript/JavaScript rules are the ones P1 shipped; Python, Go and Rust
+// follow the same shape (Aider's tag queries for those grammars) so the graph
+// and the ranker do not need a language concept of their own.
+//
+// Long-form design notes: docs/dev/repomap.md (P3).
+import type { Node as SyntaxNode } from "web-tree-sitter";
+
+/** Every grammar a map knows. TSX is a separate grammar from TypeScript. */
+export type RepoMapLanguage = "typescript" | "tsx" | "javascript" | "python" | "go" | "rust";
+
+export const REPO_MAP_LANGUAGES: readonly RepoMapLanguage[] = [
+	"typescript",
+	"tsx",
+	"javascript",
+	"python",
+	"go",
+	"rust",
+];
+
+/** The files a map considers. Shared with the small-repository threshold, which must count the same set. */
+export const REPO_MAP_CODE_FILES = new Bun.Glob("**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,py,go,rs}");
+
+/** The grammar for a path, or null when the extension is not one a map parses. */
+export function repoMapLanguageFor(path: string): RepoMapLanguage | null {
+	const dot = path.lastIndexOf(".");
+	if (dot === -1) return null;
+	switch (path.slice(dot).toLowerCase()) {
+		case ".ts":
+		case ".mts":
+		case ".cts":
+			return "typescript";
+		case ".tsx":
+			return "tsx";
+		case ".js":
+		case ".jsx":
+		case ".mjs":
+		case ".cjs":
+			return "javascript";
+		case ".py":
+			return "python";
+		case ".go":
+			return "go";
+		case ".rs":
+			return "rust";
+		default:
+			return null;
+	}
+}
+
+export type RepoMapTagDefinitionKind = "function" | "class" | "interface" | "type" | "enum" | "method";
+
+export interface RepoMapTagDefinition {
+	name: string;
+	kind: RepoMapTagDefinitionKind;
+}
+
+/** How one grammar's nodes become definition and reference tags. */
+export interface RepoMapTagRules {
+	/** The declaration a node spells out, or null. */
+	definition(node: SyntaxNode): RepoMapTagDefinition | null;
+	/** The name a call node reaches, or null. */
+	reference(node: SyntaxNode): string | null;
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript / JavaScript
+// ---------------------------------------------------------------------------
+
+const JS_DECLARATION_KINDS: Record<string, RepoMapTagDefinitionKind> = {
+	function_declaration: "function",
+	generator_function_declaration: "function",
+	function_expression: "function",
+	generator_function: "function",
+	class_declaration: "class",
+	abstract_class_declaration: "class",
+	class: "class",
+	interface_declaration: "interface",
+	type_alias_declaration: "type",
+	enum_declaration: "enum",
+	function_signature: "function",
+	method_definition: "method",
+	method_signature: "method",
+};
+
+const JS_FUNCTION_VALUES = new Set(["arrow_function", "function_expression", "generator_function"]);
+
+function nameOf(node: SyntaxNode): string | null {
+	const name = node.childForFieldName("name");
+	return name ? name.text : null;
+}
+
+function jsDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
+	switch (node.type) {
+		case "method_definition": {
+			const name = nameOf(node);
+			// A constructor is reachable through its class, which is already a tag.
+			return name && name !== "constructor" ? { name, kind: "method" } : null;
+		}
+		case "variable_declarator": {
+			// `const f = () => …`, `const f = function () { … }` and `const C = class {}`.
+			const value = node.childForFieldName("value");
+			if (!value) return null;
+			const kind: RepoMapTagDefinitionKind | undefined =
+				value.type === "class" ? "class" : JS_FUNCTION_VALUES.has(value.type) ? "function" : undefined;
+			if (!kind) return null;
+			const name = node.childForFieldName("name");
+			return name?.type === "identifier" ? { name: name.text, kind } : null;
+		}
+		case "assignment_expression": {
+			// `module.exports.f = () => …` and `exports.f = function () { … }`.
+			const right = node.childForFieldName("right");
+			if (!right || !JS_FUNCTION_VALUES.has(right.type)) return null;
+			const left = node.childForFieldName("left");
+			if (!left) return null;
+			if (left.type === "identifier") return { name: left.text, kind: "function" };
+			if (left.type === "member_expression") {
+				const property = left.childForFieldName("property");
+				if (property?.type === "property_identifier") return { name: property.text, kind: "function" };
+			}
+			return null;
+		}
+		default: {
+			const kind = JS_DECLARATION_KINDS[node.type];
+			if (!kind) return null;
+			const name = nameOf(node);
+			return name ? { name, kind } : null;
+		}
+	}
+}
+
+function jsCalleeName(node: SyntaxNode): string | null {
+	if (node.type === "identifier") return node.text === "require" ? null : node.text;
+	if (node.type === "member_expression") {
+		const property = node.childForFieldName("property");
+		if (property?.type === "property_identifier") return property.text;
+		if (property?.type === "private_property_identifier") return property.text;
+	}
+	return null;
+}
+
+function jsReference(node: SyntaxNode): string | null {
+	switch (node.type) {
+		case "call_expression": {
+			const fn = node.childForFieldName("function");
+			return fn ? jsCalleeName(fn) : null;
+		}
+		case "new_expression": {
+			const constructorNode = node.childForFieldName("constructor");
+			return constructorNode ? jsCalleeName(constructorNode) : null;
+		}
+		default:
+			return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Python
+// ---------------------------------------------------------------------------
+
+const PYTHON_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
+	function_definition: "function",
+	class_definition: "class",
+};
+
+/** Python has one call node; the callee is an identifier or an attribute (`obj.method`). */
+function pythonReference(node: SyntaxNode): string | null {
+	if (node.type !== "call") return null;
+	const fn = node.childForFieldName("function");
+	if (!fn) return null;
+	if (fn.type === "identifier") return fn.text;
+	if (fn.type === "attribute") return fn.childForFieldName("attribute")?.text ?? null;
+	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Go
+// ---------------------------------------------------------------------------
+
+const GO_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
+	function_declaration: "function",
+	method_declaration: "method",
+	// `type Box struct { … }` and `type Row interface { … }`: one kind is enough,
+	// because the map only uses the name.
+	type_spec: "class",
+};
+
+/** `f()` is an identifier; `obj.Method()` is a selector expression. */
+function goReference(node: SyntaxNode): string | null {
+	if (node.type !== "call_expression") return null;
+	const fn = node.childForFieldName("function");
+	if (!fn) return null;
+	if (fn.type === "identifier") return fn.text;
+	if (fn.type === "selector_expression") return fn.childForFieldName("field")?.text ?? null;
+	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Rust
+// ---------------------------------------------------------------------------
+
+const RUST_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
+	function_item: "function",
+	// A trait's body-less method: `fn area(&self) -> f64;`.
+	function_signature_item: "method",
+	struct_item: "class",
+	enum_item: "enum",
+	trait_item: "interface",
+	type_item: "type",
+};
+
+/** `f()`, `self.method()`, `Thing::new()` and `foo::<T>()` all reach one name. */
+function rustCallee(node: SyntaxNode): string | null {
+	switch (node.type) {
+		case "identifier":
+			return node.text;
+		case "field_expression": {
+			const field = node.childForFieldName("field");
+			return field ? field.text : null;
+		}
+		case "scoped_identifier": {
+			const name = node.childForFieldName("name");
+			return name ? name.text : null;
+		}
+		case "generic_function": {
+			const fn = node.childForFieldName("function");
+			return fn ? rustCallee(fn) : null;
+		}
+		default:
+			return null;
+	}
+}
+
+function rustReference(node: SyntaxNode): string | null {
+	if (node.type !== "call_expression") return null;
+	const fn = node.childForFieldName("function");
+	return fn ? rustCallee(fn) : null;
+}
+
+function declarationTable(table: Record<string, RepoMapTagDefinitionKind>): RepoMapTagRules["definition"] {
+	return (node) => {
+		const kind = table[node.type];
+		if (!kind) return null;
+		const name = node.childForFieldName("name");
+		return name ? { name: name.text, kind } : null;
+	};
+}
+
+const javascriptRules: RepoMapTagRules = { definition: jsDefinition, reference: jsReference };
+const pythonRules: RepoMapTagRules = {
+	definition: declarationTable(PYTHON_DECLARATIONS),
+	reference: pythonReference,
+};
+const goRules: RepoMapTagRules = { definition: declarationTable(GO_DECLARATIONS), reference: goReference };
+const rustRules: RepoMapTagRules = { definition: declarationTable(RUST_DECLARATIONS), reference: rustReference };
+
+export const REPO_MAP_TAG_RULES: Record<RepoMapLanguage, RepoMapTagRules> = {
+	typescript: javascriptRules,
+	tsx: javascriptRules,
+	javascript: javascriptRules,
+	python: pythonRules,
+	go: goRules,
+	rust: rustRules,
+};

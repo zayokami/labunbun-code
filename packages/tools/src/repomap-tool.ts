@@ -33,7 +33,12 @@ export function formatRepoMapResult(summary: RepoMapSummary): string {
 			`in ${summary.files.toLocaleString()} of ${summary.totalFiles.toLocaleString()} files`
 		: `${summary.definitions.toLocaleString()} definitions in ${summary.files.toLocaleString()} ` +
 			`file${summary.files === 1 ? "" : "s"}`;
-	const hint = summary.partial ? " Raise maxTokens to see more." : "";
+	const hints: string[] = [];
+	if (summary.partial) hints.push("Raise maxTokens to see more.");
+	// The budget note and the tree note answer different questions: one is about
+	// what the ranking left out, the other about files never looked at at all.
+	if (summary.truncated) hints.push("The scan stopped at its file ceiling, so the rest of the tree is unindexed.");
+	const hint = hints.length > 0 ? ` ${hints.join(" ")}` : "";
 	const footer = `Repo map: ${scope}, ~${summary.tokens.toLocaleString()} tokens, ${(summary.elapsedMs / 1000).toFixed(1)}s.${hint}`;
 	return `${summary.text}\n\n${footer}`;
 }

@@ -34,6 +34,8 @@ export interface RepoMapCommandResult {
 	totalDefinitions: number;
 	totalFiles: number;
 	partial: boolean;
+	/** Whether the scan stopped at its file ceiling before walking the whole tree. */
+	truncated: boolean;
 	elapsedMs: number;
 	root: string;
 }
@@ -112,6 +114,15 @@ export interface LocalCommandContext {
 	 * RepoMap tool's service and therefore its cache.
 	 */
 	repoMap?: RepoMapCommand;
+	/**
+	 * Put the rebuilt map in front of the model after `/map-refresh`.
+	 *
+	 * The prompt section is computed once at startup and carried in the live
+	 * system prompt, so a refreshed map that only reached the screen would leave
+	 * the model reading names that no longer exist. `/map` deliberately does not
+	 * call this: looking at the map should not replace the cached prompt prefix.
+	 */
+	onRepoMapRefreshed?(): Promise<void> | void;
 }
 
 export interface LocalCommand extends CommandBase {
@@ -395,17 +406,30 @@ function formatRepoMapReport(result: RepoMapCommandResult): string {
 		: `${result.definitions.toLocaleString()} definitions in ${result.files.toLocaleString()} ` +
 			`file${result.files === 1 ? "" : "s"}`;
 	const hint = result.partial ? " Raise it with /map --tokens <n>." : "";
+	const truncated = result.truncated ? " The scan stopped at its file ceiling; the rest of the tree is unindexed." : "";
 	const body = result.text || `(no definitions found under ${result.root})`;
-	return `${body}\n\nRepo map: ${scope}, ~${result.tokens.toLocaleString()} tokens, ${(result.elapsedMs / 1000).toFixed(1)}s.${hint}`;
+	return `${body}\n\nRepo map: ${scope}, ~${result.tokens.toLocaleString()} tokens, ${(result.elapsedMs / 1000).toFixed(1)}s.${hint}${truncated}`;
 }
 
 async function showRepoMap(ctx: LocalCommandContext, args: string, refresh: boolean): Promise<string> {
 	if (!ctx.repoMap) return "Repository maps are not available in this session.";
 	const { path, maxTokens } = parseRepoMapArgs(args);
+	let report: string;
 	try {
 		const result = await ctx.repoMap.map({ path, maxTokens, refresh });
-		return formatRepoMapReport(result);
+		report = formatRepoMapReport(result);
 	} catch (error) {
 		return `Repo map failed: ${error instanceof Error ? error.message : String(error)}`;
 	}
+	// Only a refresh offers the new map to the model; `/map` is a look. The
+	// section is recomputed after the map so it reads the cache this call just
+	// filled instead of scanning twice.
+	if (refresh) {
+		try {
+			await ctx.onRepoMapRefreshed?.();
+		} catch (error) {
+			return `${report}\n\nThe files were re-read, but the prompt still holds the old map: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
+	return report;
 }

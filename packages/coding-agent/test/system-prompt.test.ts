@@ -273,6 +273,20 @@ describe("the subagent context block", () => {
 		expect(context.startsWith("# Environment")).toBe(true);
 	});
 
+	test("carries the parent's repository map between the environment and memory", () => {
+		const context = buildSubagentContext({
+			...SUB,
+			repoMap: "src/a.ts:\n│export function alpha() {}",
+			memory: "MEMORY-MARKER",
+		});
+
+		expect(context).toContain("# Repository map\nsrc/a.ts:\n│export function alpha() {}");
+		expect(context.indexOf("# Environment")).toBeLessThan(context.indexOf("# Repository map"));
+		expect(context.indexOf("# Repository map")).toBeLessThan(context.indexOf("# Project memory"));
+		// A map the parent declined is not a heading over nothing.
+		expect(buildSubagentContext({ ...SUB, repoMap: "  \n" })).toBe(buildSubagentContext(SUB));
+	});
+
 	test("leaves out the parent's voice, harness contract, tool guidance and style", () => {
 		const context = buildSubagentContext({ ...SUB, memory: "MEMORY-MARKER", skills: "SKILLS-MARKER" });
 		for (const omitted of [

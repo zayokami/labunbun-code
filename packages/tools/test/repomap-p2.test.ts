@@ -238,6 +238,7 @@ describe("formatRepoMapResult", () => {
 			totalDefinitions: 0,
 			totalFiles: 0,
 			partial: false,
+			truncated: false,
 			elapsedMs: 1,
 		});
 

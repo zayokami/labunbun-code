@@ -749,11 +749,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		allTools: () => [...tools, skillTool, ...mcpTools],
 		definitions: () => agentDefinitions,
 		// The role definition first, then the context every subagent shares with
-		// the run that spawned it: environment, project memory, skills. The memory
-		// is the same `memory.content` the session prompt carries — read through
-		// the gated loader above, never re-read here. No output style and no
-		// language line: a subagent's output is a report to its parent, so a voice
-		// instruction belongs to the parent.
+		// the run that spawned it: environment, repository map, project memory,
+		// skills. The memory is the same `memory.content` the session prompt
+		// carries — read through the gated loader above, never re-read here — and
+		// the map is the same `repoMapText` the startup prompt carries. No output
+		// style and no language line: a subagent's output is a report to its
+		// parent, so a voice instruction belongs to the parent.
 		systemPromptFor: (definition, workerModel) =>
 			[
 				agentSystemPrompt(definition),
@@ -761,6 +762,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 					cwd,
 					platform: process.platform,
 					isTTY: process.stdout.isTTY ?? false,
+					repoMap: repoMapText,
 					memory: memory.content,
 					skills: skillsBlock,
 					model: workerModel,

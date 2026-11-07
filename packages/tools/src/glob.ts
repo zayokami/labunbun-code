@@ -23,6 +23,8 @@ export const GLOB_SKIP_DIRS = [
 	"coverage",
 ] as const;
 const MAX_DEPTH = 15;
+/** How many matches a walk collects before it stops, unless the caller raises it. */
+export const WALK_MAX_FILES = 5_000;
 
 /**
  * What the walker needs from the filesystem. Deliberately narrower than
@@ -59,9 +61,34 @@ export async function walkProjectFiles(
 		 * been there, not a failure to look.
 		 */
 		onUnreadableDirectory?: (path: string) => void;
+		/**
+		 * Stop collecting once this many files have matched. Default
+		 * `WALK_MAX_FILES`. The walk is depth-first, so the files it did collect
+		 * are a prefix of the tree rather than the newest ones; a caller that must
+		 * be honest about completeness passes `onTruncated` too.
+		 */
+		maxFiles?: number;
+		/**
+		 * Called once when the walk stops at `maxFiles`. Without it the cap is
+		 * silent, which is fine for a tool that shows 200 results anyway and wrong
+		 * for a map that claims to describe the repository.
+		 */
+		onTruncated?: (maxFiles: number) => void;
 	} = {},
 ): Promise<string[]> {
 	const glob = opts.pattern ?? null;
+	const maxFiles = opts.maxFiles ?? WALK_MAX_FILES;
+	let truncated = false;
+
+	function atLimit(): boolean {
+		if (matches.length < maxFiles) return false;
+		if (!truncated) {
+			truncated = true;
+			opts.onTruncated?.(maxFiles);
+		}
+		return true;
+	}
+
 	const SKIP_DIRS = opts.skipDirs ?? new Set<string>(GLOB_SKIP_DIRS);
 	// Reading the `.gitignore` files is not optional when the walk must honour
 	// them: a walker asked to respect an ignore file it cannot read would
@@ -77,7 +104,7 @@ export async function walkProjectFiles(
 	const matches: Array<{ path: string; mtimeMs: number }> = [];
 
 	async function walk(dir: string, depth: number, chain: readonly IgnoreSet[]): Promise<void> {
-		if (depth > MAX_DEPTH || matches.length > 5_000) return;
+		if (depth > MAX_DEPTH || atLimit()) return;
 		const entries = await ops.readdir(dir).catch((error: unknown) => {
 			if (!isMissingPathError(error)) opts.onUnreadableDirectory?.(dir);
 			return null;
@@ -108,6 +135,7 @@ export async function walkProjectFiles(
 			}
 		}
 		for (const entry of entries) {
+			if (atLimit()) return;
 			const full = join(dir, entry.name);
 			const ignored = here.length > 0 && isIgnored(here, full, entry.isDirectory);
 			if (entry.isDirectory) {

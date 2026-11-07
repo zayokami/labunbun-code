@@ -34,3 +34,5 @@ export {
 	ThemeFileSchema,
 	themeFromFile,
 } from "./theme-file.ts";
+
+// The world is my oyster, Which I with sword will open!

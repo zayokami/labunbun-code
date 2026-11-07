@@ -255,15 +255,20 @@ export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): s
 /** The parts of `SystemPromptContext` a subagent's context block reads. */
 export type SubagentContext = Pick<
 	SystemPromptContext,
-	"cwd" | "platform" | "isTTY" | "now" | "memory" | "skills" | "model"
+	"cwd" | "platform" | "isTTY" | "now" | "memory" | "skills" | "model" | "repoMap"
 >;
 
 /**
  * The context a subagent shares with the session that spawned it: the
- * `# Environment` section, `# Project memory` when it has content, and the
- * skill discovery block when it has content, in that order, joined by blank
- * lines. The caller puts the agent definition's body first, so the role the
- * agent was spawned as still leads the prompt.
+ * `# Environment` section, `# Repository map` when the checkout is small
+ * enough for one, `# Project memory` when it has content, and the skill
+ * discovery block when it has content, in that order, joined by blank lines.
+ * The caller puts the agent definition's body first, so the role the agent was
+ * spawned as still leads the prompt.
+ *
+ * The map is shared because a worker that starts by reading files repeats the
+ * exploration its parent already paid for; it is the same text the parent
+ * holds, so the two jobs agree about the repository's shape.
  *
  * Deliberately absent: `# Attitude`, `# Context`, `# Doing tasks`,
  * `# Communication`, `# Tool guidance`, the language line and the output
@@ -277,7 +282,12 @@ export type SubagentContext = Pick<
  * The section is the worker's own; the parent's identity is never used.
  */
 export function buildSubagentContext(ctx: SubagentContext): string {
-	const sections = [environmentSection(ctx), memorySection(ctx.memory), skillsSection(ctx.skills)];
+	const sections = [
+		environmentSection(ctx),
+		repoMapSection(ctx.repoMap),
+		memorySection(ctx.memory),
+		skillsSection(ctx.skills),
+	];
 	if (ctx.model) {
 		const guidance = modelGuidanceSection(ctx.model, resolveModelProfile(ctx.model));
 		if (guidance) sections.push(guidance);

@@ -389,9 +389,9 @@ A shown line longer than `max_columns` characters is cut at that count and close
 
 `overflow` is `"spill"`. A search that matched a lot needs a narrower ask. The hits are not reproducible by a second ask, because the tree moves on.
 
-The Glob tool finds files by pattern. `MAX_RESULTS` is 200, `MAX_DEPTH` is 15, and the walk stops when the match count passes 5000.
+The Glob tool finds files by pattern. `MAX_RESULTS` is 200, `MAX_DEPTH` is 15, and the walk stops at `WALK_MAX_FILES` (5,000) matches.
 
-`walkProjectFiles` walks a project tree and returns the matched files as absolute paths with forward slashes, and the newest first. Two callers share it. One is the Glob tool, which filters through a glob pattern. The other is the @-mention completer of the prompt, which relativizes against the session cwd itself. The depth cap and the result cap exist so that neither caller stalls on a runaway tree.
+`walkProjectFiles` walks a project tree and returns the matched files as absolute paths with forward slashes, and the newest first. Three callers share it: the Glob tool, the @-mention completer of the prompt, and the repository map. The depth cap and the result cap exist so that no caller stalls on a runaway tree. `maxFiles` raises the result cap for a caller that can report the cut honestly, and `onTruncated(limit)` tells it the walk stopped early; the map passes 20,000 and says so in its footer. Without the callback the cut is silent, which is right for a tool that shows 200 results anyway.
 
 `FileWalkerOps` is deliberately narrower than `Operations`. A caller that only lists files does not need the shell side. `readTextFile` is optional, and the walk needs it only when it honours ignore files. A walker asked to honour a `.gitignore` reads it or stops. Silent ignorance of an unreadable ignore file is the one failure this feature exists to stop. The walk throws in that case, and the presence of the reader doubles as the flag.
 

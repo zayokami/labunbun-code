@@ -11,9 +11,16 @@ import { createRequire } from "node:module";
 import { relative } from "node:path";
 import { Language, Parser, type Node as SyntaxNode, type Tree } from "web-tree-sitter";
 import { walkProjectFiles } from "./glob.ts";
+import {
+	REPO_MAP_CODE_FILES,
+	REPO_MAP_LANGUAGES,
+	REPO_MAP_TAG_RULES,
+	type RepoMapLanguage,
+	type RepoMapTagDefinitionKind,
+	repoMapLanguageFor,
+} from "./repomap-languages.ts";
 
-/** Every grammar this slice knows. TSX is a separate grammar from TypeScript. */
-export type RepoMapLanguage = "typescript" | "tsx" | "javascript";
+export { REPO_MAP_CODE_FILES, type RepoMapLanguage, repoMapLanguageFor };
 
 export type RepoMapDefinitionKind = "function" | "class" | "interface" | "type" | "enum";
 
@@ -96,7 +103,7 @@ export class InMemoryRepoMapCache<T = RepoMapDefinition[]> implements RepoMapCac
 }
 
 export interface RepoMapOptions<T = RepoMapDefinition[]> {
-	/** Files to consider; defaults to the TS/JS extension set. */
+	/** Files to consider; defaults to the extension set `REPO_MAP_CODE_FILES` covers. */
 	pattern?: Bun.Glob;
 	/** Honour `.gitignore` files; on by default, matching Glob. */
 	respectGitignore?: boolean;
@@ -105,85 +112,65 @@ export interface RepoMapOptions<T = RepoMapDefinition[]> {
 	/** Share one cache across scans to get the hot path. A fresh cache is allocated otherwise. */
 	cache?: RepoMapCache<T>;
 	onUnreadableDirectory?: (path: string) => void;
+	/** Files one scan collects before it stops. Default: the walker's 5,000. */
+	maxFiles?: number;
+	/** Called once when the walk stops at `maxFiles`, so the caller can say the tree is partial. */
+	onTruncated?: (maxFiles: number) => void;
 }
 
-export interface RepoMapLanguages {
-	typescript: Language;
-	tsx: Language;
-	javascript: Language;
-}
+export type RepoMapLanguages = Record<RepoMapLanguage, Language>;
 
 const DEFAULT_MAX_FILE_BYTES = 1024 * 1024;
 const READ_CONCURRENCY = 8;
-/** The files a map considers. Shared with the small-repository threshold, which must count the same set. */
-export const REPO_MAP_CODE_FILES = new Bun.Glob("**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}");
 
 // Tree-sitter's WASM runtime may only be initialised once per process, and the
 // grammars are large enough that loading them per scan would be visible. Both
 // live for the process; a failed load is not cached, so a caller can retry.
-let languagesPromise: Promise<RepoMapLanguages> | null = null;
+const languagesPromise = new Map<RepoMapLanguage, Promise<Language>>();
+let parserInit: Promise<void> | null = null;
 
-/** Load the three grammars this slice uses, once per process. */
-export function loadRepoMapLanguages(): Promise<RepoMapLanguages> {
-	languagesPromise ??= (async () => {
-		await Parser.init();
-		const require = createRequire(import.meta.url);
-		const load = (name: string) =>
-			Language.load(require.resolve(`@vscode/tree-sitter-wasm/wasm/tree-sitter-${name}.wasm`));
-		const [typescript, tsx, javascript] = await Promise.all([load("typescript"), load("tsx"), load("javascript")]);
-		return { typescript, tsx, javascript };
-	})().catch((error: unknown) => {
-		languagesPromise = null;
+function initParser(): Promise<void> {
+	parserInit ??= Parser.init().catch((error: unknown) => {
+		parserInit = null;
 		throw error;
 	});
-	return languagesPromise;
+	return parserInit;
 }
 
-/** The grammar for a path, or null when the extension is not one this slice parses. */
-export function repoMapLanguageFor(path: string): RepoMapLanguage | null {
-	const dot = path.lastIndexOf(".");
-	if (dot === -1) return null;
-	switch (path.slice(dot).toLowerCase()) {
-		case ".ts":
-		case ".mts":
-		case ".cts":
-			return "typescript";
-		case ".tsx":
-			return "tsx";
-		case ".js":
-		case ".jsx":
-		case ".mjs":
-		case ".cjs":
-			return "javascript";
-		default:
-			return null;
+/**
+ * Load one grammar, once per process.
+ *
+ * A scan loads only the grammars its files actually use: a TypeScript checkout
+ * should not pay for Python's WASM, and the six together are several megabytes.
+ */
+export function loadRepoMapLanguage(name: RepoMapLanguage): Promise<Language> {
+	let pending = languagesPromise.get(name);
+	if (!pending) {
+		pending = (async () => {
+			await initParser();
+			const require = createRequire(import.meta.url);
+			return Language.load(require.resolve(`@vscode/tree-sitter-wasm/wasm/tree-sitter-${name}.wasm`));
+		})().catch((error: unknown) => {
+			languagesPromise.delete(name);
+			throw error;
+		});
+		languagesPromise.set(name, pending);
 	}
+	return pending;
 }
 
-const DECLARATION_KINDS: Record<string, RepoMapDefinitionKind> = {
-	function_declaration: "function",
-	generator_function_declaration: "function",
-	class_declaration: "class",
-	abstract_class_declaration: "class",
-	interface_declaration: "interface",
-	type_alias_declaration: "type",
-	enum_declaration: "enum",
-	// `declare function f(): void` — the body-less signature an ambient
-	// declaration wraps.
-	function_signature: "function",
-};
+/** Load every grammar. For tests and one-off parses; a scan loads only what it needs. */
+export async function loadRepoMapLanguages(): Promise<RepoMapLanguages> {
+	const loaded = await Promise.all(REPO_MAP_LANGUAGES.map((name) => loadRepoMapLanguage(name)));
+	const languages = {} as RepoMapLanguages;
+	for (const [index, name] of REPO_MAP_LANGUAGES.entries()) languages[name] = loaded[index] as Language;
+	return languages;
+}
 
-/** What a `const x = …` value has to be for the binding to count as a declaration. */
-const VALUE_KINDS: Record<string, RepoMapDefinitionKind> = {
-	arrow_function: "function",
-	function_expression: "function",
-	generator_function: "function",
-	class: "class",
-};
-
-function pushNamed(node: SyntaxNode, kind: RepoMapDefinitionKind, out: RepoMapDefinition[]): void {
-	const name = node.childForFieldName("name");
-	if (name) out.push({ name: name.text, kind, line: node.startPosition.row + 1 });
+// P0 keeps its own top-level walk; the tag rules are the one place that knows a
+// grammar's declaration node types.
+function p0Kind(kind: RepoMapTagDefinitionKind): RepoMapDefinitionKind {
+	return kind === "method" ? "function" : kind;
 }
 
 /**
@@ -191,30 +178,33 @@ function pushNamed(node: SyntaxNode, kind: RepoMapDefinitionKind, out: RepoMapDe
  * local to it and would turn the map into an outline of every implementation;
  * a method is reachable through its class name, which is already on the map.
  */
-function collectDeclarations(node: SyntaxNode, out: RepoMapDefinition[]): void {
-	const kind = DECLARATION_KINDS[node.type];
-	if (kind) {
-		pushNamed(node, kind, out);
+function collectDeclarations(node: SyntaxNode, language: RepoMapLanguage, out: RepoMapDefinition[]): void {
+	const definition = REPO_MAP_TAG_RULES[language].definition(node);
+	if (definition) {
+		out.push({ name: definition.name, kind: p0Kind(definition.kind), line: node.startPosition.row + 1 });
 		return;
 	}
 	switch (node.type) {
 		case "export_statement": {
 			const declaration = node.childForFieldName("declaration");
-			if (declaration) collectDeclarations(declaration, out);
+			if (declaration) collectDeclarations(declaration, language, out);
 			return;
 		}
 		case "ambient_declaration": {
-			for (const child of node.namedChildren) if (child) collectDeclarations(child, out);
+			for (const child of node.namedChildren) if (child) collectDeclarations(child, language, out);
 			return;
 		}
 		case "lexical_declaration":
-		case "variable_declaration": {
-			for (const declarator of node.namedChildren) {
-				if (declarator?.type !== "variable_declarator") continue;
-				const value = declarator.childForFieldName("value");
-				const valueKind = value ? VALUE_KINDS[value.type] : undefined;
-				if (valueKind) pushNamed(declarator, valueKind, out);
-			}
+		case "variable_declaration":
+		// Go groups one or more `type Box struct` specs under a declaration.
+		case "type_declaration": {
+			for (const child of node.namedChildren) if (child) collectDeclarations(child, language, out);
+			return;
+		}
+		// Python wraps a decorated declaration; the definition is its `definition`.
+		case "decorated_definition": {
+			const definition = node.childForFieldName("definition");
+			if (definition) collectDeclarations(definition, language, out);
 			return;
 		}
 		// A top-level `namespace N {}` is an expression statement wrapping the
@@ -222,7 +212,7 @@ function collectDeclarations(node: SyntaxNode, out: RepoMapDefinition[]): void {
 		case "expression_statement": {
 			for (const child of node.namedChildren) {
 				if (child && (child.type === "module" || child.type === "internal_module")) {
-					collectDeclarations(child, out);
+					collectDeclarations(child, language, out);
 				}
 			}
 			return;
@@ -232,29 +222,29 @@ function collectDeclarations(node: SyntaxNode, out: RepoMapDefinition[]): void {
 		case "module":
 		case "internal_module": {
 			const body = node.childForFieldName("body");
-			if (body) for (const child of body.namedChildren) if (child) collectDeclarations(child, out);
+			if (body) for (const child of body.namedChildren) if (child) collectDeclarations(child, language, out);
 			return;
 		}
 	}
 }
 
 /** Extract the top-level definitions of a parsed file. */
-export function extractDefinitions(tree: Tree): RepoMapDefinition[] {
+export function extractDefinitions(tree: Tree, language: RepoMapLanguage = "typescript"): RepoMapDefinition[] {
 	const out: RepoMapDefinition[] = [];
-	for (const child of tree.rootNode.namedChildren) if (child) collectDeclarations(child, out);
+	for (const child of tree.rootNode.namedChildren) if (child) collectDeclarations(child, language, out);
 	return out;
 }
 
 /** Parse and extract in one call. Convenient for tests and one-off files. */
 export async function definitionsInSource(source: string, language: RepoMapLanguage): Promise<RepoMapDefinition[]> {
-	const languages = await loadRepoMapLanguages();
+	const grammar = await loadRepoMapLanguage(language);
 	const parser = new Parser();
 	try {
-		parser.setLanguage(languages[language]);
+		parser.setLanguage(grammar);
 		const tree = parser.parse(source);
 		if (!tree) return [];
 		try {
-			return extractDefinitions(tree);
+			return extractDefinitions(tree, language);
 		} finally {
 			tree.delete();
 		}
@@ -302,13 +292,16 @@ export interface RepoMapScanResult<T> {
 export type RepoMapExtractor<T> = (tree: Tree, source: string, language: RepoMapLanguage, path: string) => T;
 
 /**
- * Walk `root` and extract a payload from every TS/JS file.
+ * Walk `root` and extract a payload from every source file a grammar covers.
  *
  * Files are processed a few at a time: the reads are I/O-bound and the parses
  * are synchronous, so a handful of in-flight reads keeps the disk busy without
  * interleaving parser state. The result is sorted by path, which is what makes
  * two runs comparable byte for byte, and the cache payload is whatever
  * `extract` returns — definitions in P0, tags in P1.
+ *
+ * Only the grammars the walk actually found are loaded, so a pure TypeScript
+ * repository never pays for the Python parser.
  */
 export async function scanRepoFiles<T>(
 	root: string,
@@ -318,12 +311,27 @@ export async function scanRepoFiles<T>(
 	extract: RepoMapExtractor<T>,
 ): Promise<RepoMapScanResult<T>> {
 	const started = performance.now();
-	const languages = await loadRepoMapLanguages();
 	const paths = await walkProjectFiles(root, ops, {
 		pattern: options.pattern ?? REPO_MAP_CODE_FILES,
 		respectGitignore: options.respectGitignore ?? true,
 		onUnreadableDirectory: options.onUnreadableDirectory,
+		maxFiles: options.maxFiles,
+		onTruncated: options.onTruncated,
 	});
+	const languages = new Map<RepoMapLanguage, Language>();
+	const present = new Set<RepoMapLanguage>();
+	for (const full of paths) {
+		const language = repoMapLanguageFor(full);
+		if (language) present.add(language);
+	}
+	await Promise.all(
+		[...present].map(async (name) => {
+			languages.set(name, await loadRepoMapLanguage(name));
+		}),
+	);
+	// `new Parser()` throws before the runtime is initialised, and a scan with no
+	// files still constructs one.
+	await initParser();
 	const queue = [...paths].sort();
 	const maxBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
 	const parser = new Parser();
@@ -339,7 +347,8 @@ export async function scanRepoFiles<T>(
 			const full = queue[cursor++];
 			const path = relative(root, full).split("\\").join("/");
 			const language = repoMapLanguageFor(path);
-			if (!language) continue;
+			const grammar = language ? languages.get(language) : undefined;
+			if (!language || !grammar) continue;
 			const stat = await ops.stat(full).catch(() => null);
 			if (!stat || stat.size > maxBytes) {
 				skipped++;
@@ -356,7 +365,7 @@ export async function scanRepoFiles<T>(
 				skipped++;
 				continue;
 			}
-			parser.setLanguage(languages[language]);
+			parser.setLanguage(grammar);
 			const tree = parser.parse(source);
 			if (!tree) {
 				skipped++;
@@ -397,7 +406,7 @@ export async function scanRepoFiles<T>(
 }
 
 /**
- * Walk `root` and return every TS/JS file with its top-level definitions.
+ * Walk `root` and return every source file with its top-level definitions.
  * This is the P0 report; `buildRepoMapTags` in `repomap-tags.ts` is the P1 one.
  */
 export async function buildRepoMap(
@@ -406,7 +415,9 @@ export async function buildRepoMap(
 	options: RepoMapOptions = {},
 ): Promise<RepoMapResult> {
 	const cache = options.cache ?? new InMemoryRepoMapCache();
-	const scan = await scanRepoFiles(root, ops, options, cache, (tree) => extractDefinitions(tree));
+	const scan = await scanRepoFiles(root, ops, options, cache, (tree, _source, language) =>
+		extractDefinitions(tree, language),
+	);
 	const files: RepoMapFile[] = scan.files.map(({ path, data }) => ({ path, definitions: data }));
 	const definitions = files.reduce((count, file) => count + file.definitions.length, 0);
 	return {

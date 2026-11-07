@@ -19,6 +19,7 @@ const RESULT: RepoMapCommandResult = {
 	totalDefinitions: 7,
 	totalFiles: 1,
 	partial: false,
+	truncated: false,
 	elapsedMs: 1234,
 };
 
@@ -30,13 +31,21 @@ interface Call {
 
 function harness() {
 	const calls: Call[] = [];
+	const refreshes: number[] = [];
 	const repoMap = {
 		map: async (options: Call): Promise<RepoMapCommandResult> => {
 			calls.push(options);
 			return RESULT;
 		},
 	};
-	return { calls, ctx: { repoMap } as never };
+	const ctx = {
+		repoMap,
+		// The host puts the new map into the live prompt; the command only asks.
+		onRepoMapRefreshed: async () => {
+			refreshes.push(calls.length);
+		},
+	} as never;
+	return { calls, refreshes, repoMap, ctx };
 }
 
 function local(name: string) {
@@ -125,5 +134,50 @@ describe("/map-refresh", () => {
 	test("renders the same report as /map", async () => {
 		const { ctx } = harness();
 		expect(await local("map-refresh").call(ctx, "")).toBe(await local("map").call(ctx, ""));
+	});
+
+	test("offers the rebuilt map to the prompt after the scan", async () => {
+		const { refreshes, ctx } = harness();
+		await local("map-refresh").call(ctx, "");
+
+		expect(refreshes).toEqual([1]);
+	});
+
+	test("looking at the map does not replace the prompt's copy", async () => {
+		const { refreshes, ctx } = harness();
+		await local("map").call(ctx, "");
+
+		expect(refreshes).toEqual([]);
+	});
+
+	test("a failed scan leaves the prompt alone", async () => {
+		let refreshed = false;
+		const ctx = {
+			repoMap: {
+				map: async () => {
+					throw new Error("cannot read");
+				},
+			},
+			onRepoMapRefreshed: () => {
+				refreshed = true;
+			},
+		} as never;
+
+		expect(await local("map-refresh").call(ctx, "")).toBe("Repo map failed: cannot read");
+		expect(refreshed).toBe(false);
+	});
+
+	test("says so when the map was rebuilt but the prompt could not be", async () => {
+		const ctx = {
+			repoMap: { map: async () => RESULT },
+			onRepoMapRefreshed: async () => {
+				throw new Error("no session");
+			},
+		} as never;
+
+		const text = await local("map-refresh").call(ctx, "");
+
+		expect(text).toContain("src/a.ts:");
+		expect(text).toContain("the prompt still holds the old map: no session");
 	});
 });

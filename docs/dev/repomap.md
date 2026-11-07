@@ -1,18 +1,22 @@
 # Repository map
 
 The repository map is the ranked, token-budgeted outline of a checkout that a
-model receives when it asks "what is in this project?". It is built in two
-stages. P0 (committed in `8d88093`) proved that walking and parsing a large tree
-with tree-sitter is cheap enough to do on demand. P1 adds what makes the output
+model receives when it asks "what is in this project?". It is built in stages.
+P0 (committed in `8d88093`) proved that walking and parsing a large tree with
+tree-sitter is cheap enough to do on demand. P1 adds what makes the output
 useful: definitions and call references, a file-level graph, PageRank, a token
-budget, and a persistent cache. The stages share one walk, one grammar loader,
-and one cache interface.
+budget, and a persistent cache. P2 exposes the result as a tool, a prompt
+section and two commands. P3 adds four more grammars, shares the map with
+subagents, lets `/map-refresh` replace the prompt section, and makes a
+repository past the walker's file ceiling say so. The stages share one walk, one
+grammar loader, and one cache interface.
 
-Long-form notes for the pipeline live here; the code is four modules:
+Long-form notes for the pipeline live here; the code is these modules:
 
 | File | Role |
 | --- | --- |
 | `packages/tools/src/repomap.ts` | types, grammar loading, the walk-and-extract loop, P0's flat map |
+| `packages/tools/src/repomap-languages.ts` | per-grammar definition and reference rules |
 | `packages/tools/src/repomap-tags.ts` | P1 tag extraction and snippets |
 | `packages/tools/src/repomap-rank.ts` | file graph, PageRank, ranked definitions |
 | `packages/tools/src/repomap-render.ts` | token budget and rendered text |
@@ -36,6 +40,47 @@ A tag is one of two facts about a file:
 - **ref** — the file calls `name` (a `call_expression` callee or a
   `new_expression` constructor). Member calls are recorded under the property
   name (`obj.run()` is a reference to `run`), and `require` is ignored.
+
+### Grammars
+
+`repomap-languages.ts` holds the node vocabulary for each grammar; the walk, the
+graph and the ranker know nothing about languages. Six grammars ship, and the
+extension picks one:
+
+| Extensions | Grammar |
+| --- | --- |
+| `.ts`, `.mts`, `.cts` | typescript |
+| `.tsx` | tsx |
+| `.js`, `.jsx`, `.mjs`, `.cjs` | javascript |
+| `.py` | python |
+| `.go` | go |
+| `.rs` | rust |
+
+The rules are the same shape for every language: which node types declare a
+name and what kind they are, and where a call node names its callee.
+
+- **Python** — `function_definition` and `class_definition`; a call's callee is
+  the identifier, or the attribute of `obj.method()`. Nested functions and
+  methods are tags; a decorated function is found through its
+  `decorated_definition`.
+- **Go** — `function_declaration`, `method_declaration` and `type_spec` (both
+  structs and interfaces, recorded as `class` because the ranker only needs the
+  name). Calls read the identifier or the selector's field.
+- **Rust** — `function_item`, `function_signature_item` (a trait method),
+  `struct_item`, `enum_item`, `trait_item` and `type_item`. Callees cover free
+  calls, `self.method()`, `Thing::new()` and turbofish `foo::<T>()`. Macro
+  arguments are raw tokens rather than parsed calls, so `println!` does not
+  produce references to what it prints.
+
+The grammars are loaded per language and once per process: a scan looks at the
+extensions its walk found and loads only those, so a pure TypeScript checkout
+never pays for Python's WASM. P0's flat map (`extractDefinitions`) reports
+top-level declarations only; a method or nested function is reachable through
+the name its container already has. P1's `extractTags` descends everywhere.
+
+A file with no grammar is skipped by the scan rather than reported as empty.
+`REPO_MAP_CODE_FILES` is the glob that picks these extensions, and the
+small-repository count uses the same set.
 
 Each definition carries a **snippet**: its declaration and a bounded amount of
 its body. Classes, interfaces, type aliases, and enums contribute only their
@@ -179,6 +224,38 @@ scanner, and a context without one answers that maps are unavailable. Local
 commands exist only in the REPL; `-p` runs and ACP sessions still get the tool
 and the prompt section.
 
+## Languages, subagents and large trees (P3)
+
+**Grammars.** Python, Go and Rust joined TypeScript and JavaScript (see
+*Grammars* above). A scan loads only the grammars its walk actually found, each
+once per process; a failed load is not cached, so a retry is possible.
+
+**Subagents.** A subagent's context block now carries the same `# Repository
+map` the parent holds, between the environment section and project memory. The
+map is read at spawn time, so a subagent spawned after a `/map-refresh` sees the
+new one. It shares the parent's `RepoMap` tool and service already
+(`ctx.allTools()`); the prompt section is the half that was missing. As with the
+parent, a large checkout contributes no section and the worker uses the tool.
+
+**Refreshing the prompt.** `/map-refresh` rebuilds the section from the cache the
+scan just filled and calls `sessionRef.setSystemPrompt(buildPrompt(memoryText))`
+— the same path the `#` memory shortcut and `/model` use. `/map` deliberately
+does not: looking at the map should not discard the cached prompt prefix. A
+section that declines after the refresh (the tree grew past 200 files) becomes
+`undefined`, removing a map the session no longer deserves to carry. If the
+rebuild fails, the report says the files were re-read but the prompt still holds
+the old map.
+
+**A tree past the file ceiling.** `walkProjectFiles` collects 5,000 matches by
+default — enough for the `Glob` tool, which shows 200 anyway, but a million-line
+checkout reaches it. The walk now takes `maxFiles` and an optional
+`onTruncated(limit)` callback; a map passes `REPO_MAP_SCAN_MAX_FILES` (20,000)
+and reports `truncated` in its summary. The tool footer and `/map` say the scan
+stopped at its ceiling and the rest of the tree is unindexed, which is a
+different claim from the budget note: one means "more exists but did not fit",
+the other "it was never looked at". `promptSection` is unaffected — it declines
+at 200 files long before either ceiling.
+
 ## Measurements
 
 Measured on Windows 11, Bun 1.4.4, 2026-11-07.
@@ -205,12 +282,15 @@ benchmark a real checkout (`bun run repomap:bench .`).
 
 ## What is left
 
-- P3: Python and other grammars, sharing a map between subagents, and the
-  million-line case. The current scan is linear in files and parses only what
-  the cache misses; the remaining large-tree cost is the walk and the stats,
-  which is where a worker pool or a persistent file index would help.
-- The prompt section is computed once per process. A session whose files change
-  while it runs keeps the startup map until restarted; `/map-refresh` shows the
-  new one but does not replace the section. Making the section follow a refresh
-  would mean rebuilding the system prompt, which the `#` memory shortcut already
-  knows how to do — a natural next step, not a P2 claim.
+- More grammars. `@vscode/tree-sitter-wasm` also ships Java, C#, C++, Ruby,
+  PHP, Bash, PowerShell, CSS and INI; each is one table in
+  `repomap-languages.ts` plus a test, and none needs a change below the rules.
+  The decision to defer them is about test coverage per grammar, not plumbing.
+- A million-line tree is still linear in files: the scan is parallel across
+  reads but synchronous across parses, and the remaining cost is the walk and
+  the stats. A worker pool or a persistent file index (a directory-level mtime
+  summary stored beside the cache) is where that work belongs. The 20,000-file
+  ceiling makes the current behaviour honest; it does not make it fast.
+- Nothing watches the tree. `/map-refresh` is the only thing that pulls an edit
+  made outside the session into the prompt; a watcher would let it follow every
+  save, at the cost of invalidating the cached prefix each time.
