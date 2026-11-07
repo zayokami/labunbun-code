@@ -25,20 +25,34 @@ export interface RepoMapToolOptions {
 
 /** The tool result: the rendered map, then one line saying how complete it is. */
 export function formatRepoMapResult(summary: RepoMapSummary): string {
+	const hints: string[] = [];
+	if (summary.partial) hints.push("Raise maxTokens to see more.");
+	// The budget note and the tree note answer different questions: one is about
+	// what the ranking left out, the other about files never looked at at all.
+	if (summary.truncated) hints.push("The scan stopped at its file ceiling, so the rest of the tree is unindexed.");
+	// A file that could not be read is a hole in the map, not an empty space in
+	// it; say so, or the model reads the missing directory as having no code.
+	const unindexed: string[] = [];
+	if (summary.skipped > 0) {
+		unindexed.push(
+			`${summary.skipped.toLocaleString()} file${summary.skipped === 1 ? "" : "s"} skipped (unreadable or over the size limit)`,
+		);
+	}
+	if (summary.unreadableDirectories > 0) {
+		unindexed.push(
+			`${summary.unreadableDirectories.toLocaleString()} unreadable director${summary.unreadableDirectories === 1 ? "y" : "ies"}`,
+		);
+	}
+	if (unindexed.length > 0) hints.push(`${unindexed.join(" and ")}; that part of the tree is unindexed.`);
+	const hint = hints.length > 0 ? ` ${hints.join(" ")}` : "";
 	if (!summary.text) {
-		return `RepoMap: no functions, classes or methods found under ${summary.root}.`;
+		return `RepoMap: no functions, classes or methods found under ${summary.root}.${hint}`;
 	}
 	const scope = summary.partial
 		? `${summary.definitions.toLocaleString()} of ${summary.totalDefinitions.toLocaleString()} definitions ` +
 			`in ${summary.files.toLocaleString()} of ${summary.totalFiles.toLocaleString()} files`
 		: `${summary.definitions.toLocaleString()} definitions in ${summary.files.toLocaleString()} ` +
 			`file${summary.files === 1 ? "" : "s"}`;
-	const hints: string[] = [];
-	if (summary.partial) hints.push("Raise maxTokens to see more.");
-	// The budget note and the tree note answer different questions: one is about
-	// what the ranking left out, the other about files never looked at at all.
-	if (summary.truncated) hints.push("The scan stopped at its file ceiling, so the rest of the tree is unindexed.");
-	const hint = hints.length > 0 ? ` ${hints.join(" ")}` : "";
 	const footer = `Repo map: ${scope}, ~${summary.tokens.toLocaleString()} tokens, ${(summary.elapsedMs / 1000).toFixed(1)}s.${hint}`;
 	return `${summary.text}\n\n${footer}`;
 }
@@ -71,8 +85,11 @@ export function createRepoMapTool(cwd: string, options: RepoMapToolOptions): Any
 			} catch (error) {
 				// A path outside the workspace or a directory that cannot be read is
 				// the caller's input, not a harness failure: say so in the result.
+				// It is still an error result, or the model reads the sentence as a
+				// successful map of an empty repository.
 				return {
 					content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+					isError: true,
 				};
 			}
 		},

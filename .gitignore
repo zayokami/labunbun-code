@@ -3,6 +3,8 @@ dist/
 *.log
 .DS_Store
 .claude
+CLAUDE.md
+AGENT.md
 
 # `pnpm test:coverage` writes the lcov report here.
 /coverage/

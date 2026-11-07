@@ -20,6 +20,8 @@ const RESULT: RepoMapCommandResult = {
 	totalFiles: 1,
 	partial: false,
 	truncated: false,
+	skipped: 0,
+	unreadableDirectories: 0,
 	elapsedMs: 1234,
 };
 

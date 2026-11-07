@@ -76,6 +76,13 @@ type CacheEntry<T> = { mtimeMs: number; size: number; data: T };
 export interface RepoMapCache<T = RepoMapDefinition[]> {
 	get(path: string, mtimeMs: number, size: number): T | undefined;
 	set(path: string, mtimeMs: number, size: number, data: T): void;
+	/**
+	 * Persist writes a cache chose to buffer. Optional: a cache that writes
+	 * through on every `set` needs no flush, and a scan calls this once when its
+	 * workers finish. SQLite uses it to turn thousands of autocommits into one
+	 * transaction.
+	 */
+	flush?(): void;
 }
 
 /** The default cache. One process, one repository; see `repomap-sqlite.ts` for persistence. */
@@ -212,6 +219,35 @@ function collectDeclarations(node: SyntaxNode, language: RepoMapLanguage, out: R
 			for (const child of node.namedChildren) if (child) collectDeclarations(child, language, out);
 			return;
 		}
+		// `template<class T> class Box` and `template<class T> void f()`: the
+		// declaration is the template's payload, not a nested scope.
+		case "template_declaration": {
+			for (const child of node.namedChildren) {
+				if (child && child.type !== "template_parameter_list") collectDeclarations(child, language, out);
+			}
+			return;
+		}
+		// `extern "C" { … }` is a container for declarations, not a call graph node.
+		case "linkage_specification": {
+			const body = node.childForFieldName("body");
+			if (body) for (const child of body.namedChildren) if (child) collectDeclarations(child, language, out);
+			return;
+		}
+		// A preprocessor branch parses its payload as ordinary declarations; the
+		// condition (an identifier) contributes nothing.
+		case "preproc_if":
+		case "preproc_ifdef":
+		case "preproc_else":
+		case "preproc_elif": {
+			for (const child of node.namedChildren) if (child) collectDeclarations(child, language, out);
+			return;
+		}
+		// A Rust `mod name { … }` is an inline module; a `mod name;` has no body.
+		case "mod_item": {
+			const body = node.childForFieldName("body");
+			if (body) for (const child of body.namedChildren) if (child) collectDeclarations(child, language, out);
+			return;
+		}
 		// A top-level `namespace N {}` is an expression statement wrapping the
 		// module; find that module without descending into arbitrary expressions.
 		case "expression_statement": {
@@ -326,6 +362,9 @@ export async function scanRepoFiles<T>(
 		onUnreadableDirectory: options.onUnreadableDirectory,
 		maxFiles: options.maxFiles,
 		onTruncated: options.onTruncated,
+		// The scan sorts by path below; a walk that stats every match only to have
+		// its mtime order discarded would pay the largest cost of a hot scan twice.
+		sortByMtime: false,
 	});
 	const languages = new Map<RepoMapLanguage, Language>();
 	const present = new Set<RepoMapLanguage>();
@@ -397,6 +436,9 @@ export async function scanRepoFiles<T>(
 
 	try {
 		await Promise.all(Array.from({ length: READ_CONCURRENCY }, worker));
+		// A buffering cache (SQLite) writes what the scan collected in one
+		// transaction instead of one autocommit per file.
+		cache.flush?.();
 	} finally {
 		parser.delete();
 	}

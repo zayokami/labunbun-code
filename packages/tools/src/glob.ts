@@ -74,10 +74,19 @@ export async function walkProjectFiles(
 		 * for a map that claims to describe the repository.
 		 */
 		onTruncated?: (maxFiles: number) => void;
+		/**
+		 * Sort matches by modification time, newest first. Default true, which is
+		 * what Glob's result order promises. A caller that re-sorts anyway — the
+		 * repository map sorts by path — passes false and saves one `stat` per
+		 * matched file, which on a twenty-thousand-file tree is the largest single
+		 * cost of a hot scan.
+		 */
+		sortByMtime?: boolean;
 	} = {},
 ): Promise<string[]> {
 	const glob = opts.pattern ?? null;
 	const maxFiles = opts.maxFiles ?? WALK_MAX_FILES;
+	const sortByMtime = opts.sortByMtime ?? true;
 	let truncated = false;
 
 	function atLimit(): boolean {
@@ -147,6 +156,10 @@ export async function walkProjectFiles(
 			} else {
 				if (ignored) continue;
 				if (!glob || (await glob.match(relative(root, full).split("\\").join("/")))) {
+					if (!sortByMtime) {
+						matches.push({ path: full, mtimeMs: 0 });
+						continue;
+					}
 					try {
 						const s = await ops.stat(full);
 						matches.push({ path: full, mtimeMs: s.mtimeMs });
@@ -159,7 +172,7 @@ export async function walkProjectFiles(
 	}
 
 	await walk(root, 0, []);
-	matches.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	if (sortByMtime) matches.sort((a, b) => b.mtimeMs - a.mtimeMs);
 	return matches.map((m) => m.path.split("\\").join("/"));
 }
 

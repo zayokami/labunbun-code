@@ -36,6 +36,10 @@ export interface RepoMapCommandResult {
 	partial: boolean;
 	/** Whether the scan stopped at its file ceiling before walking the whole tree. */
 	truncated: boolean;
+	/** Files the scan found but could not read or skipped for size. */
+	skipped: number;
+	/** Directories the walk could not list. */
+	unreadableDirectories: number;
 	elapsedMs: number;
 	root: string;
 }
@@ -407,8 +411,20 @@ function formatRepoMapReport(result: RepoMapCommandResult): string {
 			`file${result.files === 1 ? "" : "s"}`;
 	const hint = result.partial ? " Raise it with /map --tokens <n>." : "";
 	const truncated = result.truncated ? " The scan stopped at its file ceiling; the rest of the tree is unindexed." : "";
+	const unindexed: string[] = [];
+	if (result.skipped > 0) {
+		unindexed.push(
+			`${result.skipped.toLocaleString()} file${result.skipped === 1 ? "" : "s"} skipped (unreadable or over the size limit)`,
+		);
+	}
+	if (result.unreadableDirectories > 0) {
+		unindexed.push(
+			`${result.unreadableDirectories.toLocaleString()} unreadable director${result.unreadableDirectories === 1 ? "y" : "ies"}`,
+		);
+	}
+	const skipped = unindexed.length > 0 ? ` ${unindexed.join(" and ")}; that part of the tree is unindexed.` : "";
 	const body = result.text || `(no definitions found under ${result.root})`;
-	return `${body}\n\nRepo map: ${scope}, ~${result.tokens.toLocaleString()} tokens, ${(result.elapsedMs / 1000).toFixed(1)}s.${hint}${truncated}`;
+	return `${body}\n\nRepo map: ${scope}, ~${result.tokens.toLocaleString()} tokens, ${(result.elapsedMs / 1000).toFixed(1)}s.${hint}${truncated}${skipped}`;
 }
 
 async function showRepoMap(ctx: LocalCommandContext, args: string, refresh: boolean): Promise<string> {

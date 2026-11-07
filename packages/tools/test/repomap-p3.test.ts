@@ -151,6 +151,13 @@ describe("Rust", () => {
 		// than parsed calls, so the macro body is not a reference.
 		expect(references(tags).sort()).toEqual(["beta", "helper"]);
 	});
+
+	test("descends an inline module", async () => {
+		expect(await definitionsInSource("mod inner { pub fn inside() {} pub struct Box; }", "rust")).toEqual([
+			{ name: "inside", kind: "function", line: 1 },
+			{ name: "Box", kind: "class", line: 1 },
+		]);
+	});
 });
 
 describe("Java", () => {
@@ -268,6 +275,48 @@ describe("C++", () => {
 			"function:free_function",
 		]);
 		expect(references(tags)).toEqual(["helper", "make", "helper"]);
+	});
+
+	test("names functions declared to return a reference", async () => {
+		const source = ["int &ref_fn(int x) { return x; }", "Foo& Foo::operator=(const Foo& other) { return *this; }"].join(
+			"\n",
+		);
+
+		expect(await definitionsInSource(source, "cpp")).toEqual([
+			{ name: "ref_fn", kind: "function", line: 1 },
+			{ name: "operator=", kind: "function", line: 2 },
+		]);
+	});
+
+	test("descends templates, extern C blocks and preprocessor branches", async () => {
+		const source = [
+			"template<class T> class Box {};",
+			'extern "C" { void cf() {} }',
+			"#ifdef X",
+			"void guarded() {}",
+			"#endif",
+		].join("\n");
+
+		expect(await definitionsInSource(source, "cpp")).toEqual([
+			{ name: "Box", kind: "class", line: 1 },
+			{ name: "cf", kind: "function", line: 2 },
+			{ name: "guarded", kind: "function", line: 4 },
+		]);
+	});
+});
+
+describe("TSX", () => {
+	test("treats JSX components as references and skips intrinsic tags", async () => {
+		const source = [
+			"const a = <Widget />;",
+			"const b = <Foo.Bar />;",
+			"const c = <div />;",
+			"const d = <Widget></Widget>;",
+		].join("\n");
+
+		const tags = (await tagsInSource(source, "tsx", { path: "a.tsx" })).tags;
+
+		expect(references(tags)).toEqual(["Widget", "Bar", "Widget"]);
 	});
 });
 
@@ -404,6 +453,30 @@ describe("PowerShell", () => {
 		expect(definitions(tags)).toEqual(["function:Alpha", "function:Gamma"]);
 		expect(references(tags)).toEqual(["Beta", "Write-Host", "Alpha"]);
 	});
+
+	test("reads classes, members, enums and member invocations", async () => {
+		const source = [
+			"class Animal {",
+			"  [string]$Name",
+			"  [string] Speak() { return $this.Name }",
+			"  Animal() {}",
+			"}",
+			"enum Color { Red; Blue }",
+			"function Top { $a = [Animal]::new(); $a.Speak(); $a.Help() }",
+		].join("\n");
+
+		expect(await definitionsInSource(source, "powershell")).toEqual([
+			{ name: "Animal", kind: "class", line: 1 },
+			{ name: "Color", kind: "enum", line: 6 },
+			{ name: "Top", kind: "function", line: 7 },
+		]);
+
+		const tags = (await tagsInSource(source, "powershell", { path: "classes.ps1" })).tags;
+
+		expect(definitions(tags)).toEqual(["class:Animal", "method:Name", "method:Speak", "enum:Color", "function:Top"]);
+		// All three calls share line 7, so the tag order is the name tiebreak.
+		expect(references(tags)).toEqual(["Help", "Speak", "new"]);
+	});
 });
 
 describe("mixed repository", () => {
@@ -418,13 +491,7 @@ describe("mixed repository", () => {
 
 		const map = await buildRepoMap(root, ops);
 
-		expect(map.files.map((file) => file.path)).toEqual([
-			"cmd/c.go",
-			"cmd/e.sh",
-			"src/a.ts",
-			"src/b.py",
-			"src/d.rs",
-		]);
+		expect(map.files.map((file) => file.path)).toEqual(["cmd/c.go", "cmd/e.sh", "src/a.ts", "src/b.py", "src/d.rs"]);
 		expect(map.stats.definitions).toBe(5);
 		expect(map.text).toContain("gamma");
 		expect(map.text).toContain("epsilon");
@@ -485,10 +552,65 @@ describe("a repository past the file ceiling", () => {
 			totalFiles: 1,
 			partial: false,
 			truncated: true,
+			skipped: 0,
+			unreadableDirectories: 0,
 			elapsedMs: 1,
 		});
 
 		expect(text).toContain("The scan stopped at its file ceiling");
 		expect(text).not.toContain("Raise maxTokens");
+	});
+});
+
+describe("scan economics", () => {
+	test("a walk that does not need mtime order never stats a file", async () => {
+		const root = tempDir();
+		write(root, "a.ts", "export function a() {}\n");
+		write(root, "b.ts", "export function b() {}\n");
+		const base = new NodeFileSystemOperations();
+		const counting = {
+			readdir: (path: string) => base.readdir(path),
+			stat: async () => {
+				throw new Error("stat should not be called");
+			},
+		};
+
+		const paths = await walkProjectFiles(root, counting, {
+			pattern: new Bun.Glob("**/*.ts"),
+			sortByMtime: false,
+		});
+
+		expect(paths).toHaveLength(2);
+	});
+
+	test("the prompt section stops walking once the tree is too large", async () => {
+		const root = tempDir();
+		for (let index = 0; index < 201; index++) write(root, `f${index}.ts`, "export function f() {}\n");
+		let stats = 0;
+		const base = new NodeFileSystemOperations();
+		const counting = {
+			readdir: (path: string) => base.readdir(path),
+			stat: async (path: string) => {
+				stats++;
+				return base.stat(path);
+			},
+			readTextFile: (path: string) => base.readTextFile(path),
+		};
+
+		const section = await new RepoMapService({ root, ops: counting }).promptSection();
+
+		expect(section).toBeUndefined();
+		expect(stats).toBe(0);
+	});
+
+	test("a skipped file is reported instead of silently omitted", async () => {
+		const root = tempDir();
+		write(root, "small.ts", "export function alpha() {}\n");
+		write(root, "big.ts", `export function beta() {}\n${"// padding\n".repeat(10)}`);
+
+		const summary = await new RepoMapService({ root, ops, maxFileBytes: 40 }).map({ maxTokens: 1024 });
+
+		expect(summary.skipped).toBe(1);
+		expect(formatRepoMapResult(summary)).toContain("1 file skipped");
 	});
 });

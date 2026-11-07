@@ -209,6 +209,14 @@ describe("createRepoMapTool", () => {
 		expect(text).toContain("outside workspace");
 	});
 
+	test("marks a failed map as an error result", async () => {
+		const tool = createRepoMapTool(tempDir(), { operations: ops });
+
+		const result = await tool.call({ path: "../elsewhere" }, ctx());
+
+		expect(result.isError).toBe(true);
+	});
+
 	test("is read-only and safe to run beside other reads", () => {
 		const tool = createRepoMapTool(fixtures, { operations: ops });
 
@@ -239,6 +247,8 @@ describe("formatRepoMapResult", () => {
 			totalFiles: 0,
 			partial: false,
 			truncated: false,
+			skipped: 0,
+			unreadableDirectories: 0,
 			elapsedMs: 1,
 		});
 

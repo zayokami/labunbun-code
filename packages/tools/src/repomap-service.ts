@@ -82,6 +82,14 @@ export interface RepoMapSummary {
 	 * repository has nothing else in it.
 	 */
 	truncated: boolean;
+	/**
+	 * Files the scan found but could not read, or skipped for being over
+	 * `maxFileBytes`. They are absent from the map, so a footer that only counts
+	 * what was read would present a hole as empty space.
+	 */
+	skipped: number;
+	/** Directories the walk could not list; everything below each is unindexed. */
+	unreadableDirectories: number;
 	elapsedMs: number;
 }
 
@@ -217,13 +225,17 @@ export class RepoMapService {
 		}
 		if (request.refresh) this.#resetCache();
 		let truncated = false;
+		let unreadableDirectories = 0;
 		const scan = await this.#withCache((cache) =>
 			buildRepoMapTags(root, this.#ops, {
 				cache,
 				pattern: this.#pattern,
 				respectGitignore: this.#respectGitignore,
 				maxFileBytes: this.#maxFileBytes,
-				onUnreadableDirectory: this.#onUnreadableDirectory,
+				onUnreadableDirectory: (path) => {
+					unreadableDirectories++;
+					this.#onUnreadableDirectory?.(path);
+				},
 				maxFiles: this.#maxFiles,
 				onTruncated: () => {
 					truncated = true;
@@ -246,6 +258,8 @@ export class RepoMapService {
 			totalFiles: scan.stats.files,
 			partial: rendered.definitions < scan.stats.definitions,
 			truncated,
+			skipped: scan.stats.skipped,
+			unreadableDirectories,
 			elapsedMs: performance.now() - started,
 		};
 	}
@@ -271,6 +285,13 @@ export class RepoMapService {
 			pattern: this.#pattern,
 			respectGitignore: this.#respectGitignore,
 			onUnreadableDirectory: this.#onUnreadableDirectory,
+			// One past the ceiling is all the answer needs: a repository with 201
+			// files is already too large, and walking five thousand to learn that
+			// delays every startup.
+			maxFiles: maxFiles + 1,
+			// The byte pass below stats every path; a mtime order nobody reads
+			// would stat them all once more.
+			sortByMtime: false,
 		});
 		if (paths.length === 0 || paths.length > maxFiles) return undefined;
 		let bytes = 0;

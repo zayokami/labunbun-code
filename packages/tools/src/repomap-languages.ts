@@ -205,6 +205,25 @@ function jsReference(node: SyntaxNode): string | null {
 			const constructorNode = node.childForFieldName("constructor");
 			return constructorNode ? jsCalleeName(constructorNode) : null;
 		}
+		// A component used in JSX is a reference in every sense the map cares
+		// about: it is the main way a React file reaches another file's exports.
+		case "jsx_opening_element":
+		case "jsx_self_closing_element": {
+			const name = node.childForFieldName("name");
+			return name ? jsxElementName(name) : null;
+		}
+		default:
+			return null;
+	}
+}
+
+/** The component a JSX tag names; lower-case tags are intrinsic DOM elements. */
+function jsxElementName(node: SyntaxNode): string | null {
+	switch (node.type) {
+		case "identifier":
+			return /^[A-Z]/.test(node.text) ? node.text : null;
+		case "member_expression":
+			return node.childForFieldName("property")?.text ?? null;
 		default:
 			return null;
 	}
@@ -389,16 +408,27 @@ const CPP_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
 	enum_specifier: "enum",
 };
 
+/** The wrappers `cppDeclaratorName` has to look through to reach a name. */
+const CPP_DECLARATOR_WRAPPERS = new Set([
+	"function_declarator",
+	"pointer_declarator",
+	"reference_declarator",
+	"parenthesized_declarator",
+	"array_declarator",
+]);
+
 /** Strip the declarator wrappers so `int *A::f()` reaches the identifier. */
 function cppDeclaratorName(node: SyntaxNode): string | null {
 	let current = node;
-	while (
-		current.type === "function_declarator" ||
-		current.type === "pointer_declarator" ||
-		current.type === "reference_declarator"
-	) {
-		const inner = current.childForFieldName("declarator");
-		if (!inner) break;
+	for (;;) {
+		// Most wrappers expose the declarator as a field; `reference_declarator`
+		// does not (`(reference_declarator (function_declarator …))`), so fall
+		// back to a named child of a wrapper type. A function returning a
+		// reference is otherwise invisible to the map.
+		const inner =
+			current.childForFieldName("declarator") ??
+			current.namedChildren.find((child) => child && CPP_DECLARATOR_WRAPPERS.has(child.type));
+		if (!inner || inner === current) break;
 		current = inner;
 	}
 	switch (current.type) {
@@ -553,15 +583,58 @@ function bashReference(node: SyntaxNode): string | null {
 // PowerShell
 // ---------------------------------------------------------------------------
 
+function powershellSimpleName(node: SyntaxNode): string | null {
+	const name = node.namedChildren.find((child) => child?.type === "simple_name");
+	return name ? name.text : null;
+}
+
 function powershellDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
-	if (node.type !== "function_statement") return null;
-	const name = node.namedChildren.find((child) => child?.type === "function_name");
-	return name ? { name: name.text, kind: "function" } : null;
+	switch (node.type) {
+		case "function_statement": {
+			const name = node.namedChildren.find((child) => child?.type === "function_name");
+			return name ? { name: name.text, kind: "function" } : null;
+		}
+		case "class_statement": {
+			const name = powershellSimpleName(node);
+			return name ? { name, kind: "class" } : null;
+		}
+		case "enum_statement": {
+			const name = powershellSimpleName(node);
+			return name ? { name, kind: "enum" } : null;
+		}
+		case "class_method_definition": {
+			const name = powershellSimpleName(node);
+			if (!name) return null;
+			// A constructor repeats the class name, which is already a tag.
+			const parent = node.parent;
+			const className = parent?.type === "class_statement" ? powershellSimpleName(parent) : null;
+			return name === className ? null : { name, kind: "method" };
+		}
+		case "class_property_definition": {
+			const variable = node.namedChildren.find((child) => child?.type === "variable");
+			// The node spells the member `$Name`; the reference side spells it
+			// `Name`, so drop the sigil or the two never join.
+			const name = variable ? variable.text.replace(/^\$/, "") : null;
+			return name ? { name, kind: "method" } : null;
+		}
+		default:
+			return null;
+	}
 }
 
 function powershellReference(node: SyntaxNode): string | null {
-	if (node.type !== "command") return null;
-	return node.childForFieldName("command_name")?.text ?? null;
+	switch (node.type) {
+		case "command":
+			return node.childForFieldName("command_name")?.text ?? null;
+		// `$obj.Speak()` is an invocation node (the grammar spells it
+		// `invokation_expression`), not a command; the member name is the callee.
+		case "invokation_expression": {
+			const member = node.namedChildren.find((child) => child?.type === "member_name");
+			return member ? powershellSimpleName(member) : null;
+		}
+		default:
+			return null;
+	}
 }
 
 function declarationTable(table: Record<string, RepoMapTagDefinitionKind>): RepoMapTagRules["definition"] {

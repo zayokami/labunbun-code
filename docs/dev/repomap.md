@@ -6,7 +6,7 @@ P0 (committed in `8d88093`) proved that walking and parsing a large tree with
 tree-sitter is cheap enough to do on demand. P1 adds what makes the output
 useful: definitions and call references, a file-level graph, PageRank, a token
 budget, and a persistent cache. P2 exposes the result as a tool, a prompt
-section and two commands. P3 adds four more grammars, shares the map with
+section and two commands. P3 adds ten more grammars, shares the map with
 subagents, lets `/map-refresh` replace the prompt section, and makes a
 repository past the walker's file ceiling say so. The stages share one walk, one
 grammar loader, and one cache interface.
@@ -33,10 +33,11 @@ A tag is one of two facts about a file:
 - **def** — the file declares `name` on line `line`. The declaration kinds are
   the P0 set (functions, classes, interfaces, types, enums, bound arrow/function
   expressions) plus class methods, interface method signatures, and
-  `exports.f = …` assignments. A constructor is not a tag because its class
-  already is one. Unlike P0, extraction descends into class bodies and nested
-  scopes, matching Aider's tree-sitter query rather than reporting only the
-  top level.
+  `exports.f = …` assignments. TypeScript/JavaScript, Java and PHP skip the
+  constructor because its class already is a tag; Ruby's `initialize` and C++
+  constructors are ordinary method/function tags. Unlike P0, extraction descends
+  into class bodies and nested scopes, matching Aider's tree-sitter query rather
+  than reporting only the top level.
 - **ref** — the file calls `name` (a `call_expression` callee or a
   `new_expression` constructor). Member calls are recorded under the property
   name (`obj.run()` is a reference to `run`), and `require` is ignored.
@@ -44,7 +45,7 @@ A tag is one of two facts about a file:
 ### Grammars
 
 `repomap-languages.ts` holds the node vocabulary for each grammar; the walk, the
-graph and the ranker know nothing about languages. Eleven grammars ship, and
+graph and the ranker know nothing about languages. Thirteen grammars ship, and
 the extension picks one:
 
 | Extensions | Grammar |
@@ -66,6 +67,11 @@ the extension picks one:
 The rules are the same shape for every language: which node types declare a
 name and what kind they are, and where a call node names its callee.
 
+- **TypeScript / TSX / JavaScript** — the P1 rules, shared by all three. TSX
+  adds JSX tags: `<Widget />` and `<Foo.Bar />` are references to the component
+  (the map is how a React file reaches another file's exports), while a
+  lower-case tag such as `<div />` is an intrinsic element and is skipped. Only
+  the opening element is read, so `<Widget></Widget>` counts once.
 - **Python** — `function_definition` and `class_definition`; a call's callee is
   the identifier, or the attribute of `obj.method()`. Nested functions and
   methods are tags; a decorated function is found through its
@@ -88,10 +94,14 @@ name and what kind they are, and where a call node names its callee.
   generic and qualified type names.
 - **C++** — `class_specifier`, `struct_specifier`, `union_specifier`,
   `enum_specifier` and `function_definition`, with the declarator unwrapped
-  through function, pointer and reference layers so `int *A::f()` still names
-  `f`. Calls read identifiers, `obj.f()`, `A::f()` and the templated forms;
-  `new X()` reads the type. The C++ grammar also parses C, and both use it so a
-  mixed C/C++ tree has one graph.
+  through function, pointer and reference layers so `int *A::f()` and
+  `Foo& Foo::operator=()` still name the function (`reference_declarator` does
+  not expose its inner declarator as a field, so the rule falls back to a named
+  child). Calls read identifiers, `obj.f()`, `A::f()` and the templated forms;
+  `new X()` reads the type. P0 descends `template_declaration`,
+  `linkage_specification` (`extern "C"`) and the `preproc_if*` branches, so a
+  declaration behind a template or an `#ifdef` is still top-level. The C++
+  grammar also parses C, and both use it so a mixed C/C++ tree has one graph.
 - **Ruby** — `method`, `singleton_method`, `class` and `module` (a module is
   recorded as a class; the ranker only needs the name). Every call node names
   its callee in the `method` field, so `helper()`, `Widget.make` and
@@ -103,9 +113,14 @@ name and what kind they are, and where a call node names its callee.
 - **Bash** — `function_definition` for both `f() { … }` and `function f { … }`.
   Every command is a reference; builtins like `echo` simply never match a
   defined name.
-- **PowerShell** — `function_statement`, with the name in a `function_name`
-  child. Commands (`Write-Host`, a bare `Beta`) are references the same way
-  shell commands are.
+- **PowerShell** — `function_statement` (also how `filter` is spelled), plus
+  `class_statement`, `enum_statement`, `class_method_definition` and
+  `class_property_definition`. The class name is a `simple_name` child and a
+  property's name is a `variable` with a leading `$` that is dropped so it joins
+  the `$this.Name` reference. A constructor repeats the class name and is
+  skipped. Commands (`Write-Host`, a bare `Beta`) are references the same way
+  shell commands are, and so is a member invocation such as `$obj.Speak()`
+  (the grammar spells the node `invokation_expression`).
 
 CSS and INI are not mapped. They have no call graph — only names in a
 stylesheet or a config file — and listing those names would spend the token
@@ -209,7 +224,17 @@ path and validated by `mtimeMs` and `size` — the same rule as the in-memory
 cache, whose size component catches Windows edits that land in the same clock
 tick. The table is named `repo_map_cache_v1`; a payload shape change belongs in
 a new table so an old binary cannot read new rows. `:memory:` gives the same
-code a process-local store. WAL mode is on for file-backed caches.
+code a process-local store. WAL mode is on for file-backed caches, with
+`synchronous = NORMAL` (WAL's recommended level: a crash can lose the newest
+commits but not corrupt the file, and the cache can be rebuilt anyway) and a
+five-second `busy_timeout`, because two sessions in one checkout share the file.
+
+Writes are buffered and land in one transaction: `set` fills a pending map, an
+in-scan `get` reads that map first, and `scanRepoFiles` calls `flush()` once its
+workers finish. Autocommitting each file costs an fsync per row — seconds on a
+twenty-thousand-file `refresh` — and the buffer turns them into one commit. A
+scan that dies before flushing simply loses those rows; the next scan reads the
+files again.
 
 Both caches implement `RepoMapCache<T>`; the payload is definitions in P0 and
 `RepoMapFileTags` in P1. Closing the SQLite cache is the caller's job; nothing
@@ -240,7 +265,10 @@ every session in the same checkout starts hot.
 **The tool.** `RepoMap` takes an optional `path`, `maxTokens` and `refresh`. It
 returns the rendered map followed by one line saying how many definitions and
 files the budget allowed and how long the scan took; a partial map says so and
-suggests raising `maxTokens`. It is declared read-only and concurrency-safe, and
+suggests raising `maxTokens`. The footer also names files the scan could not
+read or skipped for size, and directories the walk could not list — a hole in
+the map must not read as an empty part of the repository. It is declared
+read-only and concurrency-safe, and
 its result cap is 80,000 characters — a maximum-budget map is roughly 64,000.
 An input that cannot be mapped (outside the workspace, not a directory) comes
 back as the result text, not a thrown error.
@@ -248,7 +276,10 @@ back as the result text, not a thrown error.
 **The prompt section.** At startup each host asks the service for
 `promptSection()`. It is offered only when the walk fits 200 files and 512 KiB,
 the scan finds at least one definition, and every definition fits the 1,024-token
-budget. A larger repository gets no section — a truncated map presented as *the*
+budget. The walk is asked for 201 matches, so a large repository is rejected as
+soon as the ceiling is crossed rather than after walking thousands of files; the
+byte pass runs only for a tree that is still a candidate. A larger repository
+gets no section — a truncated map presented as *the*
 map would say the files it left out have nothing in them — and the tool answers
 instead, where the model can raise the budget. The section is injected below
 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, after the model guidance and before project
@@ -266,8 +297,8 @@ and the prompt section.
 ## Languages, subagents and large trees (P3)
 
 **Grammars.** Python, Go, Rust, Java, C#, C++, Ruby, PHP, Bash and PowerShell
-joined TypeScript and JavaScript (see *Grammars* above). A scan loads only the
-grammars its walk actually found, each once per process; a failed load is not
+joined TypeScript, TSX and JavaScript (see *Grammars* above). A scan loads only
+the grammars its walk actually found, each once per process; a failed load is not
 cached, so a retry is possible.
 
 **Subagents.** A subagent's context block now carries the same `# Repository
@@ -302,8 +333,8 @@ Measured on Windows 11, Bun 1.4.4, 2026-11-07.
 
 | Tree | Files | Lines | Cold scan | Hot scan | Rank | Render | Definitions | References |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Synthetic (100 files) | 100 | 100,100 | 800 ms | 18 ms | 67 ms | 19 ms | 80,100 | 10,000 |
-| This repository | 717 | — | 1,968 ms | 124 ms | 68 ms | <1 ms | 8,073 | 147,932 |
+| Synthetic (100 files) | 100 | 100,100 | 780 ms | 10 ms | 64 ms | 19 ms | 80,100 | 10,000 |
+| This repository | 724 | — | 1,974 ms | 87 ms | 60 ms | <1 ms | 8,152 | 149,441 |
 
 "Cold" is an empty in-memory cache: every file is read and parsed. "Hot" is a
 second pass with the same cache: no reads, no parses, only stats and the walk.
@@ -315,7 +346,7 @@ Map sizes at the two budgets:
 | Tree | 1,024 tokens | 4,096 tokens |
 | --- | ---: | ---: |
 | Synthetic | 49 definitions, 1 file, 1,006 tokens | 202 definitions, 3 files, 4,089 tokens |
-| This repository | 24 definitions, 18 files, 1,078 tokens | 81 definitions, 51 files, 4,233 tokens |
+| This repository | 24 definitions, 17 files, 974 tokens | 81 definitions, 49 files, 4,189 tokens |
 
 The synthetic tree is reproducible with `bun run repomap:bench`; pass a path to
 benchmark a real checkout (`bun run repomap:bench .`).
@@ -323,9 +354,9 @@ benchmark a real checkout (`bun run repomap:bench .`).
 ## What is left
 
 - More grammars than `@vscode/tree-sitter-wasm` ships. The set it does ship is
-  covered except CSS and INI, which are left out on purpose (see *Grammars*).
-  A grammar for a language the package lacks would need its own WASM build and
-  a test per rule.
+  covered except CSS, INI and regex, which are left out on purpose (see
+  *Grammars*; regex is not a source language). A grammar for a language the
+  package lacks would need its own WASM build and a test per rule.
 - A million-line tree is still linear in files: the scan is parallel across
   reads but synchronous across parses, and the remaining cost is the walk and
   the stats. A worker pool or a persistent file index (a directory-level mtime
