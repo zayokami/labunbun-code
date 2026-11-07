@@ -14,9 +14,17 @@ import { dropLastChar } from "../terminal-input.ts";
 import { type Theme, useTheme } from "../theme.ts";
 import { nextChar } from "../vim.ts";
 import { OnScreenKeyboard } from "./OnScreenKeyboard.tsx";
+import { displayWidth } from "./SplitWorkspace.tsx";
 
 /** Rows the slash list shows before it scrolls. */
 const SUGGESTION_ROWS = 8;
+
+/**
+ * The widest the command-name column may grow before it starts to squeeze the
+ * descriptions. Command names are short; a skill named after its folder can be
+ * long, and one such name must not push every description off the row.
+ */
+const SUGGESTION_NAME_MAX = 28;
 
 export interface PromptInputProps {
 	onSubmit: (text: string) => void;
@@ -813,6 +821,26 @@ export function PromptInput({
 		Math.min(suggestionPosition - (SUGGESTION_ROWS - 1), suggestions.length - SUGGESTION_ROWS),
 	);
 	const visibleSuggestions = suggestions.slice(suggestionStart, suggestionStart + SUGGESTION_ROWS);
+	// The list is a table, not a paragraph: one command per row, its description
+	// in a column of its own. Written as `name — description` a long description
+	// wrapped over three rows and a list of eight commands filled most of the
+	// screen; a reader scans a table down the left edge for the command and
+	// across for what it does, and the descriptions stay where they were while
+	// the highlight moves. Claude Code's picker is drawn this way, and this is
+	// the same shape.
+	//
+	// The name column is measured over every match, not only the rows on screen,
+	// so turning the window does not make the descriptions shift sideways. The
+	// marker is `❯ ` or two spaces; one cell of margin is kept at the right edge.
+	const suggestionNameWidth = Math.min(
+		SUGGESTION_NAME_MAX,
+		Math.max(0, ...suggestions.map(([name]) => displayWidth(name))),
+	);
+	// A description gets a dozen columns to say anything; under that the list is
+	// names alone rather than a column of ellipses. The name column plus the
+	// marker, a two-cell gap and one cell of right margin take the rest.
+	const suggestionDescriptionWidth = Math.max(0, columns - suggestionNameWidth - 5);
+	const showSuggestionDescriptions = suggestionDescriptionWidth >= 12;
 	// Emacs keeps no mode, so `vimMode` reads "insert" and this gate used to hide
 	// every emacs region — the highlight the plan promises, switched off by the one
 	// editor that has no visual mode to be in. Vim's half is unchanged: outside
@@ -873,12 +901,24 @@ export function PromptInput({
 				<Box flexDirection="column" marginBottom={0}>
 					{visibleSuggestions.map(([name, description], row) => {
 						const isSelected = suggestionPosition === suggestionStart + row;
+						// Long names overrun the column rather than being cut: the name is
+						// what the user types, and a row that pushed its description right
+						// is better than a command nobody can read. That row gets the
+						// columns the overrun costs it, so it still ends inside the screen.
+						const nameWidth = displayWidth(name);
+						const gap = " ".repeat(Math.max(2, suggestionNameWidth - nameWidth + 2));
+						const room = columns - 5 - Math.max(suggestionNameWidth, nameWidth);
+						const text = showSuggestionDescriptions && room >= 12 ? truncateToWidth(description, room) : "";
 						return (
-							<Text key={name} color={isSelected ? theme.selection : theme.textMuted}>
-								{isSelected ? `${theme.marks.selected} ` : "  "}
-								{name}
-								{description ? ` — ${description}` : ""}
-							</Text>
+							<Box key={name} flexDirection="row">
+								<Text color={isSelected ? theme.selection : theme.text}>
+									{isSelected ? `${theme.marks.selected} ${name}` : `  ${name}`}
+								</Text>
+								{/* The description stays muted on the highlighted row too: the
+								    colour marks the command, and a second highlighted run
+								    would compete with it. */}
+								{text ? <Text color={theme.textMuted}>{`${gap}${text}`}</Text> : null}
+							</Box>
 						);
 					})}
 					{suggestions.length > SUGGESTION_ROWS && (
@@ -1011,6 +1051,30 @@ function cursorColumn(text: string, cursor: number, lineIndex: number): number {
 	let offset = 0;
 	for (let i = 0; i < lineIndex; i++) offset += lines[i].length + 1;
 	return cursor - offset;
+}
+
+/**
+ * `text` cut to `width` columns, ending in an ellipsis when anything was cut.
+ *
+ * The suggestion list keeps every description on one row, so a description
+ * longer than its column is cut rather than wrapped. Cut at a code-point
+ * boundary — never inside a surrogate pair — and measured the way the split
+ * panes measure, so a CJK or emoji description does not spill past the row it
+ * was cut for.
+ */
+function truncateToWidth(text: string, width: number): string {
+	if (displayWidth(text) <= width) return text;
+	if (width <= 0) return "";
+	if (width === 1) return "…";
+	let used = 0;
+	let end = 0;
+	for (const char of text) {
+		const next = used + displayWidth(char);
+		if (next > width - 1) break;
+		used = next;
+		end += char.length;
+	}
+	return `${text.slice(0, end).trimEnd()}…`;
 }
 
 function lineEndOf(text: string, lineIndex: number): number {

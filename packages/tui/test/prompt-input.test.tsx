@@ -507,6 +507,42 @@ describe("slash command suggestions", () => {
 		unmount();
 	});
 
+	test("a suggestion is one row, with its description in a column of its own", async () => {
+		// The list is a table, not a paragraph: written as `name — description` a
+		// long description wrapped over three rows and pushed the list off the
+		// screen. Every command is one row, and the descriptions start at the same
+		// column whatever the name is.
+		const UNEVEN: Array<[string, string]> = [
+			["/theme", "Show or switch the theme: /theme [name|auto]"],
+			[
+				"/autocompact",
+				"Switch the automatic compaction passes and their trigger line: /autocompact [on|off|<percent>]",
+			],
+			["/clear", "Clear the conversation"],
+		];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={UNEVEN} />),
+		);
+		await delay(30);
+		stdin.write("/");
+		await delay(30);
+		const lines = (lastFrame() ?? "").split("\n");
+		const row = (name: string) => lines.find((line) => line.trimStart().startsWith(name));
+
+		const autocompact = row("/autocompact") ?? "";
+		const clear = row("/clear") ?? "";
+		expect(autocompact).toContain("Switch the automatic compaction passes");
+		expect(clear).toContain("Clear the conversation");
+		// One row each: the long description is cut, not wrapped, and nothing of
+		// it spills onto the next line.
+		expect(autocompact.endsWith("…")).toBe(true);
+		expect(lines.some((line) => line.includes("<percent>]"))).toBe(false);
+		expect(autocompact.length).toBeLessThanOrEqual(100);
+		// The description column is the same one for every row.
+		expect(autocompact.indexOf("Switch the automatic")).toBe(clear.indexOf("Clear the conversation"));
+		unmount();
+	});
+
 	test("a query that matches nothing says so", async () => {
 		const { stdin, lastFrame, unmount } = render(
 			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={COMMANDS} />),
