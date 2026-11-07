@@ -46,7 +46,15 @@ function setup(rows: UiEntry[]) {
 	const view = render(<REPL getSession={() => session} store={store} modelName="test" onExit={() => {}} />);
 	// The wipe is for terminals only, and the REPL asks the stream it renders to.
 	// ink-testing-library's stream does not answer that question on its own.
-	(view.stdout as { isTTY?: boolean }).isTTY = true;
+	const stream = view.stdout as { isTTY?: boolean; rows?: number };
+	stream.isTTY = true;
+	// A TTY has a height, and the REPL caps its frame to it (`frameCap` in
+	// REPL.tsx). The testing stream has `columns` but no `rows`, so ink falls
+	// back to *this machine's* terminal: on a short one the cap clips the live
+	// tail of the 200-row fixture, and the rows this file counts would depend on
+	// where the suite runs. Pin a height the whole fixture fits under.
+	stream.rows = 40;
+	view.stdout.emit("resize");
 	return {
 		store,
 		view,

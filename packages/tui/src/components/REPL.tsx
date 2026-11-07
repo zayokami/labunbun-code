@@ -1104,8 +1104,20 @@ export function REPL({
 			    the transcript in the scrollback for each look at Ctrl+O. A
 			    zero-height box keeps the tree (and that index) alive without
 			    letting a single row of it into the frame. */}
+			{/* `flexShrink={0}`: a screen taller than the cap must be clipped,
+			    not squeezed. Yoga's default shrink is 1, so the frame was cut
+			    to the cap by compressing every child — and a squeezed text
+			    node still draws all of its lines, one row per line from its
+			    reduced offset. The banner's rows and a dialog's rows then
+			    landed on top of each other (`Tips` lost its `T`, `Deny rules`
+			    grew an `s`), and the prompt box was pressed into a single
+			    row. At its natural height the screen
+			    overflows the cap and the bottom-anchored outer box clips
+			    whole rows off the top, which is the intended trade: the
+			    oldest rows go, the ones that stay are intact. */}
 			<Box
 				flexDirection="column"
+				flexShrink={0}
 				height={transcriptMode ? 0 : undefined}
 				overflow={transcriptMode ? "hidden" : undefined}
 			>
@@ -1311,7 +1323,12 @@ export function REPL({
 			    otherwise type into a buffer nobody can see, answer Escape for a
 			    window that is not its own, and publish a `padRef` that would steal
 			    the paging buttons from the screen that is actually showing. */}
-			<Box display={transcriptMode ? "none" : "flex"} flexDirection="column">
+			{/* `flexShrink={0}`, for the reason the live screen gives above: a
+			    squeezed prompt box draws its three rows on one (`╰─> / ───╯`),
+			    and the placeholder and the input row disappear into the
+			    border. The prompt is the one thing on screen that must never
+			    be the row the cap takes. */}
+			<Box display={transcriptMode ? "none" : "flex"} flexDirection="column" flexShrink={0}>
 				<PromptInput
 					onSubmit={handleSubmit}
 					disabled={
