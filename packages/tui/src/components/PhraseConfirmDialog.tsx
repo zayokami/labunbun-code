@@ -121,9 +121,14 @@ export function PhraseConfirmDialog({
 				</Text>
 				<Text dimColor>The phrase is case-sensitive.</Text>
 			</Box>
+			{/* The same marker and block caret the prompt draws, for the same
+			    reason: a field without a cursor looks like a label. The phrase is
+			    the one thing this dialog asks for, and there was no sign that the
+			    keystrokes had anywhere to land. */}
 			<Box marginTop={1}>
-				<Text color={theme.selection}>{"> "}</Text>
-				<Text>{typed.length > 0 ? typed : " "}</Text>
+				<Text color={theme.accent}>{"> "}</Text>
+				<Text>{typed}</Text>
+				<Text inverse> </Text>
 			</Box>
 			{error ? <Text color={theme.error}>{error}</Text> : null}
 			<Box marginTop={1}>

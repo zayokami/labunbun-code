@@ -33,6 +33,7 @@ function setup() {
 	return {
 		answers,
 		frame: () => (view.lastFrame() ?? "").replace(/\s+/g, " "),
+		lines: () => (view.lastFrame() ?? "").split("\n"),
 		type: async (text: string) => {
 			view.stdin.write(text);
 			await delay(40);
@@ -57,6 +58,19 @@ describe("the phrase confirmation", () => {
 		expect(frame).toContain(PHRASE);
 		expect(frame).toContain("case-sensitive");
 		expect(frame).toContain("next decision");
+		h.unmount();
+	});
+
+	test("the field reads as an input: a prompt marker and what was typed", async () => {
+		// The dialog asks for the one thing a label cannot ask for — a typed
+		// sentence — and without the marker and the caret the row it goes on
+		// looked like another line of the list, so there was no sign the dialog
+		// was listening for keys at all.
+		const h = setup();
+		await delay(30);
+		expect(h.lines().some((line) => /│\s+>\s*│/.test(line))).toBe(true);
+		await h.type("I only");
+		expect(h.lines().some((line) => /│\s+> I only\s*│/.test(line))).toBe(true);
 		h.unmount();
 	});
 
