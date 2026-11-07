@@ -5,14 +5,18 @@
  * Usage: bun run release:package
  *
  * Produces dist/release containing:
- *   - labunbun_<version>~alpha1_amd64.deb
- *   - labunbun_<version>~alpha1_arm64.deb
- *   - labunbun-<version>-alpha1.x86_64.rpm
- *   - labunbun-<version>-alpha1.aarch64.rpm
- *   - LaBunbun-Code-<version>-alpha-x86_64.AppImage
- *   - LaBunbun-Code-<version>-alpha-aarch64.AppImage
- *   - labunbun-<version>-alpha-darwin-arm64.zip
- *   - labunbun-<version>-alpha-darwin-x64.zip
+ *   - labunbun_<version>~<alpha>_amd64.deb
+ *   - labunbun_<version>~<alpha>_arm64.deb
+ *   - labunbun-<version>-<alpha>.x86_64.rpm
+ *   - labunbun-<version>-<alpha>.aarch64.rpm
+ *   - LaBunbun-Code-<version>-<alpha>-x86_64.AppImage
+ *   - LaBunbun-Code-<version>-<alpha>-aarch64.AppImage
+ *   - labunbun-<version>-<alpha>-darwin-arm64.zip
+ *   - labunbun-<version>-<alpha>-darwin-x64.zip
+ *
+ * `<alpha>` is `alpha1` unless LABUNBUN_ALPHA names another alpha of the same
+ * product version. A second alpha does not move `<version>`: the label is what
+ * makes its packages distinct and lets `apt` and `dnf` replace the earlier one.
  *
  * The Windows installer is produced separately by `bun run installer:build`;
  * this script copies it into dist/release when it is present. The AppImage
@@ -38,8 +42,24 @@ const README = readFileSync(join(REPO, "README.md"));
 const LICENSE = readFileSync(join(REPO, "LICENSE"));
 
 const version = readVersion();
-const debVersion = `${version}~alpha1`;
+const alpha = readAlpha();
+const debVersion = `${version}~${alpha}`;
 const mtime = sourceDateEpoch();
+
+/**
+ * The alpha label of this version, not the version itself.
+ *
+ * Alpha.1 and alpha.2 share one product version, so the label is the only
+ * thing that distinguishes the packages — both for a reader and for a package
+ * manager deciding whether `~alpha2` replaces `~alpha1`. It defaults to
+ * `alpha1` so the script still describes the first alpha; a later one sets
+ * LABUNBUN_ALPHA=alpha2 rather than editing the code.
+ */
+function readAlpha(): string {
+	const label = process.env.LABUNBUN_ALPHA ?? "alpha1";
+	if (!/^alpha[0-9]*$/.test(label)) throw new Error(`LABUNBUN_ALPHA is not an alpha label: ${label}`);
+	return label;
+}
 
 function readVersion(): string {
 	const source = readFileSync(join(REPO, "packages", "coding-agent", "src", "cli-constants.ts"), "utf8");
@@ -151,11 +171,11 @@ function writeDeb(architecture: string, binary: Buffer): string {
 }
 
 function writeRpm(architecture: "x86_64" | "aarch64", binary: Buffer): string {
-	const artifact = join(RELEASE, `labunbun-${version}-alpha1.${architecture}.rpm`);
+	const artifact = join(RELEASE, `labunbun-${version}-${alpha}.${architecture}.rpm`);
 	const data = buildRpm({
 		packageName: "labunbun",
 		version,
-		release: "alpha1",
+		release: alpha,
 		architecture,
 		summary: "terminal coding agent",
 		description: [
@@ -173,7 +193,7 @@ function writeRpm(architecture: "x86_64" | "aarch64", binary: Buffer): string {
 }
 
 function writeAppImage(architecture: "x86_64" | "aarch64", binary: Buffer, runtime: Buffer): string {
-	const artifact = join(RELEASE, `LaBunbun-Code-${version}-alpha-${architecture}.AppImage`);
+	const artifact = join(RELEASE, `LaBunbun-Code-${version}-${alpha}-${architecture}.AppImage`);
 	const entries: SquashfsEntry[] = [
 		{ path: "AppRun", mode: 0o755, symlink: "usr/bin/labunbun" },
 		{ path: "labunbun.desktop", mode: 0o644, data: Buffer.from(DESKTOP_ENTRY, "utf8") },
@@ -185,7 +205,7 @@ function writeAppImage(architecture: "x86_64" | "aarch64", binary: Buffer, runti
 }
 
 function writeZip(architecture: string, binary: Buffer): string {
-	const root = `labunbun-${version}-alpha-darwin-${architecture}`;
+	const root = `labunbun-${version}-${alpha}-darwin-${architecture}`;
 	const artifact = join(RELEASE, `${root}.zip`);
 	const data = buildZip(
 		[
@@ -226,7 +246,7 @@ for (const target of [
 	writeZip(target.architecture, readFileSync(build(target.bunTarget, target.name)));
 }
 
-const setupName = `LaBunbun-Code-${version}-alpha-x64-setup.exe`;
+const setupName = `LaBunbun-Code-${version}-${alpha}-x64-setup.exe`;
 const setup = join(DIST, setupName);
 if (existsSync(setup)) {
 	copyFileSync(setup, join(RELEASE, setupName));

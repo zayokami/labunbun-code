@@ -4,6 +4,13 @@
 ; The release binary must already exist at dist\labunbun-x64.exe.
 ; The build script finds ISCC.exe without assuming an install path.
 
+; The alpha label of this version, passed by `bun run installer:build` from
+; LABUNBUN_ALPHA. A later alpha of the same version keeps AppVersion and
+; changes only this label, so its setup still installs over the earlier one.
+#ifndef Alpha
+  #define Alpha "alpha1"
+#endif
+
 #define AppName "LaBunbun Code"
 #define AppVersion "0.1.0.4"
 #define AppPublisher "zayokami"
@@ -25,7 +32,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 LicenseFile=..\LICENSE
 OutputDir=..\dist
-OutputBaseFilename=LaBunbun-Code-{#AppVersion}-alpha-x64-setup
+OutputBaseFilename=LaBunbun-Code-{#AppVersion}-{#Alpha}-x64-setup
 Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern

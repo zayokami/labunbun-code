@@ -175,6 +175,25 @@ commands, and SHA-256 checksums.
   does not switch by itself: a login should not change a setting nobody asked
   it to.
 
+- **A screen taller than the terminal is clipped, not squeezed.** When a
+  dialog, the suggestion list or a long draft pushed the live screen past the
+  window's height, the last box shrank and drew its rows from overlapping
+  offsets — text overprinted itself and the prompt's border was drawn through
+  the advice under it. The screen now keeps its height and the frame drops
+  whole rows off the top.
+
+- **The slash-command list reads as a table.** Each suggestion was one wrapped
+  sentence, so a long description ran to a second row and pushed the next
+  command out of alignment. A suggestion is now one row: the name in a column
+  of its own, the description aligned beside it and cut with `…` at the
+  terminal's edge. Under about 60 columns the descriptions give way and the
+  list is names alone.
+
+- **The YOLO phrase field looks like a field.** The confirmation dialog asked
+  for the exact sentence but drew the typed text with no marker and no caret,
+  so the row read as another line of the list and nothing said the keys had
+  somewhere to go. It now carries the prompt's `>` and block caret.
+
 ## 0.1.0.3 (Alpha) — 2026-10-29
 
 A drop-in replacement for 0.1.0.2, with fixes to permission matching, the

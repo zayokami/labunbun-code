@@ -83,8 +83,17 @@ if (!existsSync(BINARY)) {
 	process.exit(1);
 }
 
+// The same label package-release.ts reads, so the installer it copies carries
+// the alpha the rest of the artifacts carry and the setup for a later alpha
+// does not overwrite the earlier one's.
+const alpha = process.env.LABUNBUN_ALPHA ?? "alpha1";
+if (!/^alpha[0-9]*$/.test(alpha)) {
+	console.error(`LABUNBUN_ALPHA is not an alpha label: ${alpha}`);
+	process.exit(1);
+}
+
 console.log(`Using ${iscc}`);
-const compiled = spawnSync(iscc, [SCRIPT], { cwd: REPO, stdio: "inherit", windowsHide: true });
+const compiled = spawnSync(iscc, [`/DAlpha=${alpha}`, SCRIPT], { cwd: REPO, stdio: "inherit", windowsHide: true });
 if (compiled.error) {
 	console.error(compiled.error.message);
 	process.exit(1);
