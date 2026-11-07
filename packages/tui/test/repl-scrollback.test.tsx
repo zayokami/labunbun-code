@@ -212,9 +212,9 @@ describe("the transcript screen under the frame cap", () => {
 			else line += 1;
 		}
 		expect(shown).toEqual(unbroken);
-		// The window is what fits under the cap (two rows an entry at the least),
-		// not the twenty-five that cannot.
-		expect(h.stdout.frames.slice(before).join("")).toContain("Transcript 20-30 of 30");
+		// The window is what fits under the cap at nine rows an answer, not the
+		// twenty-five that cannot.
+		expect(h.stdout.frames.slice(before).join("")).toContain("Transcript 29-30 of 30");
 		h.finish();
 	}, 20_000);
 });

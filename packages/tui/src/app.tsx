@@ -537,7 +537,15 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				pad={options.pad}
 			/>
 		</ThemedTree>,
-		{ exitOnCtrlC: false, kittyKeyboard: { mode: "auto" } },
+		{
+			exitOnCtrlC: false,
+			kittyKeyboard: { mode: "auto" },
+			// Only the lines that changed are rewritten, instead of erasing the
+			// frame and printing it again. Ink has implemented this per line since
+			// 7.1, but leaves it off by default; with a live answer streaming into
+			// the last rows it is the difference between a repaint and a flicker.
+			incrementalRendering: true,
+		},
 	);
 
 	const permissionQueue = createPermissionQueue({

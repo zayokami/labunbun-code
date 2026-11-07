@@ -2,7 +2,7 @@ import type { AgentEvent, AgentSession, PermissionMode, SandboxMode } from "@lab
 import { cycleModeChoice, describeModeChoice, type ModeChoice } from "@labunbun/agent";
 import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout, useWindowSize } from "ink";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ComponentProps, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WHEEL_ROWS, wheelEntries, wheelMove } from "../command-wheel.ts";
 import { isConPTYHost } from "../conpty.ts";
 import { type EditorKind, resolveEditingMode } from "../editing-mode.ts";
@@ -15,11 +15,11 @@ import { shortcutGroups } from "../shortcuts.ts";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
 import { useTheme } from "../theme.ts";
-import { entriesFromMessages, type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
+import { entriesFromMessages, type QueuedMessage, reduceEvent, type UiEntry, type UiState } from "../ui-state.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { CommandWheel } from "./CommandWheel.tsx";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
-import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
+import { MessageList, StreamingPreview, stripAnsi, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
 import { PhraseConfirmDialog } from "./PhraseConfirmDialog.tsx";
 import { PlanReviewDialog } from "./PlanReviewDialog.tsx";
@@ -29,6 +29,7 @@ import { QueuedMessages } from "./QueuedMessages.tsx";
 import { ShortcutOverlay } from "./ShortcutOverlay.tsx";
 import {
 	buildConversation,
+	displayWidth,
 	SplitWorkspace,
 	scrollWorkspace,
 	splitBodySize,
@@ -213,6 +214,102 @@ export function helpText(commandSuggestions?: Array<[string, string]>, editor: E
 	return `Commands:\n${lines.join("\n")}\n\n${keys}`;
 }
 
+/** The width a transcript row is measured at, kept above the point where a
+ * line wraps once per word and every row estimate becomes a dozen. */
+const TRANSCRIPT_MEASURE_FLOOR = 20;
+
+/** Rows of plain text at a given width, counting explicit newlines. */
+function textRowCount(text: string, columns: number): number {
+	const width = Math.max(TRANSCRIPT_MEASURE_FLOOR, columns - 2);
+	let rows = 0;
+	for (const line of stripAnsi(text).split("\n")) {
+		rows += Math.max(1, Math.ceil(displayWidth(line) / width));
+	}
+	return rows;
+}
+
+/**
+ * Rows one entry is expected to occupy on the transcript screen.
+ *
+ * An estimate, not a measurement: the cost here is layout, and the answer is
+ * whether the screen can afford another entry, so being a row over is safe and
+ * being a row under only lets one extra entry through. Markdown can add a row
+ * to a block, which is why every entry also pays one for its gap.
+ */
+export function transcriptEntryRows(entry: UiEntry, columns: number): number {
+	if (entry.kind === "toolUse") {
+		// The call line, its result (one row while the tool is still running),
+		// and the gap under the entry.
+		return 1 + (entry.resultText === undefined ? 1 : textRowCount(entry.resultText, columns)) + 1;
+	}
+	return textRowCount(entry.text, columns) + 1;
+}
+
+/**
+ * The entries the transcript screen can afford to draw.
+ *
+ * The screen used to take the last `maxEntries` entries and hand each of them
+ * to Ink with `full`; an answer or a tool result can be hundreds of rows, so
+ * twenty-five entries could mean thousands of rows of layout for a window that
+ * fits twenty. This walks back from `end` until the row budget is spent. The
+ * newest entry is always kept, however tall it is — it is what the reader
+ * opened the screen for — and the frame cap clips the part that does not fit.
+ */
+export function transcriptWindowEntries(
+	entries: UiEntry[],
+	end: number,
+	maxEntries: number,
+	rowBudget: number | undefined,
+	columns: number,
+): UiEntry[] {
+	const floor = Math.max(0, end - maxEntries);
+	if (rowBudget === undefined) return entries.slice(floor, end);
+	let rows = 0;
+	let from = end;
+	for (let i = end - 1; i >= floor; i--) {
+		const cost = transcriptEntryRows(entries[i], columns);
+		if (from < end && rows + cost > rowBudget) break;
+		rows += cost;
+		from = i;
+	}
+	return entries.slice(from, end);
+}
+
+/**
+ * The live answer, subscribed to where it is drawn.
+ *
+ * The REPL used to select `streamingText` itself, so every delta re-rendered
+ * the whole screen — prompt, dialogs, watch panel — to append a token to one
+ * preview, and Ink laid the whole tree out again for it. The text is read here
+ * instead: a delta repaints this box and the status estimate, not their
+ * siblings. The REPL keeps only the boolean that decides whether the greeting
+ * still belongs on screen.
+ */
+function LiveStreamingPreview({ store }: { store: Store<UiState> }) {
+	const text = useStore(store, (s) => s.streamingText);
+	const thinking = useStore(store, (s) => s.thinkingText);
+	return <StreamingPreview text={text} thinking={thinking} />;
+}
+
+/** The split pane reads the same two fields at its own boundary. */
+function LiveSplitWorkspace({
+	store,
+	...props
+}: Omit<ComponentProps<typeof SplitWorkspace>, "streamingText" | "thinkingText"> & { store: Store<UiState> }) {
+	const streamingText = useStore(store, (s) => s.streamingText);
+	const thinkingText = useStore(store, (s) => s.thinkingText);
+	return <SplitWorkspace {...props} streamingText={streamingText} thinkingText={thinkingText} />;
+}
+
+/** The status row's estimate follows the stream without re-rendering the REPL. */
+function LiveStatusLine({
+	store,
+	...props
+}: Omit<ComponentProps<typeof StatusLine>, "outputEstimate"> & { store: Store<UiState> }) {
+	const outputLength = useStore(store, (s) => s.streamingText.length);
+	return <StatusLine {...props} outputEstimate={estimateOutputTokens(outputLength)} />;
+}
+
 export function REPL({
 	getSession,
 	store,
@@ -234,8 +331,10 @@ export function REPL({
 }: ReplProps) {
 	const entries = useStore(store, (s) => s.entries);
 	const startupNotes = useStore(store, (s) => s.startupNotes);
-	const streamingText = useStore(store, (s) => s.streamingText);
-	const thinkingText = useStore(store, (s) => s.thinkingText);
+	// Only whether a stream is in flight is read at this level. The text
+	// itself is subscribed to by the components that draw it (see `Live*`
+	// above), so a delta does not reconcile the prompt and the overlays.
+	const streaming = useStore(store, (s) => s.streamingText !== "");
 	const statusPhase = useStore(store, (s) => s.statusPhase);
 	const dialog = useStore(store, (s) => s.dialog);
 	const question = useStore(store, (s) => s.question);
@@ -602,11 +701,28 @@ export function REPL({
 	const [transcriptOffset, setTranscriptOffset] = useState(0);
 	// Entries on the transcript screen, and entries a page key moves by. On a TTY
 	// the frame is capped (see `frameCap`), so the window is what fits under the
-	// cap at two rows an entry — the least one takes, margin included — and a
-	// page never moves further than the window shows: a step bigger than the
-	// window would skip entries that were never on screen.
+	// cap — measured in rows, because one tool result can be taller than the
+	// screen — and a page moves ten entries, never past what is on screen: a
+	// step bigger than the window would skip entries that were never shown.
 	const transcriptWindow = frameCap === undefined ? 25 : Math.max(1, Math.min(25, Math.floor((frameCap - 1) / 2)));
-	const TRANSCRIPT_PAGE = Math.min(10, transcriptWindow);
+	// The entry window is a ceiling on how many rows each entry may take, not
+	// how many entries the screen draws: a tool result can be hundreds of rows,
+	// and twenty-five of them were being laid out for a window that fits twenty.
+	// One row of the cap belongs to the footer line.
+	const transcriptRowBudget = frameCap === undefined ? undefined : Math.max(1, frameCap - 1);
+	const windowSize = Math.min(entries.length, transcriptWindow);
+	const end = Math.max(windowSize, entries.length - transcriptOffset);
+	const windowEntries = transcriptWindowEntries(
+		entries,
+		end,
+		transcriptWindow,
+		transcriptRowBudget,
+		windowColumns ?? 80,
+	);
+	const start = end - windowEntries.length;
+	// A page is ten entries, or everything the row budget put on screen when
+	// that is fewer: a step past the window would skip entries never shown.
+	const transcriptPage = Math.max(1, Math.min(10, windowEntries.length));
 	// The split view's scroll position as the pane sees it. A pinned `end` is an
 	// index into `entries`, not a distance from the newest: entries appended
 	// below must not slide the page out from under a reader. `total` at pin time
@@ -794,8 +910,10 @@ export function REPL({
 				width: body.bodyWidth,
 				rows: body.bodyRows,
 				offset: workspaceOffset,
-				streamingText,
-				thinkingText,
+				// Read at key time rather than captured: the pane subscribes to
+				// the stream itself, and the REPL no longer re-renders per delta.
+				streamingText: store.get().streamingText,
+				thinkingText: store.get().thinkingText,
 				liveOutputs,
 			});
 			const page = Math.max(1, view.lastEntry - view.firstEntry);
@@ -804,9 +922,9 @@ export function REPL({
 		}
 		if (transcriptMode) {
 			if (key.upArrow || input === "k") {
-				setTranscriptOffset((o) => Math.min(o + TRANSCRIPT_PAGE, entries.length));
+				setTranscriptOffset((o) => Math.min(o + transcriptPage, entries.length));
 			} else if (key.downArrow || input === "j") {
-				setTranscriptOffset((o) => Math.max(0, o - TRANSCRIPT_PAGE));
+				setTranscriptOffset((o) => Math.max(0, o - transcriptPage));
 			} else if (key.escape || input === "q") {
 				setTranscriptMode(false);
 				setTranscriptOffset(0);
@@ -910,16 +1028,16 @@ export function REPL({
 				setTranscriptMode(false);
 				setTranscriptOffset(0);
 			} else if (action.kind === "up" || action.kind === "page-next") {
-				setTranscriptOffset((offset) => Math.min(offset + TRANSCRIPT_PAGE, entries.length));
+				setTranscriptOffset((offset) => Math.min(offset + transcriptPage, entries.length));
 			} else if (action.kind === "down" || action.kind === "page-prev") {
-				setTranscriptOffset((offset) => Math.max(0, offset - TRANSCRIPT_PAGE));
+				setTranscriptOffset((offset) => Math.max(0, offset - transcriptPage));
 			} else if (action.kind === "scroll" && action.value !== undefined) {
 				// A positive value means "toward the end of the transcript" in the
 				// mapper's terms, which is a smaller offset here: the sign was flipped
 				// once already, where the axis was read.
 				const value = action.value;
 				setTranscriptOffset((offset) =>
-					Math.max(0, Math.min(entries.length, Math.round(offset - value * TRANSCRIPT_PAGE))),
+					Math.max(0, Math.min(entries.length, Math.round(offset - value * transcriptPage))),
 				);
 			}
 			return true;
@@ -1034,10 +1152,6 @@ export function REPL({
 	// <Static>, whose index is what stops it printing the sealed rows again; a
 	// remount would empty the index, and the rows would come back as a second
 	// copy in the terminal's scrollback every time the transcript was closed.
-	const windowSize = Math.min(entries.length, transcriptWindow);
-	const end = Math.max(windowSize, entries.length - transcriptOffset);
-	const start = end - windowSize;
-	const windowEntries = entries.slice(start, end);
 
 	// The greeting is for the screen before the first message. A resumed session
 	// starts with rows, and a run in flight has a user row even before the first
@@ -1057,7 +1171,7 @@ export function REPL({
 	const conversationStarted = entries.some((entry) => entry.kind !== "info");
 	const showWelcome =
 		!conversationStarted &&
-		streamingText === "" &&
+		!streaming &&
 		statusPhase === "idle" &&
 		!dialog &&
 		!question &&
@@ -1154,15 +1268,14 @@ export function REPL({
 						paint={paint}
 						paintedTheme={themeCommit}
 					/>
-					{splitActive ? null : <StreamingPreview text={streamingText} thinking={thinkingText} />}
+					{splitActive ? null : <LiveStreamingPreview store={store} />}
 					{!splitActive && tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
 				</Box>
 				{splitActive && !overlayOpen && (
-					<SplitWorkspace
+					<LiveSplitWorkspace
+						store={store}
 						entries={entries}
 						liveOutputs={liveOutputs}
-						streamingText={streamingText}
-						thinkingText={thinkingText}
 						shells={backgroundShells}
 						selection={watchSelection}
 						subagentLines={watchSubagentLines}
@@ -1175,7 +1288,8 @@ export function REPL({
 					/>
 				)}
 				<Box marginBottom={1} flexDirection="column">
-					<StatusLine
+					<LiveStatusLine
+						store={store}
 						phase={statusPhase}
 						modelName={modelName}
 						thinkingLevel={thinkingLevel}
@@ -1186,7 +1300,6 @@ export function REPL({
 						activityCancellable={contextActivityCancellable}
 						retry={retry}
 						thinkingMs={thinkingMs}
-						outputEstimate={estimateOutputTokens(streamingText.length)}
 						pad={padStatus}
 					/>
 					{/* "Running tools…" for twenty seconds says nothing about what is
@@ -1429,20 +1542,71 @@ function pushInfo(store: Store<UiState>, text: string): void {
 }
 
 /**
+ * How long streaming deltas are gathered before one store write.
+ *
+ * A provider sends a token per delta, and every delta used to commit React and
+ * run Yoga on the whole screen — then Ink throttled the *drawing* to 30 frames
+ * a second, so most of that work never reached the terminal. One flush per
+ * frame's interval keeps the state and the screen at the same rate.
+ */
+const STREAM_FLUSH_MS = 33;
+
+/** Only the two append-only deltas are safe to hold; a start resets a buffer. */
+function isStreamDelta(event: AgentEvent): boolean {
+	if (event.type !== "message_update") return false;
+	const kind = event.assistantMessageEvent.type;
+	return kind === "text_delta" || kind === "thinking_delta";
+}
+
+/**
  * Subscribe a store to an AgentSession's events. Returns unsubscribe.
  *
  * A session that already has history — one just resumed — emits no events for
  * it, so the resumed conversation is seeded here, before the subscription
  * starts and could miss anything. An empty session seeds nothing.
+ *
+ * Text and thinking deltas are coalesced for `STREAM_FLUSH_MS` and applied in
+ * one `store.set`; every other event flushes the buffer first and then applies
+ * on its own, so a reset (`text_start`, `turn_start`), a tool event or the end
+ * of a turn can never be reordered behind a delta it was meant to follow.
  */
 export function connectSessionToStore(session: AgentSession, store: Store<UiState>): () => void {
 	const history = entriesFromMessages(session.messages);
 	if (history.length > 0) {
 		store.set((state) => ({ ...state, entries: [...state.entries, ...history] }));
 	}
-	return session.on((event: AgentEvent) => {
+	let pending: AgentEvent[] = [];
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const flush = (): void => {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+			timer = undefined;
+		}
+		if (pending.length === 0) return;
+		const events = pending;
+		pending = [];
+		store.set((state) => events.reduce(reduceEvent, state));
+	};
+	const unsubscribe = session.on((event: AgentEvent) => {
+		if (isStreamDelta(event)) {
+			pending.push(event);
+			if (timer === undefined) {
+				timer = setTimeout(() => {
+					timer = undefined;
+					flush();
+				}, STREAM_FLUSH_MS);
+			}
+			return;
+		}
+		flush();
 		store.set((state) => reduceEvent(state, event));
 	});
+	return () => {
+		// Flush what the session already said, then stop listening. Dropping the
+		// tail would lose the last tokens of a turn whose `turn_end` never came.
+		flush();
+		unsubscribe();
+	};
 }
 
 /**
