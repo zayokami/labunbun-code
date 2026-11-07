@@ -28,6 +28,7 @@ import {
 	workspaceHeight,
 	wrapText,
 } from "../src/components/SplitWorkspace.tsx";
+import { ASSISTANT_DOT } from "../src/figures.ts";
 import { DARK_THEME, ThemeContext } from "../src/theme.ts";
 import type { UiBackgroundShell, UiEntry, UiTask } from "../src/ui-state.ts";
 
@@ -297,6 +298,72 @@ describe("the conversation pane's line model", () => {
 		expect(view.firstEntry).toBe(0);
 		expect(view.lastEntry).toBe(0);
 		for (const line of paneRows(view.lines)) expect(line.trim()).toBe("");
+	});
+
+	test("a long streaming answer is wrapped from its tail, not from its first token", () => {
+		const streaming = Array.from({ length: 400 }, (_, i) => `stream ${i + 1}`).join("\n");
+		const view = buildConversation({
+			entries: [],
+			theme: DARK_THEME,
+			width: 24,
+			rows: 6,
+			offset: 0,
+			streamingText: streaming,
+			thinkingText: "",
+		});
+		const rows = paneRows(view.lines);
+		expect(rows).toHaveLength(6);
+		expect(rows.join("\n")).toContain("stream 400");
+		expect(rows.join("\n")).not.toContain("stream 1 ");
+		// The window is showing a continuation of the answer: no row may claim to
+		// be where it started, or the assistant's lead would move as it streams.
+		expect(rows.some((line) => line.startsWith(ASSISTANT_DOT))).toBe(false);
+	});
+
+	test("a streaming answer that fits keeps its assistant lead", () => {
+		const view = paneRows(
+			buildConversation({
+				entries: [],
+				theme: DARK_THEME,
+				width: 30,
+				rows: 4,
+				offset: 0,
+				streamingText: "short answer",
+				thinkingText: "",
+			}).lines,
+		);
+		expect(view.join("\n")).toContain(`${ASSISTANT_DOT} short answer`);
+	});
+
+	test("a long settled answer shows its tail without a second lead", () => {
+		const text = Array.from({ length: 300 }, (_, i) => `settled ${i + 1}`).join("\n");
+		const view = buildConversation({
+			entries: [{ kind: "assistant", text }],
+			theme: DARK_THEME,
+			width: 24,
+			rows: 5,
+			offset: 0,
+			streamingText: "",
+			thinkingText: "",
+		});
+		const rows = paneRows(view.lines);
+		expect(rows.join("\n")).toContain("settled 300");
+		expect(rows.join("\n")).not.toContain("settled 1 ");
+		expect(rows.some((line) => line.startsWith(ASSISTANT_DOT))).toBe(false);
+	});
+
+	test("the same conversation wraps to the same rows twice", () => {
+		const streaming = Array.from({ length: 120 }, (_, i) => `line ${i + 1}`).join("\n");
+		const options = {
+			entries,
+			theme: DARK_THEME,
+			width: 26,
+			rows: 9,
+			offset: 0,
+			streamingText: streaming,
+			thinkingText: "",
+		};
+		expect(paneRows(buildConversation(options).lines)).toEqual(paneRows(buildConversation(options).lines));
 	});
 });
 

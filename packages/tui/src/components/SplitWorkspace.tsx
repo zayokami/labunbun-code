@@ -38,6 +38,7 @@
  * the height is spent from `rows - 1` and the bottom block is reserved.
  */
 import { Box, Text } from "ink";
+import { useMemo } from "react";
 import { ASSISTANT_DOT, RESULT_INDENT, RESULT_LEAD, TOOL_DOT } from "../figures.ts";
 import { type Theme, useTheme } from "../theme.ts";
 import type { UiBackgroundShell, UiEntry, UiTask } from "../ui-state.ts";
@@ -296,6 +297,40 @@ export function wrapText(text: string, width: number, firstLead = "", restLead =
 	return lines;
 }
 
+/**
+ * The end of `text` that can still reach the screen: the whole string when it
+ * is short enough, otherwise the last screenful of characters from a newline.
+ *
+ * The bound is deliberately generous — an extra line or two of characters
+ * covers a wrap boundary — and is expressed in characters, not display
+ * columns, so wide glyphs cost more rows, never fewer than the pane asked for.
+ */
+function tailSource(text: string, width: number, maxLines: number): { text: string; truncated: boolean } {
+	const limit = Math.max(1, Math.floor(maxLines));
+	const bounded = Math.max(1, Math.floor(width)) * (limit + 2);
+	if (text.length <= bounded) return { text, truncated: false };
+	const cut = text.length - bounded;
+	const newline = text.indexOf("\n", cut);
+	return { text: newline === -1 ? text.slice(cut) : text.slice(newline + 1), truncated: true };
+}
+
+/**
+ * Wrap only the part of `text` that can end up on screen.
+ *
+ * The pane is a bottom-anchored window, so a long answer only ever contributes
+ * its last `maxLines` rows; wrapping the whole source first made the per-frame
+ * cost grow with the length of the stream. The slice starts at a newline when
+ * it can, so it does not begin in the middle of a paragraph, and uses the
+ * continuation lead because the visible tail is no longer the entry's first
+ * line — a `●` on a mid-answer row would claim the answer started there.
+ */
+function wrapTail(text: string, width: number, firstLead: string, restLead: string, maxLines: number): string[] {
+	const limit = Math.max(1, Math.floor(maxLines));
+	const source = tailSource(text, width, limit);
+	const lead = source.truncated ? restLead : firstLead;
+	return wrapText(source.text, width, lead, restLead).slice(-limit);
+}
+
 function blankLine(): PaneLine {
 	return { segments: [{ text: " " }] };
 }
@@ -305,14 +340,16 @@ function styledLine(text: string, style: Omit<PaneSegment, "text">): PaneLine {
 	return { segments: [{ text: text === "" ? " " : text, ...style }] };
 }
 
-function wrapStyled(
+/** {@link wrapTail}, styled like a pane row. */
+function wrapStyledTail(
 	text: string,
 	width: number,
 	firstLead: string,
 	restLead: string,
 	style: Omit<PaneSegment, "text">,
+	maxLines: number,
 ): PaneLine[] {
-	return wrapText(text, width, firstLead, restLead).map((line) => styledLine(line, style));
+	return wrapTail(text, width, firstLead, restLead, maxLines).map((line) => styledLine(line, style));
 }
 
 /** Cut a run of segments to `width` columns, ending in an ellipsis when cut. */
@@ -414,12 +451,26 @@ function entryLines(
 	const limited = Math.max(1, maxLines);
 	switch (entry.kind) {
 		case "user":
-			return wrapStyled(stripAnsi(entry.text), width, entry.steered ? "≫ " : "> ", "  ", {
-				color: theme.userInput,
-				bold: true,
-			}).slice(-limited);
+			return wrapStyledTail(
+				stripAnsi(entry.text),
+				width,
+				entry.steered ? "≫ " : "> ",
+				"  ",
+				{
+					color: theme.userInput,
+					bold: true,
+				},
+				limited,
+			);
 		case "assistant": {
-			const lines = wrapStyled(stripAnsi(entry.text), width, `${ASSISTANT_DOT} `, "  ", { color: theme.text });
+			const lines = wrapStyledTail(
+				stripAnsi(entry.text),
+				width,
+				`${ASSISTANT_DOT} `,
+				"  ",
+				{ color: theme.text },
+				limited,
+			);
 			if (entry.incomplete) {
 				lines.push(styledLine("(response ended early; output is partial)", { color: theme.warning }));
 			}
@@ -437,12 +488,19 @@ function entryLines(
 			return [call];
 		}
 		case "error":
-			return wrapStyled(stripAnsi(entry.text), width, `${theme.marks.error} `, "  ", {
-				color: theme.error,
-				bold: theme.bold.error,
-			}).slice(-limited);
+			return wrapStyledTail(
+				stripAnsi(entry.text),
+				width,
+				`${theme.marks.error} `,
+				"  ",
+				{
+					color: theme.error,
+					bold: theme.bold.error,
+				},
+				limited,
+			);
 		case "info":
-			return wrapStyled(entry.text, width, "", "", { color: theme.textMuted }).slice(-limited);
+			return wrapStyledTail(entry.text, width, "", "", { color: theme.textMuted }, limited);
 	}
 }
 
@@ -464,16 +522,7 @@ export interface ConversationView {
 	lastEntry: number;
 }
 
-export function buildConversation({
-	entries,
-	theme,
-	width,
-	rows,
-	offset,
-	streamingText,
-	thinkingText,
-	liveOutputs,
-}: {
+export interface ConversationOptions {
 	entries: UiEntry[];
 	theme: Theme;
 	width: number;
@@ -482,15 +531,38 @@ export function buildConversation({
 	streamingText: string;
 	thinkingText: string;
 	liveOutputs?: Record<string, string>;
-}): ConversationView {
+}
+
+/** One entry's rows, and the entry they came from; -1 is the streaming block. */
+interface Block {
+	index: number;
+	lines: PaneLine[];
+}
+
+type EntryBlockOptions = Pick<ConversationOptions, "entries" | "theme" | "width" | "rows" | "offset" | "liveOutputs">;
+type StreamOptions = Pick<
+	ConversationOptions,
+	"streamingText" | "thinkingText" | "theme" | "width" | "rows" | "offset"
+>;
+
+/**
+ * The committed entries the pane can afford, newest-first, and the index just
+ * past the bottom of its window.
+ *
+ * Kept apart from the streaming block so a caller can memoize it: a delta
+ * arriving every 33ms changes neither the entries nor their wrap, and
+ * re-wrapping the whole committed tail for each one is work the pane never
+ * shows. Blocks are collected newest-first and stop as soon as the pane is
+ * full, so a long conversation costs one pane of wrapping, not all of it.
+ */
+function buildEntryBlocks({ entries, theme, width, rows, offset, liveOutputs }: EntryBlockOptions): {
+	blocks: Block[];
+	end: number;
+} {
 	const paneRows = Math.max(1, Math.floor(rows));
 	const paneWidth = Math.max(8, Math.floor(width));
-	const total = entries.length;
-	const end = Math.max(0, Math.min(total, total - Math.max(0, offset)));
-	// Blocks are collected newest-first, then kept in display order. `index` is
-	// the entry each block came from; the streaming block is -1, because it is
-	// not in `entries` yet and must not be named in the header.
-	const blocks: Array<{ index: number; lines: PaneLine[] }> = [];
+	const end = Math.max(0, Math.min(entries.length, entries.length - Math.max(0, offset)));
+	const blocks: Block[] = [];
 	let built = 0;
 	for (let index = end - 1; index >= 0 && built < paneRows; index--) {
 		const room = Math.max(1, paneRows - built);
@@ -499,42 +571,73 @@ export function buildConversation({
 		blocks.unshift({ index, lines: block });
 		built += block.length + 1;
 	}
-	if (offset === 0) {
-		const stream: PaneLine[] = [];
-		const text = stripAnsi(streamingText);
-		if (text) {
-			stream.push(...wrapStyled(text, paneWidth, `${ASSISTANT_DOT} `, "  ", { color: theme.text }));
-		} else if (thinkingText) {
-			stream.push(
-				...wrapStyled(`… ${stripAnsi(thinkingText).slice(-200)}`, paneWidth, "", "", {
-					color: theme.thinking,
-					dim: true,
-				}),
-			);
-		}
-		if (stream.length > 0) {
-			blocks.push({ index: -1, lines: stream });
-			built += stream.length;
-		}
+	return { blocks, end };
+}
+
+/**
+ * The streaming answer as a pane-sized tail, or the thinking placeholder when
+ * no answer text has arrived. Both are tail-bounded: what the pane can show is
+ * the end of the answer, and wrapping the rest is the per-frame cost this
+ * module exists to avoid.
+ */
+function buildStreamLines({ streamingText, thinkingText, theme, width, rows, offset }: StreamOptions): PaneLine[] {
+	if (offset !== 0) return [];
+	const paneRows = Math.max(1, Math.floor(rows));
+	const paneWidth = Math.max(8, Math.floor(width));
+	// Slice before stripping: only a screenful can be drawn, so walking the
+	// escapes in the rest of a long answer every frame buys nothing.
+	const source = tailSource(streamingText, paneWidth, paneRows);
+	const text = stripAnsi(source.text);
+	if (text) {
+		const lead = source.truncated ? "  " : `${ASSISTANT_DOT} `;
+		return wrapText(text, paneWidth, lead, "  ")
+			.slice(-paneRows)
+			.map((line) => styledLine(line, { color: theme.text }));
 	}
-	// Drop whole old entries while anything above would still be cut. Slicing
-	// lines blindly would leave a result row at the top with the call row it
-	// answers cut away; dropping the entry costs at most a few blank rows at the
-	// top, and only when the pane was already going to be full.
+	if (thinkingText) {
+		const tail = stripAnsi(thinkingText.slice(-400)).slice(-200);
+		return wrapStyledTail(`… ${tail}`, paneWidth, "", "", { color: theme.thinking, dim: true }, paneRows);
+	}
+	return [];
+}
+
+/**
+ * Fit the blocks under `rows`, then pad the top to exactly `rows` lines.
+ *
+ * Whole old entries are dropped while anything above would still be cut:
+ * slicing lines blindly would leave a result row at the top with the call row
+ * it answers cut away. Dropping the entry costs at most a few blank rows at
+ * the top, and only when the pane was already going to be full.
+ */
+function composeConversation(
+	entryBlocks: Block[],
+	stream: PaneLine[],
+	paneRows: number,
+	end: number,
+): ConversationView {
+	const blocks: Block[] = stream.length > 0 ? [...entryBlocks, { index: -1, lines: stream }] : entryBlocks;
 	let joinedLength = blocks.reduce((sum, block) => sum + block.lines.length, 0) + Math.max(0, blocks.length - 1);
-	while (blocks.length > 1 && joinedLength > paneRows) {
-		joinedLength -= blocks[0].lines.length + 1;
-		blocks.shift();
+	let drop = 0;
+	while (blocks.length - drop > 1 && joinedLength > paneRows) {
+		joinedLength -= blocks[drop].lines.length + 1;
+		drop++;
 	}
+	const kept = drop === 0 ? blocks : blocks.slice(drop);
 	const joined: PaneLine[] = [];
-	for (const block of blocks) {
+	for (const block of kept) {
 		if (joined.length > 0) joined.push(blankLine());
 		joined.push(...block.lines);
 	}
 	const lines = joined.slice(-paneRows);
 	while (lines.length < paneRows) lines.unshift(blankLine());
-	const firstEntry = blocks.find((block) => block.index >= 0)?.index ?? end;
+	const firstEntry = kept.find((block) => block.index >= 0)?.index ?? end;
 	return { lines, firstEntry, lastEntry: end };
+}
+
+export function buildConversation(options: ConversationOptions): ConversationView {
+	const { blocks, end } = buildEntryBlocks(options);
+	const stream = buildStreamLines(options);
+	return composeConversation(blocks, stream, Math.max(1, Math.floor(options.rows)), end);
 }
 
 export function SplitWorkspace({
@@ -580,16 +683,23 @@ export function SplitWorkspace({
 	const showTasks = stripRows > 0 && height - stripRows >= 8;
 	const watchHeight = showTasks ? height - stripRows : height;
 
-	const { lines, firstEntry, lastEntry } = buildConversation({
-		entries,
-		theme,
-		width: bodyWidth,
-		rows: bodyRows,
-		offset,
-		streamingText,
-		thinkingText,
-		liveOutputs,
-	});
+	// The committed half changes when a turn or a tool result lands (and, while a
+	// tool is running, when its output arrives); the streaming half on every
+	// delta. Memoizing them apart keeps a 33ms text flush from re-wrapping every
+	// settled entry the pane is scrolling past, and lets the streaming half wrap
+	// only the tail that can still be on screen.
+	const entryBlocks = useMemo(
+		() => buildEntryBlocks({ entries, theme, width: bodyWidth, rows: bodyRows, offset, liveOutputs }),
+		[entries, theme, bodyWidth, bodyRows, offset, liveOutputs],
+	);
+	const streamLines = useMemo(
+		() => buildStreamLines({ streamingText, thinkingText, theme, width: bodyWidth, rows: bodyRows, offset }),
+		[streamingText, thinkingText, theme, bodyWidth, bodyRows, offset],
+	);
+	const { lines, firstEntry, lastEntry } = useMemo(
+		() => composeConversation(entryBlocks.blocks, streamLines, Math.max(1, Math.floor(bodyRows)), entryBlocks.end),
+		[entryBlocks, streamLines, bodyRows],
+	);
 	const scrolled = offset > 0;
 	const range =
 		entries.length === 0 || firstEntry >= lastEntry ? "" : ` ${firstEntry + 1}-${lastEntry} of ${entries.length}`;
