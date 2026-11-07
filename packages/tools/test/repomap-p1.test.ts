@@ -226,6 +226,29 @@ describe("renderRepoMap", () => {
 		expect(rendered).toEqual({ text: "", tokens: 0, definitions: 0, files: 0 });
 	});
 
+	test("measures the first probe instead of halving towards the budget", () => {
+		const entries = Array.from({ length: 1_000 }, (_, index) => ({
+			kind: "file" as const,
+			path: `f${String(index).padStart(4, "0")}.ts`,
+			rank: 1,
+		}));
+		let probes = 0;
+		const rendered = renderRepoMap(entries, {
+			tokenBudget: 100,
+			countTokens: (text) => {
+				probes++;
+				return estimateTokens(text);
+			},
+		});
+
+		expect(rendered.tokens).toBeLessThanOrEqual(115);
+		expect(rendered.files).toBeGreaterThan(0);
+		// A binary search from Aider's four-entry probe needs about nine renders
+		// to reach the forty entries this budget holds; measuring one entry costs
+		// one more render after the first.
+		expect(probes).toBeLessThanOrEqual(3);
+	});
+
 	test("estimates four characters per token", () => {
 		expect(estimateTokens("12345678")).toBe(2);
 	});
@@ -285,6 +308,22 @@ describe("buildRepoMapTags", () => {
 		expect(hot.stats.cached).toBe(1);
 		expect(hot.files).toEqual(cold.files);
 		expect(hot.files[0]?.tags.every((tag) => tag.path === "a.ts")).toBe(true);
+	});
+
+	test("re-reads cached tags relative to the map that asks for them", async () => {
+		const root = tempDir();
+		write(root, "sub/b.ts", "export function beta() {}\n");
+		const cache = new InMemoryRepoMapCache<RepoMapFileTags>();
+
+		const whole = await buildRepoMapTags(root, ops, { cache });
+		expect(whole.files[0]?.path).toBe("sub/b.ts");
+
+		// The same file is cached under its absolute path; a map of `sub` must
+		// see `b.ts`, not the path relative to the parent map that filled the row.
+		const nested = await buildRepoMapTags(join(root, "sub"), ops, { cache });
+		expect(nested.stats.cached).toBe(1);
+		expect(nested.files[0]?.path).toBe("b.ts");
+		expect(nested.files[0]?.tags.every((tag) => tag.path === "b.ts")).toBe(true);
 	});
 });
 

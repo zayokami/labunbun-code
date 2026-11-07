@@ -112,10 +112,12 @@ function renderEntries(entries: readonly RankedRepoMapEntry[]): RenderedRepoMap 
  * Render the head of `entries` that best fits the budget.
  *
  * The probe starts at `budget / 25` entries (Aider's estimate of the tokens one
- * entry costs), then halves the interval. A probe is accepted when it fits and
- * is larger than the best so far, or when it lands within `tolerance` of the
- * budget; the latter stops the search early rather than insisting on an exact
- * fit. When `entries` is empty, the result is empty.
+ * entry costs). After the first render, the measured cost per entry names the
+ * count the budget actually fits, so the search jumps there instead of halving
+ * the interval — usually one more render finishes it. A probe is accepted when
+ * it fits and is larger than the best so far, or when it lands within
+ * `tolerance` of the budget; the latter stops the search early rather than
+ * insisting on an exact fit. When `entries` is empty, the result is empty.
  */
 export function renderRepoMap(
 	entries: readonly RankedRepoMapEntry[],
@@ -140,7 +142,14 @@ export function renderRepoMap(
 		}
 		if (tokens < budget) lower = middle + 1;
 		else upper = middle - 1;
-		middle = Math.floor((lower + upper) / 2);
+		const midpoint = Math.floor((lower + upper) / 2);
+		// The first probe is only Aider's guess at what one entry costs; once it
+		// is measured, the budget names the count directly. The estimate stays
+		// inside the interval, so uneven entry sizes still converge through the
+		// ordinary halvings.
+		const perEntry = middle > 0 && budget > 0 ? tokens / middle : 0;
+		const estimate = perEntry > 0 ? Math.round(budget / perEntry) : -1;
+		middle = estimate >= lower && estimate <= upper ? estimate : midpoint;
 	}
 	return best ?? { text: "", tokens: 0, definitions: 0, files: 0 };
 }

@@ -148,7 +148,10 @@ The snippets are stored in the cache, so rendering never re-reads the source.
 That trades cache size for a much smaller hot path and makes the map
 deterministic. Every tag in a file would repeat the same path, so the stored
 form keeps it once as the cache key; `get` puts it back on each tag before the
-rest of the pipeline sees it.
+rest of the pipeline sees it. The path is therefore relative to the map asking
+for the row, not to the map that filled it: a cache shared by `/map src` and
+`/map` can serve the same absolute file to both without carrying the other
+map's prefix.
 
 ## Ranking
 
@@ -193,9 +196,12 @@ blank line Aider emits.
 
 `renderRepoMap` renders the smallest-ranked prefix that fits the budget. It
 starts at `budget / 25` entries — Aider's estimate of an entry's cost — counts
-the rendered text, and halves the interval until the probe fits (and is larger
-than the best so far) or lands within 15% of the budget. The 15% tolerance is
-Aider's: it stops the search from spending probes on a marginal improvement.
+the rendered text, and then jumps to the count the measured cost per entry says
+the budget holds, instead of halving the interval one step at a time; the jump
+stays inside the interval, so uneven entry sizes still converge through the
+ordinary halvings. The search stops when the probe fits (and is larger than the
+best so far) or lands within 15% of the budget. The 15% tolerance is Aider's: it
+stops the search from spending probes on a marginal improvement.
 
 The token counter is injectable. By default it estimates four characters per
 token, which is coarse but enough for a budget; P2 can pass a model tokenizer
