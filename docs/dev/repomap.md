@@ -146,7 +146,9 @@ Aider does.
 
 The snippets are stored in the cache, so rendering never re-reads the source.
 That trades cache size for a much smaller hot path and makes the map
-deterministic.
+deterministic. Every tag in a file would repeat the same path, so the stored
+form keeps it once as the cache key; `get` puts it back on each tag before the
+rest of the pipeline sees it.
 
 ## Ranking
 
@@ -222,8 +224,10 @@ bare path. Blocks are separated by one blank line.
 `SqliteRepoMapCache` stores the scan payload as JSON, keyed by the absolute
 path and validated by `mtimeMs` and `size` — the same rule as the in-memory
 cache, whose size component catches Windows edits that land in the same clock
-tick. The table is named `repo_map_cache_v1`; a payload shape change belongs in
-a new table so an old binary cannot read new rows. `:memory:` gives the same
+tick. The table is named `repo_map_cache_v2`; a payload shape change belongs in
+a new table so an old binary cannot read new rows. Version 2 stores tags without
+their repeated `path`, which is roughly a quarter of a call-heavy file's row.
+`:memory:` gives the same
 code a process-local store. WAL mode is on for file-backed caches, with
 `synchronous = NORMAL` (WAL's recommended level: a crash can lose the newest
 commits but not corrupt the file, and the cache can be rebuilt anyway) and a
@@ -237,8 +241,9 @@ scan that dies before flushing simply loses those rows; the next scan reads the
 files again.
 
 Both caches implement `RepoMapCache<T>`; the payload is definitions in P0 and
-`RepoMapFileTags` in P1. Closing the SQLite cache is the caller's job; nothing
-holds a database handle open after a scan.
+`RepoMapFileTags` in P1, stored in the compact form described above. Closing the
+SQLite cache is the caller's job; nothing holds a database handle open after a
+scan.
 
 ## Tool, prompt and commands (P2)
 

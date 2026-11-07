@@ -7,7 +7,9 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { RepoMapCache } from "./repomap.ts";
 
-const TABLE = "repo_map_cache_v1";
+// v2 stores tags without their repeated file path; the shape change is why the
+// table was renamed, so an older binary cannot read rows it would misread.
+const TABLE = "repo_map_cache_v2";
 
 interface CacheRow {
 	mtime_ms: number;

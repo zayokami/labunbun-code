@@ -6,6 +6,7 @@
 // vocabulary lives in `repomap-languages.ts`.
 //
 // Long-form design notes: docs/dev/repomap.md (P1).
+import { relative } from "node:path";
 import { Parser, type Node as SyntaxNode, type Tree } from "web-tree-sitter";
 import {
 	InMemoryRepoMapCache,
@@ -180,6 +181,46 @@ export async function tagsInSource(
 	}
 }
 
+/** A tag as stored: the file path is the row's key, so repeating it is dead weight. */
+type CompactRepoMapTag = Omit<RepoMapTag, "path">;
+
+interface CompactRepoMapFileTags {
+	tags: CompactRepoMapTag[];
+	lineCount: number;
+}
+
+/**
+ * Store a file's path once, as the cache key, instead of once per tag. A tag
+ * row is dominated by its path and a call-heavy file has hundreds of them, so
+ * dropping the repeated field takes roughly a quarter off the persisted cache.
+ * `get` restores the path from the key, which keeps the payload the same shape
+ * the rest of the pipeline sees.
+ */
+function compactTagsCache(cache: RepoMapCache<RepoMapFileTags>, root: string): RepoMapCache<RepoMapFileTags> {
+	const inner = cache as RepoMapCache<unknown>;
+	const relativePath = (full: string) => relative(root, full).split("\\").join("/");
+	const compact: RepoMapCache<RepoMapFileTags> = {
+		get(full, mtimeMs, size) {
+			const stored = inner.get(full, mtimeMs, size) as RepoMapFileTags | CompactRepoMapFileTags | undefined;
+			// A definitions payload (or a corrupted row) is not this cache's shape;
+			// treating it as a miss lets the scan overwrite it.
+			if (!stored || !Array.isArray(stored.tags)) return undefined;
+			const path = relativePath(full);
+			// A row written before the payload was compacted carries its own path.
+			// The key-derived path wins so both shapes read back the same.
+			return { path, lineCount: stored.lineCount, tags: stored.tags.map((tag) => ({ ...tag, path })) };
+		},
+		set(full, mtimeMs, size, data) {
+			inner.set(full, mtimeMs, size, {
+				lineCount: data.lineCount,
+				tags: data.tags.map(({ path: _path, ...tag }) => tag),
+			});
+		},
+	};
+	if (cache.flush) compact.flush = () => cache.flush?.();
+	return compact;
+}
+
 /** Walk `root` and extract tags, using `cache` to skip unchanged files. */
 export async function buildRepoMapTags(
 	root: string,
@@ -188,7 +229,7 @@ export async function buildRepoMapTags(
 ): Promise<RepoMapTagsResult> {
 	const cache: RepoMapCache<RepoMapFileTags> = options.cache ?? new InMemoryRepoMapCache<RepoMapFileTags>();
 	const maxSnippetLines = options.maxSnippetLines ?? DEFAULT_MAX_SNIPPET_LINES;
-	const scan = await scanRepoFiles(root, ops, options, cache, (tree, source, language, path) =>
+	const scan = await scanRepoFiles(root, ops, options, compactTagsCache(cache, root), (tree, source, language, path) =>
 		extractTags(tree, source, path, { maxSnippetLines, language }),
 	);
 	let definitions = 0;

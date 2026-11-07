@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { NodeFileSystemOperations } from "../src/operations.ts";
+import { InMemoryRepoMapCache, type RepoMapCache } from "../src/repomap.ts";
 import { generateRepoMap } from "../src/repomap-generate.ts";
 import { cappedReferences, rankRepoMap } from "../src/repomap-rank.ts";
 import { estimateTokens, renderRepoMap, repoMapTokenBudget } from "../src/repomap-render.ts";
@@ -250,7 +251,6 @@ describe("buildRepoMapTags", () => {
 	test("honours the shared in-memory cache", async () => {
 		const root = tempDir();
 		write(root, "a.ts", "export function alpha() {}\n");
-		const { InMemoryRepoMapCache } = await import("../src/repomap.ts");
 		const cache = new InMemoryRepoMapCache<RepoMapFileTags>();
 		const cold = await buildRepoMapTags(root, ops, { cache });
 		const hot = await buildRepoMapTags(root, ops, { cache });
@@ -259,6 +259,32 @@ describe("buildRepoMapTags", () => {
 		expect(hot.stats.parsed).toBe(0);
 		expect(hot.stats.cached).toBe(1);
 		expect(hot.files).toEqual(cold.files);
+	});
+
+	test("stores the file path once, as the cache key", async () => {
+		const root = tempDir();
+		write(root, "a.ts", "export function alpha() {\n\tbeta();\n}\n");
+		const stored: unknown[] = [];
+		const inner = new InMemoryRepoMapCache<RepoMapFileTags>();
+		const cache: RepoMapCache<RepoMapFileTags> = {
+			get: (path, mtimeMs, size) => inner.get(path, mtimeMs, size),
+			set: (path, mtimeMs, size, data) => {
+				stored.push(JSON.parse(JSON.stringify(data)));
+				inner.set(path, mtimeMs, size, data);
+			},
+		};
+
+		const cold = await buildRepoMapTags(root, ops, { cache });
+		expect(stored).toHaveLength(1);
+		const payload = stored[0] as { path?: string; tags: Array<Record<string, unknown>> };
+		expect(payload.path).toBeUndefined();
+		expect(payload.tags.length).toBeGreaterThan(0);
+		expect(payload.tags.every((tag) => !("path" in tag))).toBe(true);
+
+		const hot = await buildRepoMapTags(root, ops, { cache });
+		expect(hot.stats.cached).toBe(1);
+		expect(hot.files).toEqual(cold.files);
+		expect(hot.files[0]?.tags.every((tag) => tag.path === "a.ts")).toBe(true);
 	});
 });
 
