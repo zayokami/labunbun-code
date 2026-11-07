@@ -698,13 +698,16 @@ The comments also state the measured costs and the run or date that measured the
 | --- | --- |
 | `packages/tools/src/index.ts` | Tool set assembly, the frozen order, and the shared read state. |
 | `packages/tools/src/operations.ts` | The Operations seam: the interfaces, the capture windows, and the child-process executor. |
+| `packages/tools/src/output-capture.ts` | The bounded tail window and spill sink for a stream that has not finished. |
 | `packages/tools/src/bash.ts` | The Bash tool: its inputs, its timeout, its overflow, and adoption. |
+| `packages/tools/src/shell-kind.ts` | The shell name to grammar mapping shared by the Bash instructions and the container probe. |
 | `packages/tools/src/background.ts` | The background shell manager and the output tools. |
 | `packages/tools/src/edit.ts` | The Edit tool: the read gate, the match, and the splice. |
 | `packages/tools/src/read.ts` | The Read tool: its limits, its read-only roots, and failure text. |
 | `packages/tools/src/write.ts` | The Write tool, its path checks, and its read gate. |
 | `packages/tools/src/read-file-state.ts` | The per-session store of read files and their times. |
 | `packages/tools/src/containment.ts` | Path normalisation, the containment checks, and the protected segments. |
+| `packages/tools/src/path-errors.ts` | The errno-derived vocabulary every tool uses for a path it could not reach. |
 | `packages/tools/src/tasks.ts` | The task store and the four task tools. |
 | `packages/tools/src/grep.ts` | The content search and its caps. |
 | `packages/tools/src/glob.ts` | The file walker and the Glob tool. |
@@ -718,7 +721,24 @@ The comments also state the measured costs and the run or date that measured the
 | `packages/tools/src/artifact.ts` | The InspectArtifact report of a zip-family archive or ASAR. |
 | `packages/tools/src/compare-artifacts.ts` | CompareArtifacts: logical paths, SHA-256 content, budgets, and status. |
 | `packages/tools/src/web-capture.ts` | InspectWebCapture: HAR 1.2 and Fiddler SAZ, with values withheld. |
+| `packages/tools/src/sourcemap.ts` | InspectSourceMap: decoded base64 VLQ mappings rather than the raw JSON. |
+| `packages/tools/src/inspect-sqlite.ts` | InspectSqlite: a copy-first read of a database's schema and rows. |
+| `packages/tools/src/digest.ts` | Digest: SHA-256 content identity, one line per path. |
+| `packages/tools/src/repomap.ts` | The walk and per-file scan loop: cache validation, grammar loading, and the P0 map. |
+| `packages/tools/src/repomap-languages.ts` | The declaration and reference vocabulary for each grammar. |
+| `packages/tools/src/repomap-wasm.ts` | The embedded tree-sitter runtime and grammar assets. |
+| `packages/tools/src/repomap-tags.ts` | Definitions, references and snippets, and the compact cache payload. |
+| `packages/tools/src/repomap-worker-pool.ts` | The parse worker pool, its lazy start, and the in-thread fallback. |
+| `packages/tools/src/repomap-worker.ts` | The worker entry: one Parser, one grammar per language. |
+| `packages/tools/src/repomap-rank.ts` | Aider-style PageRank over the file graph. |
+| `packages/tools/src/repomap-render.ts` | The token-budgeted render and the probe that fits it. |
+| `packages/tools/src/repomap-sqlite.ts` | The persistent cache table, buffered writes, and handle lifetime. |
+| `packages/tools/src/repomap-generate.ts` | The scan, rank and render pipeline in one call. |
 | `packages/tools/src/repomap-service.ts` | The session's repository map: shared cache, path containment, the prompt threshold. |
 | `packages/tools/src/repomap-tool.ts` | RepoMap: the ranked, token-budgeted outline of a checkout. |
 | `packages/tools/src/binary.ts` | InspectBinary: PE, ELF, Mach-O, WASM, and the embedded metadata blocks. |
+| `packages/tools/src/electron-fuses.ts` | The Electron fuse wire behind the binary inspection. |
 | `packages/tools/src/dotnet.ts` | .NET metadata and the managed method-body operand walk. |
+
+The `sandbox/` back ends and probes are described in [Sandbox](sandbox.md); this
+map lists the package's top-level modules.

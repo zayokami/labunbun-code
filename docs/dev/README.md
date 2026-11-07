@@ -22,6 +22,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [Out-of-box experience](oobe-design.md): what a brand-new user meets on a machine with no settings file and no credential — the call path from an empty home, what OpenAI's Codex CLI does in the same position, and the first-launch flow this app builds.
 - [Output limits](output-limits.md): the bounds on tool output per result and per round, and the capture of a stream that has not finished.
 - [Plan mode](plan-mode.md): the permission mode and the interactive cycle — entry and approval, the review dialog, the plan and task snapshots, the board reminders, and the seats each host runs.
+- [Repository map](repomap.md): the read-only outline of a checkout — the tree-sitter grammars and tags, PageRank ranking, the token budget, the shared cache, the parser workers, and the tool, prompt section and commands built on it.
 - [Sandbox](sandbox.md): the sandbox policy as a value, its three platform back ends, and the network proxy.
 - [Session store](session-store.md): the JSONL session tree, its append-only form, branches, and compaction.
 - [Split panes](split-pane-design.md): whether two things can be shown at once — the design gate for a watch panel, view screens, and a full-screen workspace over the Static scrollback model.
