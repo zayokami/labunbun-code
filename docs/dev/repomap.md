@@ -64,6 +64,14 @@ the extension picks one:
 | `.sh`, `.bash` | bash |
 | `.ps1`, `.psm1`, `.psd1` | powershell |
 
+The WASM assets are bundled, not read from `node_modules` at run time:
+`repomap-wasm.ts` imports `web-tree-sitter.wasm` and each grammar with
+`with { type: "file" }`, points `Parser.init` at the core through `locateFile`,
+and hands `Language.load` the grammar bytes. That is what makes a compiled
+executable work — resolving those files lazily with `createRequire` found a
+`$bunfs` path that no longer existed when the binary ran elsewhere. A scan still
+loads only the grammars its files use.
+
 The rules are the same shape for every language: which node types declare a
 name and what kind they are, and where a call node names its callee.
 

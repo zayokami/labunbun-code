@@ -7,9 +7,8 @@
 // that a cold scan of a hundred thousand lines is cheap enough to build on.
 //
 // Long-form design notes: docs/dev/repomap.md (P0).
-import { createRequire } from "node:module";
 import { relative } from "node:path";
-import { Language, Parser, type Node as SyntaxNode, type Tree } from "web-tree-sitter";
+import { type Language, Parser, type Node as SyntaxNode, type Tree } from "web-tree-sitter";
 import { walkProjectFiles } from "./glob.ts";
 import {
 	REPO_MAP_CODE_FILES,
@@ -19,6 +18,7 @@ import {
 	type RepoMapTagDefinitionKind,
 	repoMapLanguageFor,
 } from "./repomap-languages.ts";
+import { initRepoMapParser, loadRepoMapGrammar } from "./repomap-wasm.ts";
 
 export { REPO_MAP_CODE_FILES, type RepoMapLanguage, repoMapLanguageFor };
 
@@ -132,41 +132,9 @@ export type RepoMapLanguages = Record<RepoMapLanguage, Language>;
 const DEFAULT_MAX_FILE_BYTES = 1024 * 1024;
 const READ_CONCURRENCY = 8;
 
-// Tree-sitter's WASM runtime may only be initialised once per process, and the
-// grammars are large enough that loading them per scan would be visible. Both
-// live for the process; a failed load is not cached, so a caller can retry.
-const languagesPromise = new Map<RepoMapLanguage, Promise<Language>>();
-let parserInit: Promise<void> | null = null;
-
-function initParser(): Promise<void> {
-	parserInit ??= Parser.init().catch((error: unknown) => {
-		parserInit = null;
-		throw error;
-	});
-	return parserInit;
-}
-
-/**
- * Load one grammar, once per process.
- *
- * A scan loads only the grammars its files actually use: a TypeScript checkout
- * should not pay for Python's WASM, and the six together are several megabytes.
- */
-export function loadRepoMapLanguage(name: RepoMapLanguage): Promise<Language> {
-	let pending = languagesPromise.get(name);
-	if (!pending) {
-		pending = (async () => {
-			await initParser();
-			const require = createRequire(import.meta.url);
-			return Language.load(require.resolve(`@vscode/tree-sitter-wasm/wasm/tree-sitter-${name}.wasm`));
-		})().catch((error: unknown) => {
-			languagesPromise.delete(name);
-			throw error;
-		});
-		languagesPromise.set(name, pending);
-	}
-	return pending;
-}
+// The runtime and the grammar assets are embedded; `repomap-wasm.ts` owns
+// loading them once per process. This name is the map's public entry point.
+export const loadRepoMapLanguage = loadRepoMapGrammar;
 
 /** Load every grammar. For tests and one-off parses; a scan loads only what it needs. */
 export async function loadRepoMapLanguages(): Promise<RepoMapLanguages> {
@@ -382,7 +350,7 @@ export async function scanRepoFiles<T>(
 	);
 	// `new Parser()` throws before the runtime is initialised, and a scan with no
 	// files still constructs one.
-	await initParser();
+	await initRepoMapParser();
 	const queue = [...paths].sort();
 	const maxBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
 	const parser = new Parser();
