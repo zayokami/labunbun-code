@@ -92,6 +92,16 @@ export interface SystemPromptContext {
 	 * one so a switch reaches the next request.
 	 */
 	model?: Model;
+	/**
+	 * The repository map's body (`RepoMapService.promptSection`), for a repository
+	 * small enough that the whole outline fits the prompt.
+	 *
+	 * Below the boundary with memory, for the same reason: it is this project's
+	 * shape, not the harness contract, so it differs per session and belongs on
+	 * the dynamic side. Absent for a large repository — there the map would be a
+	 * truncated one presented as complete — and the RepoMap tool answers instead.
+	 */
+	repoMap?: string;
 }
 
 /**
@@ -172,6 +182,12 @@ function skillsSection(skills: string | undefined): string | undefined {
 	return skills?.trim() ? skills : undefined;
 }
 
+/** The repository map when it has content; a heading over nothing is not sent. */
+function repoMapSection(repoMap: string | undefined): string | undefined {
+	const text = repoMap?.trim();
+	return text ? `# Repository map\n${text}` : undefined;
+}
+
 export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): string {
 	const sections: string[] = [];
 	const profile = ctx.model ? resolveModelProfile(ctx.model) : undefined;
@@ -195,6 +211,15 @@ export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): s
 	if (ctx.model && profile) {
 		const guidance = modelGuidanceSection(ctx.model, profile);
 		if (guidance) sections.push(guidance);
+	}
+
+	// The repository's own shape, for a checkout small enough to fit it. Placed
+	// before memory because it is reference material the memory instructions can
+	// talk about, and after the model guidance for the same reason that section
+	// follows the tools: it is about what the model is holding.
+	const repoMap = repoMapSection(ctx.repoMap);
+	if (repoMap) {
+		sections.push(repoMap);
 	}
 
 	// Last, and after the boundary: this is the most specific instruction in the

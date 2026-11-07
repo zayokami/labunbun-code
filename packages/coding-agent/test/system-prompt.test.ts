@@ -299,6 +299,30 @@ describe("the subagent context block", () => {
 	});
 });
 
+describe("the repository map section", () => {
+	test("unset, no section is sent at all", () => {
+		expect(buildSystemPrompt([], BASE)).not.toContain("# Repository map");
+		// Whitespace is what an empty repository resolves to; a heading over
+		// nothing is a section the model is told to read and finds empty.
+		expect(buildSystemPrompt([], { ...BASE, repoMap: "  \n" })).toBe(buildSystemPrompt([], BASE));
+	});
+
+	test("set, it is its own section below the boundary and before memory", () => {
+		const prompt = buildSystemPrompt([], {
+			...BASE,
+			repoMap: "src/a.ts:\n│export function alpha() {}",
+			memory: "MEMORY-MARKER",
+		});
+		const marker = prompt.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+
+		expect(prompt).toContain("# Repository map\nsrc/a.ts:\n│export function alpha() {}");
+		// Below the boundary: the map is this project's shape, not the harness
+		// contract, so it belongs on the dynamic side with memory.
+		expect(prompt.indexOf("# Repository map")).toBeGreaterThan(marker);
+		expect(prompt.indexOf("# Repository map")).toBeLessThan(prompt.indexOf("# Project memory"));
+	});
+});
+
 describe("the output-style setting", () => {
 	test("unset, no style section is sent at all", () => {
 		expect(buildSystemPrompt([], BASE)).not.toContain("# Output style");

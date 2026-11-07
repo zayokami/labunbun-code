@@ -25,6 +25,31 @@ export interface PromptCommand extends CommandBase {
 	getPrompt(args: string): string;
 }
 
+/** What `/map` renders: the map text plus how complete it is. */
+export interface RepoMapCommandResult {
+	text: string;
+	tokens: number;
+	definitions: number;
+	files: number;
+	totalDefinitions: number;
+	totalFiles: number;
+	partial: boolean;
+	elapsedMs: number;
+	root: string;
+}
+
+/**
+ * The session's repository map, as `/map` sees it.
+ *
+ * Structural on purpose: `RepoMapService` satisfies it without this module
+ * importing the tools package, which keeps the command framework away from the
+ * scanner. Optional on the context because a hand-built context (a test, an
+ * embedder) has none, and the commands answer that rather than throwing.
+ */
+export interface RepoMapCommand {
+	map(options: { path?: string; maxTokens?: number; refresh?: boolean }): Promise<RepoMapCommandResult>;
+}
+
 export interface LocalCommandContext {
 	session: AgentSession;
 	compaction?: CompactionManager;
@@ -81,6 +106,12 @@ export interface LocalCommandContext {
 	 * embedder), where there is no one to press anything.
 	 */
 	signal?: AbortSignal;
+	/**
+	 * The session's repository map. `/map` renders it; `/map-refresh` drops the
+	 * cache first, so a file edited outside the session is seen. Shares the
+	 * RepoMap tool's service and therefore its cache.
+	 */
+	repoMap?: RepoMapCommand;
 }
 
 export interface LocalCommand extends CommandBase {
@@ -313,5 +344,68 @@ export function builtInCommands(): Command[] {
 				);
 			},
 		},
+		{
+			name: "map",
+			description: "Show the ranked repository map: /map [path] [--tokens N]",
+			type: "local",
+			call: (ctx, args) => showRepoMap(ctx, args, false),
+		},
+		{
+			name: "map-refresh",
+			description: "Rebuild the repository map from disk: /map-refresh [path] [--tokens N]",
+			type: "local",
+			call: (ctx, args) => showRepoMap(ctx, args, true),
+		},
 	];
+}
+
+/**
+ * `/map`'s arguments: an optional directory, and the token budget.
+ *
+ * The directory comes first positionally because that is what a user types;
+ * the budget needs its flag because a bare number would be ambiguous with a
+ * path component. A malformed budget is ignored rather than refused — the map
+ * still answers at the default, and the caller sees the token count it got.
+ */
+function parseRepoMapArgs(args: string): { path?: string; maxTokens?: number } {
+	const tokens = args.split(/\s+/).filter(Boolean);
+	let path: string | undefined;
+	let maxTokens: number | undefined;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index];
+		if (token === "--tokens" || token === "-t") {
+			const value = Number(tokens[++index]);
+			if (Number.isFinite(value)) maxTokens = value;
+			continue;
+		}
+		if (token.startsWith("--tokens=")) {
+			const value = Number(token.slice("--tokens=".length));
+			if (Number.isFinite(value)) maxTokens = value;
+			continue;
+		}
+		if (path === undefined) path = token;
+	}
+	return { path, maxTokens };
+}
+
+function formatRepoMapReport(result: RepoMapCommandResult): string {
+	const scope = result.partial
+		? `${result.definitions.toLocaleString()} of ${result.totalDefinitions.toLocaleString()} definitions in ` +
+			`${result.files.toLocaleString()} of ${result.totalFiles.toLocaleString()} files`
+		: `${result.definitions.toLocaleString()} definitions in ${result.files.toLocaleString()} ` +
+			`file${result.files === 1 ? "" : "s"}`;
+	const hint = result.partial ? " Raise it with /map --tokens <n>." : "";
+	const body = result.text || `(no definitions found under ${result.root})`;
+	return `${body}\n\nRepo map: ${scope}, ~${result.tokens.toLocaleString()} tokens, ${(result.elapsedMs / 1000).toFixed(1)}s.${hint}`;
+}
+
+async function showRepoMap(ctx: LocalCommandContext, args: string, refresh: boolean): Promise<string> {
+	if (!ctx.repoMap) return "Repository maps are not available in this session.";
+	const { path, maxTokens } = parseRepoMapArgs(args);
+	try {
+		const result = await ctx.repoMap.map({ path, maxTokens, refresh });
+		return formatRepoMapReport(result);
+	} catch (error) {
+		return `Repo map failed: ${error instanceof Error ? error.message : String(error)}`;
+	}
 }

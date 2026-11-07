@@ -18,6 +18,9 @@ Long-form notes for the pipeline live here; the code is four modules:
 | `packages/tools/src/repomap-render.ts` | token budget and rendered text |
 | `packages/tools/src/repomap-sqlite.ts` | `bun:sqlite` cache |
 | `packages/tools/src/repomap-generate.ts` | the three stages in one call |
+| `packages/tools/src/repomap-service.ts` | the session's cache, path containment, the prompt threshold |
+| `packages/tools/src/repomap-tool.ts` | the read-only `RepoMap` tool |
+| `packages/coding-agent/src/repomap-wiring.ts` | per-project cache path and host wiring |
 
 ## Tags
 
@@ -128,6 +131,54 @@ Both caches implement `RepoMapCache<T>`; the payload is definitions in P0 and
 `RepoMapFileTags` in P1. Closing the SQLite cache is the caller's job; nothing
 holds a database handle open after a scan.
 
+## Tool, prompt and commands (P2)
+
+P2 turns the pipeline into three things a session can reach.
+
+**The service.** `RepoMapService` owns one cache per session. Its `map()` call
+resolves the requested directory, refuses one outside the workspace, and keeps
+the scan, rank and render behind a `RepoMapSummary` that says how much of the
+repository the budget left out (`partial`). The budget defaults to 1,024 tokens
+and is clamped to 128–16,384; `refresh: true` clears the cache first. The cache
+is created on first use, so a session that never asks for a map opens no file.
+A SQLite path that cannot be opened (read-only home, a locked file) falls back
+to memory rather than failing the map. The handle is open only while a scan is
+running: the last map to finish closes it, and the next map reopens the same
+file, so the rows persist without a session holding the database open between
+requests (on Windows an open WAL sidecar also keeps the directory from being
+removed). A caller-supplied cache is never closed by the service.
+
+Every host builds the service once and passes it to `createAllTools`, so the
+RepoMap tool, `/map` and the startup prompt section share one cache. The path is
+`<sessionsRoot>/<sanitizeCwd(cwd)>/repomap.sqlite` — beside the transcripts, so
+every session in the same checkout starts hot.
+
+**The tool.** `RepoMap` takes an optional `path`, `maxTokens` and `refresh`. It
+returns the rendered map followed by one line saying how many definitions and
+files the budget allowed and how long the scan took; a partial map says so and
+suggests raising `maxTokens`. It is declared read-only and concurrency-safe, and
+its result cap is 80,000 characters — a maximum-budget map is roughly 64,000.
+An input that cannot be mapped (outside the workspace, not a directory) comes
+back as the result text, not a thrown error.
+
+**The prompt section.** At startup each host asks the service for
+`promptSection()`. It is offered only when the walk fits 200 files and 512 KiB,
+the scan finds at least one definition, and every definition fits the 1,024-token
+budget. A larger repository gets no section — a truncated map presented as *the*
+map would say the files it left out have nothing in them — and the tool answers
+instead, where the model can raise the budget. The section is injected below
+`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, after the model guidance and before project
+memory.
+
+**The commands.** `/map [path] [--tokens N]` renders the map and a one-line
+summary; `/map-refresh` does the same after clearing the cache, for a file edited
+outside the session. The directory is positional and the budget needs its flag,
+because a bare number is indistinguishable from a path component. The command
+framework holds a structural `RepoMapCommand` handle rather than importing the
+scanner, and a context without one answers that maps are unavailable. Local
+commands exist only in the REPL; `-p` runs and ACP sessions still get the tool
+and the prompt section.
+
 ## Measurements
 
 Measured on Windows 11, Bun 1.4.4, 2026-11-07.
@@ -154,11 +205,12 @@ benchmark a real checkout (`bun run repomap:bench .`).
 
 ## What is left
 
-- P2: a read-only `RepoMap` tool, `/map` and `/map-refresh`, and a small
-  system-prompt section for repositories below the "it is already in context"
-  threshold. The module is not re-exported from `packages/tools/src/index.ts`
-  yet; importing the files directly is the P1 contract.
 - P3: Python and other grammars, sharing a map between subagents, and the
   million-line case. The current scan is linear in files and parses only what
   the cache misses; the remaining large-tree cost is the walk and the stats,
   which is where a worker pool or a persistent file index would help.
+- The prompt section is computed once per process. A session whose files change
+  while it runs keeps the startup map until restarted; `/map-refresh` shows the
+  new one but does not replace the section. Making the section follow a refresh
+  would mean rebuilding the system prompt, which the `#` memory shortcut already
+  knows how to do — a natural next step, not a P2 claim.

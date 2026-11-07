@@ -83,6 +83,7 @@ import {
 } from "./model-roles.ts";
 import { loadOutputStylesWithNotes, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
 import { enclosingRepositoryRoot, withheldDefinitionNotice } from "./project-trust.ts";
+import { createRepoMapService, repoMapPromptSection } from "./repomap-wiring.ts";
 import {
 	damagedSessionNotice,
 	findSession,
@@ -406,6 +407,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// the read evidence has to go with it — an instance private to the factory
 	// would be unreachable from the `done` phase below.
 	const readState = new ReadFileState();
+	// One map service for the run: the RepoMap tool and the startup prompt
+	// section read the same cache.
+	const repoMap = createRepoMapService(cwd, ops, home);
 	// Spilling applies here too: a `-p` run reads a repository like any other
 	// session, and a build log that does not fit is no more reproducible for
 	// being unattended.
@@ -414,6 +418,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		readState,
 		operations: ops,
 		backgroundShells,
+		repoMap,
 		readOnlyRoots: [toolOutputRoot(cwd)],
 		// Under the root Read is already allowed into, so every pointer a tool
 		// result carries is a path Read can open.
@@ -897,6 +902,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 
 	const outputStyles = loadOutputStylesWithNotes(cwd, home);
 	for (const note of outputStyles.notes) console.error(`Output style: ${note}`);
+	// The repository's shape, when it fits the prompt. Smaller checkouts get the
+	// whole outline; a large one gets no section and the RepoMap tool instead.
+	const repoMapText = await repoMapPromptSection(repoMap);
 	// Annotated because `checkBudget` below reads this very session's messages:
 	// without the annotation the type would be inferred from its own initializer.
 	const session: AgentSession = new AgentSession({
@@ -910,6 +918,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			outputStyle: resolveOutputStyle(settings.outputStyle, outputStyles.styles)?.content,
 			skills: skillsBlock,
 			model,
+			repoMap: repoMapText,
 		}),
 		tools: allTools,
 		store,

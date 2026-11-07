@@ -115,7 +115,8 @@ export interface RepoMapLanguages {
 
 const DEFAULT_MAX_FILE_BYTES = 1024 * 1024;
 const READ_CONCURRENCY = 8;
-const CODE_FILES = new Bun.Glob("**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}");
+/** The files a map considers. Shared with the small-repository threshold, which must count the same set. */
+export const REPO_MAP_CODE_FILES = new Bun.Glob("**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}");
 
 // Tree-sitter's WASM runtime may only be initialised once per process, and the
 // grammars are large enough that loading them per scan would be visible. Both
@@ -319,7 +320,7 @@ export async function scanRepoFiles<T>(
 	const started = performance.now();
 	const languages = await loadRepoMapLanguages();
 	const paths = await walkProjectFiles(root, ops, {
-		pattern: options.pattern ?? CODE_FILES,
+		pattern: options.pattern ?? REPO_MAP_CODE_FILES,
 		respectGitignore: options.respectGitignore ?? true,
 		onUnreadableDirectory: options.onUnreadableDirectory,
 	});

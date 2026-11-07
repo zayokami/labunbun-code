@@ -182,6 +182,7 @@ import {
 	expandPromptCommand,
 	findCommand,
 	type LocalCommandContext,
+	type RepoMapCommand,
 } from "./commands.ts";
 import {
 	type CompactionTuning,
@@ -271,6 +272,7 @@ import {
 	enclosingRepositoryRoot,
 	withheldDefinitionNotice,
 } from "./project-trust.ts";
+import { createRepoMapService, repoMapPromptSection } from "./repomap-wiring.ts";
 import { createPreviewRequester } from "./session-preview.ts";
 import {
 	damagedSessionNotice,
@@ -712,6 +714,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Every shell this session starts goes onto the session file too, so a
 	// later run can find the ones that outlive this process — and stop them.
 	const detachShellLedger = attachShellLedger(backgroundShells, () => store);
+	// One map service for the session: the RepoMap tool, `/map` and the startup
+	// prompt section all read this cache, so the repository is scanned once.
+	const repoMap = createRepoMapService(cwd, ops, home);
 	// Results too large for the context go here instead of being thrown away, and
 	// Read is allowed back into this directory to fetch them.
 	const tools = createAllTools(cwd, {
@@ -719,6 +724,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		readState,
 		operations: ops,
 		backgroundShells,
+		repoMap,
 		readOnlyRoots: [toolOutputRoot(cwd, home)],
 		// Under the root Read is already allowed into, so every pointer a tool
 		// result carries is a path Read can open.
@@ -1487,6 +1493,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// The skill discovery block is built once at startup and shared by the main
 	// prompt and by every subagent's context block, so the two see one list.
 	const skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
+	// The repository's shape, when it fits the prompt. Computed once: the files
+	// do not change under a running prompt, and `/map-refresh` is the way to ask
+	// for a new one. A large checkout gets no section — the RepoMap tool answers
+	// there instead, with a budget the model can raise.
+	const repoMapText = await repoMapPromptSection(repoMap);
 	/**
 	 * The system prompt for a given memory text. Built once at startup, then
 	 * rebuilt by the `#` shortcut after it re-reads the memory files: the note
@@ -1511,6 +1522,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			outputStyle: resolveOutputStyle(settings.outputStyle, styles.styles)?.content,
 			skills: skillsBlock,
 			model: activeModel,
+			repoMap: repoMapText,
 		});
 	};
 	const systemPrompt = buildPrompt(memoryText);
@@ -2369,6 +2381,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				refreshBackgroundShells: publishShells,
 				settings,
 				cwd,
+				repoMap,
 				sandboxBackend: ops.sandboxBackend,
 				appContainerReason: ops.appContainerReason,
 				spawnConfine,
@@ -3097,6 +3110,13 @@ interface AppCommandContext {
 	loadedSettings: LoadedSettings;
 	cwd: string;
 	/**
+	 * The session's repository map, shared with the RepoMap tool. `/map` renders
+	 * it and `/map-refresh` drops its cache. Optional because a context built by
+	 * hand has no scanner behind it, and the commands answer that there is
+	 * nothing to map rather than throwing.
+	 */
+	repoMap?: RepoMapCommand;
+	/**
 	 * What confines commands run through this session's exec backend, if it can
 	 * say. `/permissions` is the screen a user opens to find out what is actually
 	 * holding the session in, and the sandbox axis is half of the answer — so it
@@ -3379,6 +3399,7 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			preCompact: async (trigger, customInstructions) =>
 				(await ctx.preCompact?.(trigger, customInstructions)) ?? { blocked: false },
 			cwd: ctx.cwd,
+			repoMap: ctx.repoMap,
 			pushInfo: (info) => pushInfo(ctx.handle, info),
 			home: ctx.home,
 			dialog: ctx.handle ?? undefined,

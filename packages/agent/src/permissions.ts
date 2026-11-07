@@ -913,6 +913,7 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 	"InspectSourceMap",
 	"CompareArtifacts",
 	"InspectWebCapture",
+	"RepoMap",
 	"TaskList",
 	"TaskGet",
 	"Skill",

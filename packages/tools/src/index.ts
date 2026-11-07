@@ -57,6 +57,20 @@ export {
 	type ReadFileStateEntry,
 	type RecordReadInput,
 } from "./read-file-state.ts";
+export {
+	REPO_MAP_DEFAULT_TOKENS,
+	REPO_MAP_MAX_TOKENS,
+	REPO_MAP_MIN_TOKENS,
+	REPO_MAP_PROMPT_MAX_BYTES,
+	REPO_MAP_PROMPT_MAX_FILES,
+	type RepoMapPromptOptions,
+	type RepoMapPromptSection,
+	type RepoMapRequest,
+	RepoMapService,
+	type RepoMapServiceOptions,
+	type RepoMapSummary,
+} from "./repomap-service.ts";
+export { createRepoMapTool, formatRepoMapResult, type RepoMapToolOptions } from "./repomap-tool.ts";
 // The bridge process, reached two ways: a source checkout runs
 // `sandbox/bridge-main.ts` beside the tools package, and a compiled binary
 // re-enters the CLI's main with `__bridge` — see `bridgeRuntime` in
@@ -114,6 +128,8 @@ import { createLsTool } from "./ls.ts";
 import { ChildProcessExecOperations, defaultOperations, detectShell, type Operations } from "./operations.ts";
 import { createReadTool } from "./read.ts";
 import { ReadFileState } from "./read-file-state.ts";
+import type { RepoMapService } from "./repomap-service.ts";
+import { createRepoMapTool } from "./repomap-tool.ts";
 import { detectRuntime, type SandboxRuntime } from "./sandbox/index.ts";
 import { createInspectSourceMapTool } from "./sourcemap.ts";
 import { createTaskTools, type TaskStore } from "./tasks.ts";
@@ -148,14 +164,21 @@ export interface CreateAllToolsOptions {
 	tempDir?: string;
 	/** Extra roots the session configuration asked for, on top of the defaults. */
 	writableRoots?: readonly string[];
+	/**
+	 * The session's repository map, shared with `/map` and the startup prompt
+	 * section so all three read one cache. Absent, the RepoMap tool builds its
+	 * own in-memory service.
+	 */
+	repoMap?: RepoMapService;
 }
 
 /**
  * The default coding tool set. Order is frozen here so the wire-tool list
  * stays prompt-cache stable: core file/shell tools first, then task and web
  * tools, with the standalone read-only probes (Digest, InspectSqlite,
- * InspectArtifact, InspectBinary, InspectSourceMap, CompareArtifacts, InspectWebCapture) last — a new tool is
- * appended, never inserted, so no existing tool's schema slot moves.
+ * InspectArtifact, InspectBinary, InspectSourceMap, CompareArtifacts, InspectWebCapture,
+ * RepoMap) last — a new tool is appended, never inserted, so no existing tool's
+ * schema slot moves.
  */
 export function createAllTools(cwd: string, options: CreateAllToolsOptions = {}): AnyTool[] {
 	// The shell is resolved before the runtime, because the Windows probe runs
@@ -223,5 +246,6 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createInspectSourceMapTool(cwd),
 		createCompareArtifactsTool(cwd),
 		createInspectWebCaptureTool(cwd),
+		createRepoMapTool(cwd, { operations: ops, service: options.repoMap }),
 	];
 }

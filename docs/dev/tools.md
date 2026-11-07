@@ -718,5 +718,7 @@ The comments also state the measured costs and the run or date that measured the
 | `packages/tools/src/artifact.ts` | The InspectArtifact report of a zip-family archive or ASAR. |
 | `packages/tools/src/compare-artifacts.ts` | CompareArtifacts: logical paths, SHA-256 content, budgets, and status. |
 | `packages/tools/src/web-capture.ts` | InspectWebCapture: HAR 1.2 and Fiddler SAZ, with values withheld. |
+| `packages/tools/src/repomap-service.ts` | The session's repository map: shared cache, path containment, the prompt threshold. |
+| `packages/tools/src/repomap-tool.ts` | RepoMap: the ranked, token-budgeted outline of a checkout. |
 | `packages/tools/src/binary.ts` | InspectBinary: PE, ELF, Mach-O, WASM, and the embedded metadata blocks. |
 | `packages/tools/src/dotnet.ts` | .NET metadata and the managed method-body operand walk. |

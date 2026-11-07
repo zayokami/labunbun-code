@@ -108,6 +108,7 @@ import {
 	seatsByRef,
 } from "./model-roles.ts";
 import { loadOutputStylesWithNotes, resolveOutputStyle } from "./output-styles.ts";
+import { createRepoMapService, repoMapPromptSection } from "./repomap-wiring.ts";
 import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
@@ -1055,11 +1056,15 @@ class AcpAgent implements acp.Agent {
 		// read evidence has to be clearable from the `done` phase below. A module
 		// scope instance would hand one session's reads to another.
 		const readState = new ReadFileState();
+		// One map service for this live session: the RepoMap tool and the startup
+		// prompt section read the same cache.
+		const repoMap = createRepoMapService(cwd, ops, home);
 		const tools = createAllTools(cwd, {
 			taskStore,
 			readState,
 			operations: ops,
 			backgroundShells,
+			repoMap,
 			readOnlyRoots: [toolOutputRoot(cwd)],
 			spillDir: toolSpillDir(cwd),
 			home,
@@ -1273,6 +1278,9 @@ class AcpAgent implements acp.Agent {
 		// messages: without it the type would be inferred from its own initializer.
 		const outputStyles = loadOutputStylesWithNotes(cwd, home);
 		for (const note of outputStyles.notes) process.stderr.write(`Output style: ${note}\n`);
+		// The repository's shape, when it fits the prompt; a large checkout gets no
+		// section and the RepoMap tool instead.
+		const repoMapText = await repoMapPromptSection(repoMap);
 		const session: AgentSession = new AgentSession({
 			model,
 			systemPrompt: buildSystemPrompt(allTools, {
@@ -1284,6 +1292,7 @@ class AcpAgent implements acp.Agent {
 				outputStyle: resolveOutputStyle(settings.outputStyle, outputStyles.styles)?.content,
 				skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 				model,
+				repoMap: repoMapText,
 			}),
 			tools: allTools,
 			store,
