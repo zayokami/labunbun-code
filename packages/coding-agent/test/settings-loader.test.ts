@@ -392,8 +392,11 @@ describe("repo-controlled settings (project + local tiers)", () => {
 	});
 
 	test("a project file that sets nothing sensitive produces no notice", () => {
-		withSettingsTiers({ project: { theme: "light", vimMode: true } }, (cwd, home) => {
-			expect(formatIgnoredKeysNotice(loadSettings(cwd, undefined, home).ignoredKeys)).toBeUndefined();
+		withSettingsTiers({ project: { theme: "light", vimMode: true, tokenUnit: "mtok" } }, (cwd, home) => {
+			const loaded = loadSettings(cwd, undefined, home);
+			expect(formatIgnoredKeysNotice(loaded.ignoredKeys)).toBeUndefined();
+			// A display choice travels with the repository like the theme does.
+			expect(loaded.settings.tokenUnit).toBe("mtok");
 		});
 	});
 });

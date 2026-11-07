@@ -60,7 +60,14 @@ export {
 	resolveEditingMode,
 } from "./editing-mode.ts";
 export { formatElapsed } from "./elapsed.ts";
-export { formatTokens } from "./format.ts";
+export {
+	formatTokens,
+	formatTokenTotal,
+	getTokenUnit,
+	setTokenUnit,
+	TOKEN_UNITS,
+	type TokenUnit,
+} from "./format.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { inputTrace, installStdinTrace } from "./input-trace.ts";
 export { LIVE_OUTPUT_LINES, liveOutputLines, livePreviewTargets } from "./live-output.ts";

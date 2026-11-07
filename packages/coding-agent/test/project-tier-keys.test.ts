@@ -58,9 +58,10 @@ describe("the project tier's key policy", () => {
 		]) {
 			expect(PROJECT_TIER_KEY_POLICY, key).toMatchObject({ [key]: "denied" });
 		}
-		// And the two that are nobody's business but the terminal's.
+		// And the ones that are nobody's business but the terminal's.
 		expect(PROJECT_TIER_KEY_POLICY.theme).toBe("repo");
 		expect(PROJECT_TIER_KEY_POLICY.vimMode).toBe("repo");
+		expect(PROJECT_TIER_KEY_POLICY.tokenUnit).toBe("repo");
 	});
 
 	test("permissions is classified sub-key by sub-key", () => {

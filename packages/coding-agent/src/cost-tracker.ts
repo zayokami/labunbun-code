@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { legacyCwdSlug, sanitizeCwd } from "@labunbun/agent";
 import { type AgentMessage, computeCost, resolveModel, type Usage } from "@labunbun/ai";
+import { formatTokenTotal } from "@labunbun/tui/format";
 import { ROLE_NAMES, type RoleName } from "./model-roles.ts";
 
 /**
@@ -304,8 +305,8 @@ function cacheChannels(usage: ModelUsage): string {
 	if (prompt === 0) return "cache: no prompt tokens recorded";
 	const rate = usage.cacheReadTokens / prompt;
 	return (
-		`cache: ${usage.cacheReadTokens.toLocaleString()} read (${(rate * 100).toFixed(1)}%) · ` +
-		`${usage.cacheWriteTokens.toLocaleString()} written · ${usage.inputTokens.toLocaleString()} full price`
+		`cache: ${formatTokenTotal(usage.cacheReadTokens)} read (${(rate * 100).toFixed(1)}%) · ` +
+		`${formatTokenTotal(usage.cacheWriteTokens)} written · ${formatTokenTotal(usage.inputTokens)} full price`
 	);
 }
 
@@ -327,12 +328,14 @@ export function formatCostState(state: CostState, label: string, ceilings?: Part
 		// The reasoning share rides the token count rather than getting a line of
 		// its own: it is a subset of that count, and a line beside it would read
 		// as a second, additive total. Models that never report it show nothing.
-		const reasoning = usage.reasoningTokens > 0 ? ` (${usage.reasoningTokens.toLocaleString()} reasoning)` : "";
+		const reasoning = usage.reasoningTokens > 0 ? ` (${formatTokenTotal(usage.reasoningTokens)} reasoning)` : "";
 		// The subagent share rides the model's money as a subset, for the same
 		// reason the reasoning share rides its tokens: a line of its own would
 		// read as a second, additive amount.
 		const subagents = usage.subagentCostUSD > 0 ? ` · $${usage.subagentCostUSD.toFixed(4)} from subagents` : "";
-		lines.push(`  ${key}: ${totalTokens(usage)} tokens${reasoning}, $${usage.costUSD.toFixed(4)}${subagents}`);
+		lines.push(
+			`  ${key}: ${formatTokenTotal(totalTokens(usage))} tokens${reasoning}, $${usage.costUSD.toFixed(4)}${subagents}`,
+		);
 		lines.push(`    ${cacheChannels(usage)}`);
 	}
 	for (const role of ROLE_NAMES) {

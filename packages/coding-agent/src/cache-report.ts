@@ -21,6 +21,7 @@
  */
 
 import { type CacheNotice, type CacheRequestRecord, cacheCapability, cacheCeiling, type Model } from "@labunbun/ai";
+import { formatTokenTotal } from "@labunbun/tui/format";
 
 export interface CacheReportInput {
 	records: readonly CacheRequestRecord[];
@@ -145,7 +146,7 @@ function sumTokens(records: readonly CacheRequestRecord[]): TokenTotals {
 /** The TTL split of the writes, when the provider reported one. */
 function ttlSplit(totals: TokenTotals): string {
 	if (!totals.writeSplit) return "";
-	return ` (5m ${totals.write5m.toLocaleString()} · 1h ${totals.write1h.toLocaleString()})`;
+	return ` (5m ${formatTokenTotal(totals.write5m)} · 1h ${formatTokenTotal(totals.write1h)})`;
 }
 
 /**
@@ -202,8 +203,8 @@ export function formatCacheReport(input: CacheReportInput): string {
 	lines.push(`  requests     ${counts}${extras.length > 0 ? ` (${extras.join(", ")})` : ""}`);
 
 	lines.push(
-		`  tokens       ${totals.read.toLocaleString()} read · ${totals.write.toLocaleString()} written` +
-			`${ttlSplit(totals)} · ${totals.input.toLocaleString()} full price · ${totals.output.toLocaleString()} out`,
+		`  tokens       ${formatTokenTotal(totals.read)} read · ${formatTokenTotal(totals.write)} written` +
+			`${ttlSplit(totals)} · ${formatTokenTotal(totals.input)} full price · ${formatTokenTotal(totals.output)} out`,
 	);
 
 	if (ceiling === undefined) {

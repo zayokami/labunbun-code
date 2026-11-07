@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearCustomModels, clearPricingOverrides, resolveModel, THINKING_LEVELS } from "@labunbun/ai";
+import { formatTokens, getTokenUnit } from "@labunbun/tui/format";
 import { CostTracker, formatCostState } from "../src/cost-tracker.ts";
 import { appendHistory, loadHistory } from "../src/history.ts";
 import { applyCatalogSettings, mergeSettings, type RawSettingsInput, SettingsSchema } from "../src/settings.ts";
@@ -282,6 +283,19 @@ describe("applyCatalogSettings", () => {
 			clearCustomModels();
 			clearPricingOverrides();
 		}
+	});
+
+	test("applies the display unit the same way, so every host formats alike", () => {
+		// The unit lives in the formatter, not in `Settings`; this call is the only
+		// place the three hosts' startup path turns the key into behaviour.
+		applyCatalogSettings(SettingsSchema.parse({ tokenUnit: "mtok" }));
+		try {
+			expect(getTokenUnit()).toBe("mtok");
+			expect(formatTokens(2_500_000)).toBe("2.5 MTok");
+		} finally {
+			applyCatalogSettings(SettingsSchema.parse({}));
+		}
+		expect(getTokenUnit()).toBe("k");
 	});
 });
 

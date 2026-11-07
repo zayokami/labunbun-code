@@ -25,6 +25,7 @@ import {
 	THINKING_LEVELS,
 } from "@labunbun/ai";
 import { isMissingPathError } from "@labunbun/tools";
+import { setTokenUnit, TOKEN_UNITS } from "@labunbun/tui/format";
 import { z } from "zod";
 import { stripBom } from "./json-text.ts";
 
@@ -164,6 +165,13 @@ export const SettingsSchema = z.object({
 	 * does not resolve falls back to the default and is reported by `/doctor`.
 	 */
 	theme: z.string().optional(),
+	/**
+	 * How token counts are written. `k` (the default) keeps the familiar
+	 * `1.2k`; `mtok` turns counts of a million and up into `849.9 MTok`, the
+	 * unit pricing is quoted in. Purely cosmetic, so unlike the cost keys a
+	 * project file may set it.
+	 */
+	tokenUnit: z.enum(TOKEN_UNITS).optional(),
 	/**
 	 * The language answers should be written in, injected into the system prompt
 	 * verbatim (`system-prompt.ts`). Free-form rather than an enum for the same
@@ -398,7 +406,12 @@ export type Settings = z.infer<typeof SettingsSchema>;
 export type RawSettingsInput = z.input<typeof SettingsSchema>;
 
 // Long-form design notes: docs/dev/migration-framework.md
-/** Make the providers and prices a settings file declares real. */
+/**
+ * Make the settings that live outside the `Settings` object real: the providers
+ * and prices a file declares, and the display preference every token count is
+ * formatted under. Each host calls this once after loading, which is why the
+ * unit is applied here rather than threaded through the formatters.
+ */
 export function applyCatalogSettings(settings: Settings): void {
 	for (const provider of settings.providers?.openaiCompatible ?? []) {
 		registerOpenAICompatibleProvider(provider);
@@ -406,6 +419,7 @@ export function applyCatalogSettings(settings: Settings): void {
 	for (const [reference, price] of Object.entries(settings.pricing ?? {})) {
 		setPricingOverride(reference, price);
 	}
+	setTokenUnit(settings.tokenUnit);
 }
 
 export type SettingsSourceName = "user" | "project" | "local" | "policy" | "flag";
@@ -505,6 +519,7 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	outputStyle: "denied",
 	// Cosmetic, no reach beyond the user's own terminal.
 	theme: "repo",
+	tokenUnit: "repo",
 	vimMode: "repo",
 	emacsMode: "repo",
 	// Merged field by field — see PROJECT_TIER_PERMISSION_KEY_POLICY below.

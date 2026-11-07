@@ -738,7 +738,7 @@ A project file is controlled by its repository. The tool does not read these key
 
 A repository must not choose its own model. A repository must not choose its own confinement. A repository must not approve its own tool calls. A repository must not turn the network off.
 
-The tool reads `permissions.deny` from every tier. It reads `theme`, `vimMode`, and `emacsMode` from a project file.
+The tool reads `permissions.deny` from every tier. It reads `theme`, `vimMode`, `emacsMode`, and `tokenUnit` from a project file.
 
 The tool writes the keys that it ignored to the output at startup.
 
@@ -779,12 +779,15 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `allowManagedPermissionRulesOnly` | A boolean. Policy tier only. | Policy |
 | `disableBypassPermissionsMode` | A boolean. Policy tier only. | Policy |
 | `theme` | A theme name, or `auto` | Any |
+| `tokenUnit` | `k` or `mtok`. The value `k` is the default. | Any |
 | `vimMode` | A boolean | Any |
 | `emacsMode` | A boolean | Any |
 | `permissions.allow` | An array of rules | User |
 | `permissions.deny` | An array of rules | Any |
 | `permissions.ask` | An array of rules | Any |
 | `permissions.additionalDirectories` | An array of paths | User |
+
+The key `tokenUnit` changes the unit of the token counts in the interface. The value `k` is the default and writes `1.2k`. The value `mtok` writes counts of one million and above as `849.9 MTok`, the unit model prices are quoted in. Below one million the counts keep the `k` form. The `/cost` and `/cache` reports keep every digit below one million.
 
 Each seat in `roles` can set `budgetUSD`. The budget is opt-in: a seat with no value has no ceiling. The tool compares the spend against the budget before each request and refuses the request when the spend is over the value. The refusal names the setting: `Budget reached: $2.5000 spent of the $2.0000 budget for roles.main. Raise roles.main.budgetUSD or switch models.`
 
