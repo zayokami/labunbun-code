@@ -15,6 +15,7 @@ import {
 	type RepoMapTag,
 	tagsInSource,
 } from "../src/repomap-tags.ts";
+import { createRepoMapWorkerPool } from "../src/repomap-worker-pool.ts";
 
 const ops = new NodeFileSystemOperations();
 const fixtures = join(import.meta.dir, "fixtures", "repomap");
@@ -324,6 +325,119 @@ describe("buildRepoMapTags", () => {
 		expect(nested.stats.cached).toBe(1);
 		expect(nested.files[0]?.path).toBe("b.ts");
 		expect(nested.files[0]?.tags.every((tag) => tag.path === "b.ts")).toBe(true);
+	});
+});
+
+describe("RepoMap worker pool", () => {
+	/** More than the scan's parse threshold, so a cold map tries to start workers. */
+	const WORKER_FILES = 40;
+
+	function writeFiles(root: string): void {
+		for (let index = 0; index < WORKER_FILES; index++) {
+			write(root, `src/f${index}.ts`, `export function f${index}() {}\nexport const v${index} = f${index}();\n`);
+		}
+	}
+
+	test("extracts the same tags on a worker as on this thread", async () => {
+		const source = "export function alpha() { beta(); }\nclass Box { open() {} }\n";
+		const pool = createRepoMapWorkerPool(2, 12);
+		expect(pool).not.toBeNull();
+		try {
+			const expected = await tagsInSource(source, "typescript", { path: "a.ts" });
+			expect(await pool?.extract(source, "typescript", "a.ts")).toEqual(expected);
+		} finally {
+			pool?.close();
+		}
+	});
+
+	test("switches grammar when the next file is another language", async () => {
+		// One worker, so the third job necessarily follows the second on the same
+		// Parser. A worker that only tracked *loaded* grammars would keep parsing
+		// this TypeScript file with the JavaScript grammar and lose the interface.
+		const pool = createRepoMapWorkerPool(1, 12);
+		expect(pool).not.toBeNull();
+		try {
+			const typescript = "export interface Shape { draw(): void; }\n";
+			const before = await pool?.extract(typescript, "typescript", "a.ts");
+			await pool?.extract("export function go() {}\n", "javascript", "b.js");
+			expect(await pool?.extract(typescript, "typescript", "a.ts")).toEqual(before);
+			expect(before?.tags.filter((tag) => tag.kind === "def").map((tag) => tag.name)).toEqual(["Shape", "draw"]);
+		} finally {
+			pool?.close();
+		}
+	});
+
+	test("starts one pool after enough files miss the cache", async () => {
+		const root = tempDir();
+		writeFiles(root);
+		const plain = await buildRepoMapTags(root, ops);
+		let created = 0;
+		const pooled = await buildRepoMapTags(root, ops, {
+			parseWorkers: 2,
+			createWorkerExtractor: () => {
+				created++;
+				return createRepoMapWorkerPool(2, 12);
+			},
+		});
+
+		expect(created).toBe(1);
+		expect(pooled.files).toEqual(plain.files);
+		expect(pooled.stats.parsed).toBe(WORKER_FILES);
+	});
+
+	test("does not start a pool for a map under the threshold", async () => {
+		const root = tempDir();
+		write(root, "a.ts", "export function alpha() {}\n");
+		let created = 0;
+		const result = await buildRepoMapTags(root, ops, {
+			parseWorkers: 2,
+			createWorkerExtractor: () => {
+				created++;
+				return createRepoMapWorkerPool(2, 12);
+			},
+		});
+
+		expect(created).toBe(0);
+		expect(result.stats.parsed).toBe(1);
+	});
+
+	test("parses in this thread when a worker rejects its file", async () => {
+		const root = tempDir();
+		writeFiles(root);
+		const plain = await buildRepoMapTags(root, ops);
+		let rejected = 0;
+		const result = await buildRepoMapTags(root, ops, {
+			parseWorkers: 2,
+			createWorkerExtractor: () => ({
+				async extract() {
+					rejected++;
+					throw new Error("worker died");
+				},
+				close() {},
+			}),
+		});
+
+		// The first 31 files parse in-thread before the pool is even attempted.
+		expect(rejected).toBe(WORKER_FILES - 31);
+		expect(result.files).toEqual(plain.files);
+		expect(result.stats.parsed).toBe(WORKER_FILES);
+	});
+
+	test("falls back to this thread when no pool can start", async () => {
+		const root = tempDir();
+		writeFiles(root);
+		let created = 0;
+		const result = await buildRepoMapTags(root, ops, {
+			parseWorkers: 2,
+			createWorkerExtractor: () => {
+				created++;
+				return null;
+			},
+		});
+
+		expect(created).toBe(1);
+		expect(result.stats.parsed).toBe(WORKER_FILES);
+		expect(result.stats.definitions).toBe(WORKER_FILES);
 	});
 });
 

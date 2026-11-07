@@ -23,6 +23,7 @@ import {
 	type RepoMapTagDefinitionKind,
 	repoMapLanguageFor,
 } from "./repomap-languages.ts";
+import { createRepoMapWorkerPool } from "./repomap-worker-pool.ts";
 
 export type { RepoMapTagDefinitionKind };
 
@@ -55,6 +56,12 @@ export interface RepoMapFileTags {
 export interface RepoMapTagsOptions extends RepoMapOptions<RepoMapFileTags> {
 	/** Lines of a function or method kept in its snippet. Default: 12. */
 	maxSnippetLines?: number;
+	/**
+	 * Worker threads for uncached parses. `0` keeps parsing on the calling
+	 * thread; the pool is started only after enough files miss the cache to
+	 * repay it, so a small repository never spawns one either way. Default: 0.
+	 */
+	parseWorkers?: number;
 }
 
 export interface RepoMapTagsStats extends RepoMapScanStats {
@@ -229,8 +236,18 @@ export async function buildRepoMapTags(
 ): Promise<RepoMapTagsResult> {
 	const cache: RepoMapCache<RepoMapFileTags> = options.cache ?? new InMemoryRepoMapCache<RepoMapFileTags>();
 	const maxSnippetLines = options.maxSnippetLines ?? DEFAULT_MAX_SNIPPET_LINES;
-	const scan = await scanRepoFiles(root, ops, options, compactTagsCache(cache, root), (tree, source, language, path) =>
-		extractTags(tree, source, path, { maxSnippetLines, language }),
+	const parseWorkers = options.parseWorkers ?? 0;
+	const scan = await scanRepoFiles(
+		root,
+		ops,
+		{
+			...options,
+			createWorkerExtractor:
+				options.createWorkerExtractor ??
+				(parseWorkers > 0 ? () => createRepoMapWorkerPool(parseWorkers, maxSnippetLines) : undefined),
+		},
+		compactTagsCache(cache, root),
+		(tree, source, language, path) => extractTags(tree, source, path, { maxSnippetLines, language }),
 	);
 	let definitions = 0;
 	let references = 0;

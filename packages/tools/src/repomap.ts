@@ -109,6 +109,17 @@ export class InMemoryRepoMapCache<T = RepoMapDefinition[]> implements RepoMapCac
 	}
 }
 
+/**
+ * A pool that parses files off this thread. The scan creates it lazily, once
+ * enough files have missed the cache to repay a worker's start-up, and closes
+ * it when the scan ends or is cancelled. A rejection sends that one file back
+ * to the in-thread parser: a worker that dies must not cost the map.
+ */
+export interface RepoMapWorkerExtractor<T> {
+	extract(source: string, language: RepoMapLanguage, path: string): Promise<T>;
+	close(): void;
+}
+
 export interface RepoMapOptions<T = RepoMapDefinition[]> {
 	/** Files to consider; defaults to the extension set `REPO_MAP_CODE_FILES` covers. */
 	pattern?: Bun.Glob;
@@ -125,12 +136,24 @@ export interface RepoMapOptions<T = RepoMapDefinition[]> {
 	onTruncated?: (maxFiles: number) => void;
 	/** Cancels the walk and the file loop. The scan rejects with the signal's reason. */
 	signal?: AbortSignal;
+	/**
+	 * Creates the worker-backed extractor. Called at most once, after
+	 * `WORKER_MIN_PARSES` files have missed the cache; `null` means this machine
+	 * (or build) cannot use workers and the scan stays on this thread.
+	 */
+	createWorkerExtractor?: () => RepoMapWorkerExtractor<T> | null;
 }
 
 export type RepoMapLanguages = Record<RepoMapLanguage, Language>;
 
 const DEFAULT_MAX_FILE_BYTES = 1024 * 1024;
 const READ_CONCURRENCY = 8;
+/**
+ * Uncached parses before the scan tries to start workers. Starting two to four
+ * Bun threads costs tens of milliseconds; below this many parses the in-thread
+ * path wins anyway, which also keeps small maps and tests from spawning any.
+ */
+const WORKER_MIN_PARSES = 32;
 
 // The runtime and the grammar assets are embedded; `repomap-wasm.ts` owns
 // loading them once per process. This name is the map's public entry point.
@@ -360,6 +383,17 @@ export async function scanRepoFiles<T>(
 	let skipped = 0;
 	let charsRead = 0;
 	let cursor = 0;
+	let workerFactory = options.createWorkerExtractor;
+	let workers: RepoMapWorkerExtractor<T> | undefined;
+	let parseMisses = 0;
+
+	// Cancellation has to reach the pool as well: a job in flight would otherwise
+	// hold the scan open until a file that is no longer wanted has been parsed.
+	const closeWorkers = (): void => {
+		workers?.close();
+		workers = undefined;
+	};
+	options.signal?.addEventListener("abort", closeWorkers, { once: true });
 
 	async function worker(): Promise<void> {
 		try {
@@ -386,20 +420,44 @@ export async function scanRepoFiles<T>(
 					skipped++;
 					continue;
 				}
-				parser.setLanguage(grammar);
-				const tree = parser.parse(source);
-				if (!tree) {
-					skipped++;
-					continue;
+				if (workers === undefined && workerFactory !== undefined && ++parseMisses >= WORKER_MIN_PARSES) {
+					// At most one attempt: a null or a throw means this build cannot use
+					// workers, and retrying per file would pay the same failure repeatedly.
+					const factory = workerFactory;
+					workerFactory = undefined;
+					try {
+						workers = factory() ?? undefined;
+					} catch {
+						workers = undefined;
+					}
 				}
-				let data: T;
-				try {
-					data = extract(tree, source, language, path);
-				} finally {
-					// Trees hold WASM memory until deleted; a 690-file scan would otherwise
-					// keep all of them alive until the next GC pass.
-					tree.delete();
+				let extracted: { data: T } | undefined;
+				if (workers !== undefined) {
+					try {
+						extracted = { data: await workers.extract(source, language, path) };
+					} catch {
+						// Cancellation is not a worker failure; the loop's catch handles it.
+						options.signal?.throwIfAborted();
+						// A worker that rejected or died sends this file back to the
+						// in-thread parser, which is the same code that ran without a pool.
+					}
 				}
+				if (extracted === undefined) {
+					parser.setLanguage(grammar);
+					const tree = parser.parse(source);
+					if (!tree) {
+						skipped++;
+						continue;
+					}
+					try {
+						extracted = { data: extract(tree, source, language, path) };
+					} finally {
+						// Trees hold WASM memory until deleted; a 690-file scan would otherwise
+						// keep all of them alive until the next GC pass.
+						tree.delete();
+					}
+				}
+				const data = extracted.data;
 				cache.set(full, stat.mtimeMs, stat.size, data);
 				parsed++;
 				charsRead += source.length;
@@ -420,6 +478,8 @@ export async function scanRepoFiles<T>(
 		// transaction instead of one autocommit per file.
 		cache.flush?.();
 	} finally {
+		options.signal?.removeEventListener("abort", closeWorkers);
+		closeWorkers();
 		parser.delete();
 	}
 	options.signal?.throwIfAborted();

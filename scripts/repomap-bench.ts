@@ -22,6 +22,10 @@ import { InMemoryRepoMapCache } from "../packages/tools/src/repomap.ts";
 import { type RankedRepoMapEntry, rankRepoMap } from "../packages/tools/src/repomap-rank.ts";
 import { type RenderedRepoMap, renderRepoMap } from "../packages/tools/src/repomap-render.ts";
 import { buildRepoMapTags, type RepoMapFileTags } from "../packages/tools/src/repomap-tags.ts";
+import { defaultRepoMapParseWorkers } from "../packages/tools/src/repomap-worker-pool.ts";
+
+/** `REPOMAP_BENCH_WORKERS=0` measures the same tree without parser threads. */
+const PARSE_WORKERS = process.env.REPOMAP_BENCH_WORKERS === "0" ? 0 : defaultRepoMapParseWorkers();
 
 const FILE_COUNT = 100;
 const BLOCKS_PER_FILE = 100;
@@ -70,7 +74,9 @@ interface Pass {
 
 async function runPass(root: string, cache: InMemoryRepoMapCache<RepoMapFileTags>): Promise<Pass> {
 	const ops = new NodeFileSystemOperations();
-	const scan = await buildRepoMapTags(root, ops, { cache });
+	// Same worker count the service uses; a hot pass never reaches the parse
+	// threshold, so it still measures the cache path with no threads started.
+	const scan = await buildRepoMapTags(root, ops, { cache, parseWorkers: PARSE_WORKERS });
 	const rankStarted = performance.now();
 	const entries = rankRepoMap(scan.files);
 	const rankMs = performance.now() - rankStarted;
@@ -110,7 +116,7 @@ function report(label: string, pass: Pass): void {
 
 async function bench(root: string, description: string): Promise<void> {
 	const cache = new InMemoryRepoMapCache<RepoMapFileTags>();
-	console.log(`\n${description}`);
+	console.log(`\n${description} (parse workers: ${PARSE_WORKERS})`);
 	const cold = await runPass(root, cache);
 	report("cold", cold);
 	const hot = await runPass(root, cache);

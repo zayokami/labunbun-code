@@ -259,6 +259,41 @@ Both caches implement `RepoMapCache<T>`; the payload is definitions in P0 and
 SQLite cache is the caller's job; nothing holds a database handle open after a
 scan.
 
+## Parser workers
+
+The scan reads eight files at a time, but tree-sitter parses synchronously: the
+read loop kept the disk busy and still parsed one file at a time. A cold scan now
+hands uncached files to a small `worker_threads` pool after the first 32 misses.
+That threshold is the point where a worker's start-up is repaid; a map of a small
+repository — and any scan whose cache is warm — never spawns one. The service
+defaults to `defaultRepoMapParseWorkers()`: `availableParallelism() - 1`, capped
+at 4, and 0 on a single-core machine. `buildRepoMapTags` defaults to 0, so tests
+and one-off scans stay in-process unless they ask.
+
+The main thread keeps the walk, the stats, the cache and the ranking; a worker
+owns one `Parser` and one loaded copy of each grammar it sees, and remembers the
+language currently set on that parser (`setLanguage` per job). The pool is
+optional at every layer by design. Starting a worker is the one step a packaging
+or platform change can break, and the fallback is the in-thread parse that
+existed before it: a factory that returns `null` or throws, a job that rejects, a
+worker that exits — any of these costs that file the parallelism, never the map.
+Cancelling a scan closes the pool, so a job for a file nobody wants cannot hold
+the scan open.
+
+The worker is an additional entrypoint of a compiled binary:
+
+```
+bun build --compile main.ts packages/tools/src/repomap-worker.ts --outfile …
+```
+
+`import.meta.url` inside a compiled binary names the executable, not the module
+that called `new Worker`, and Bun embeds an entrypoint under the build root — the
+entries' common ancestor — rather than beside that module. The pool therefore
+uses the script beside itself in a checkout, and otherwise scans the executable's
+virtual root once for `repomap-worker.js`. A build that leaves the entrypoint out
+finds nothing and uses the in-thread parser, which is the same fallback a broken
+worker takes.
+
 ## Tool, prompt and commands (P2)
 
 P2 turns the pipeline into three things a session can reach.
@@ -357,17 +392,19 @@ declines at 200 files long before either ceiling.
 
 ## Measurements
 
-Measured on Windows 11, Bun 1.4.4, 2026-11-07.
+Measured on Windows 11, Bun 1.4.4, 2026-11-08. `REPOMAP_BENCH_WORKERS=0` runs
+the same tree without parser threads.
 
-| Tree | Files | Lines | Cold scan | Hot scan | Rank | Render | Definitions | References |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Synthetic (100 files) | 100 | 100,100 | 780 ms | 10 ms | 64 ms | 19 ms | 80,100 | 10,000 |
-| This repository | 724 | — | 1,974 ms | 87 ms | 60 ms | <1 ms | 8,152 | 149,441 |
+| Tree | Files | Lines | Cold scan (workers) | Cold scan (in-thread) | Hot scan | Rank | Render | Definitions | References |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Synthetic (100 files) | 100 | 100,100 | 603 ms | 817 ms | 12 ms | 63 ms | 19 ms | 80,100 | 10,000 |
+| This repository | 728 | — | 1,007 ms | 2,062 ms | 82 ms | 60 ms | <1 ms | 8,192 | 149,806 |
 
 "Cold" is an empty in-memory cache: every file is read and parsed. "Hot" is a
 second pass with the same cache: no reads, no parses, only stats and the walk.
-Render is the time for both the 1,024- and 4,096-token probes (the reported
-column is the 1,024 probe).
+The worker column is the machine's default count (4 here); the in-thread column
+is the same scan with the pool disabled. Render is the time for both the
+1,024- and 4,096-token probes (the reported column is the 1,024 probe).
 
 Map sizes at the two budgets:
 
@@ -385,10 +422,12 @@ benchmark a real checkout (`bun run repomap:bench .`).
   covered except CSS, INI and regex, which are left out on purpose (see
   *Grammars*; regex is not a source language). A grammar for a language the
   package lacks would need its own WASM build and a test per rule.
-- A million-line tree is still linear in files: the scan is parallel across
-  reads but synchronous across parses, and the remaining cost is the walk and
-  the stats. A worker pool or a persistent file index (a directory-level mtime
-  summary stored beside the cache) is where that work belongs. The 20,000-file
+- A million-line tree is still linear in files: parses now run on workers, so
+  the walk and the per-file stats dominate a cold scan. A persistent file index
+  (a directory-level mtime summary stored beside the cache) would cut that, but
+  a directory's mtime does not change when a file's contents do on Windows, so
+  the per-file stat remains. A session watcher (`fs.watch`) is the more useful
+  lever: it keeps the map fresh, not just the walk cheaper. The 20,000-file
   ceiling makes the current behaviour honest; it does not make it fast.
 - Nothing watches the tree. `/map-refresh` is the only thing that pulls an edit
   made outside the session into the prompt; a watcher would let it follow every

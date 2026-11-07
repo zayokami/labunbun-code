@@ -86,6 +86,9 @@ function build(bunTarget: string, name: string): string {
 			"--minify",
 			`--target=${bunTarget}`,
 			"packages/coding-agent/src/main.ts",
+			// The RepoMap parse worker is reached through `new URL(…, import.meta.url)`,
+			// which the bundler cannot follow; naming it keeps it in the executable.
+			"packages/tools/src/repomap-worker.ts",
 			"--outfile",
 			outfile,
 		],

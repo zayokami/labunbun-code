@@ -13,6 +13,7 @@ import { rankRepoMap } from "./repomap-rank.ts";
 import { renderRepoMap } from "./repomap-render.ts";
 import { SqliteRepoMapCache } from "./repomap-sqlite.ts";
 import { buildRepoMapTags, type RepoMapFileTags } from "./repomap-tags.ts";
+import { defaultRepoMapParseWorkers } from "./repomap-worker-pool.ts";
 
 /** Smallest and largest map a caller may ask for. */
 export const REPO_MAP_MIN_TOKENS = 128;
@@ -49,6 +50,13 @@ export interface RepoMapServiceOptions {
 	onUnreadableDirectory?: (path: string) => void;
 	/** Files one map scans before it reports a truncated tree. Default: `REPO_MAP_SCAN_MAX_FILES`. */
 	maxFiles?: number;
+	/**
+	 * Worker threads for uncached parses. Default: `defaultRepoMapParseWorkers()`,
+	 * which is 0 on a single-core machine and `cores - 1` capped at four
+	 * otherwise. A scan starts the pool only after enough files miss the cache,
+	 * so maps of small repositories still parse on the calling thread.
+	 */
+	parseWorkers?: number;
 }
 
 export interface RepoMapRequest {
@@ -138,6 +146,7 @@ export class RepoMapService {
 	readonly #maxFileBytes: number | undefined;
 	readonly #onUnreadableDirectory: ((path: string) => void) | undefined;
 	readonly #maxFiles: number;
+	readonly #parseWorkers: number;
 	readonly #cachePath: string | undefined;
 	#explicitCache: RepoMapCache<RepoMapFileTags> | undefined;
 	#cache: RepoMapCache<RepoMapFileTags> | undefined;
@@ -151,6 +160,7 @@ export class RepoMapService {
 		this.#maxFileBytes = options.maxFileBytes;
 		this.#onUnreadableDirectory = options.onUnreadableDirectory;
 		this.#maxFiles = options.maxFiles ?? REPO_MAP_SCAN_MAX_FILES;
+		this.#parseWorkers = options.parseWorkers ?? defaultRepoMapParseWorkers();
 		this.#cachePath = options.cachePath;
 		this.#explicitCache = options.cache;
 	}
@@ -239,6 +249,7 @@ export class RepoMapService {
 					this.#onUnreadableDirectory?.(path);
 				},
 				maxFiles: this.#maxFiles,
+				parseWorkers: this.#parseWorkers,
 				onTruncated: () => {
 					truncated = true;
 				},
