@@ -207,6 +207,11 @@ function collectDeclarations(node: SyntaxNode, language: RepoMapLanguage, out: R
 			if (definition) collectDeclarations(definition, language, out);
 			return;
 		}
+		// PowerShell groups a script's top-level statements under a list node.
+		case "statement_list": {
+			for (const child of node.namedChildren) if (child) collectDeclarations(child, language, out);
+			return;
+		}
 		// A top-level `namespace N {}` is an expression statement wrapping the
 		// module; find that module without descending into arbitrary expressions.
 		case "expression_statement": {
@@ -219,8 +224,12 @@ function collectDeclarations(node: SyntaxNode, language: RepoMapLanguage, out: R
 		}
 		// A namespace is a container: its declarations are top-level for the
 		// purpose of finding names, even if the map does not spell out the prefix.
+		// C# and C++ use their own node; PHP's namespace has no body — its
+		// declarations are siblings — so the body lookup finds nothing there.
 		case "module":
-		case "internal_module": {
+		case "internal_module":
+		case "namespace_declaration":
+		case "namespace_definition": {
 			const body = node.childForFieldName("body");
 			if (body) for (const child of body.namedChildren) if (child) collectDeclarations(child, language, out);
 			return;

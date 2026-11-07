@@ -44,8 +44,8 @@ A tag is one of two facts about a file:
 ### Grammars
 
 `repomap-languages.ts` holds the node vocabulary for each grammar; the walk, the
-graph and the ranker know nothing about languages. Six grammars ship, and the
-extension picks one:
+graph and the ranker know nothing about languages. Eleven grammars ship, and
+the extension picks one:
 
 | Extensions | Grammar |
 | --- | --- |
@@ -55,6 +55,13 @@ extension picks one:
 | `.py` | python |
 | `.go` | go |
 | `.rs` | rust |
+| `.java` | java |
+| `.cs` | c-sharp |
+| `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx` | cpp |
+| `.rb`, `.rake` | ruby |
+| `.php` | php |
+| `.sh`, `.bash` | bash |
+| `.ps1`, `.psm1`, `.psd1` | powershell |
 
 The rules are the same shape for every language: which node types declare a
 name and what kind they are, and where a call node names its callee.
@@ -71,6 +78,38 @@ name and what kind they are, and where a call node names its callee.
   calls, `self.method()`, `Thing::new()` and turbofish `foo::<T>()`. Macro
   arguments are raw tokens rather than parsed calls, so `println!` does not
   produce references to what it prints.
+- **Java** — classes, interfaces, enums and records, plus methods on any of
+  them. A call reads the invocation's `name` field, which covers both `f()` and
+  `obj.f()`; `new X()` reads the created type, unwrapping generics and scoped
+  names.
+- **C#** — classes, interfaces, enums, structs and records, plus methods. A
+  namespace body is a container in P0, like a TypeScript module. Invocations
+  read the function identifier or the member access's name; `new X()` handles
+  generic and qualified type names.
+- **C++** — `class_specifier`, `struct_specifier`, `union_specifier`,
+  `enum_specifier` and `function_definition`, with the declarator unwrapped
+  through function, pointer and reference layers so `int *A::f()` still names
+  `f`. Calls read identifiers, `obj.f()`, `A::f()` and the templated forms;
+  `new X()` reads the type. The C++ grammar also parses C, and both use it so a
+  mixed C/C++ tree has one graph.
+- **Ruby** — `method`, `singleton_method`, `class` and `module` (a module is
+  recorded as a class; the ranker only needs the name). Every call node names
+  its callee in the `method` field, so `helper()`, `Widget.make` and
+  `Box.new` all resolve.
+- **PHP** — classes, traits (recorded as classes), interfaces, enums,
+  functions and methods; `__construct` is skipped like a JavaScript
+  constructor. Calls cover `f()`, `$obj->f()` and `X::f()`; `new X()` reads the
+  created name.
+- **Bash** — `function_definition` for both `f() { … }` and `function f { … }`.
+  Every command is a reference; builtins like `echo` simply never match a
+  defined name.
+- **PowerShell** — `function_statement`, with the name in a `function_name`
+  child. Commands (`Write-Host`, a bare `Beta`) are references the same way
+  shell commands are.
+
+CSS and INI are not mapped. They have no call graph — only names in a
+stylesheet or a config file — and listing those names would spend the token
+budget while ranking nothing, so they stay out of `REPO_MAP_CODE_FILES`.
 
 The grammars are loaded per language and once per process: a scan looks at the
 extensions its walk found and loads only those, so a pure TypeScript checkout
@@ -226,9 +265,10 @@ and the prompt section.
 
 ## Languages, subagents and large trees (P3)
 
-**Grammars.** Python, Go and Rust joined TypeScript and JavaScript (see
-*Grammars* above). A scan loads only the grammars its walk actually found, each
-once per process; a failed load is not cached, so a retry is possible.
+**Grammars.** Python, Go, Rust, Java, C#, C++, Ruby, PHP, Bash and PowerShell
+joined TypeScript and JavaScript (see *Grammars* above). A scan loads only the
+grammars its walk actually found, each once per process; a failed load is not
+cached, so a retry is possible.
 
 **Subagents.** A subagent's context block now carries the same `# Repository
 map` the parent holds, between the environment section and project memory. The
@@ -282,10 +322,10 @@ benchmark a real checkout (`bun run repomap:bench .`).
 
 ## What is left
 
-- More grammars. `@vscode/tree-sitter-wasm` also ships Java, C#, C++, Ruby,
-  PHP, Bash, PowerShell, CSS and INI; each is one table in
-  `repomap-languages.ts` plus a test, and none needs a change below the rules.
-  The decision to defer them is about test coverage per grammar, not plumbing.
+- More grammars than `@vscode/tree-sitter-wasm` ships. The set it does ship is
+  covered except CSS and INI, which are left out on purpose (see *Grammars*).
+  A grammar for a language the package lacks would need its own WASM build and
+  a test per rule.
 - A million-line tree is still linear in files: the scan is parallel across
   reads but synchronous across parses, and the remaining cost is the walk and
   the stats. A worker pool or a persistent file index (a directory-level mtime
