@@ -45,7 +45,7 @@ A tag is one of two facts about a file:
 ### Grammars
 
 `repomap-languages.ts` holds the node vocabulary for each grammar; the walk, the
-graph and the ranker know nothing about languages. Thirteen grammars ship, and
+graph and the ranker know nothing about languages. Seventeen grammars ship, and
 the extension picks one:
 
 | Extensions | Grammar |
@@ -63,6 +63,18 @@ the extension picks one:
 | `.php` | php |
 | `.sh`, `.bash` | bash |
 | `.ps1`, `.psm1`, `.psd1` | powershell |
+| `.zig` | zig |
+| `.kt`, `.kts` | kotlin |
+| `.swift` | swift |
+| `.lua` | lua |
+
+The last four are not in `@vscode/tree-sitter-wasm`. They are built from pinned
+upstream commits and vendored under `packages/tools/wasm`, because the prebuilt
+grammars on npm are older ABI builds that `web-tree-sitter@0.27` cannot load.
+`scripts/build-repomap-grammars.ts` rebuilds them (it also applies Swift's
+scanner patch, which replaces a `fprintf`/`exit` out-of-memory path with
+`__builtin_trap()` for the wasm target), and `packages/tools/wasm/README.md`
+records each commit and carries the MIT notice the license requires.
 
 The WASM assets are bundled, not read from `node_modules` at run time:
 `repomap-wasm.ts` imports `web-tree-sitter.wasm` and each grammar with
@@ -129,6 +141,29 @@ name and what kind they are, and where a call node names its callee.
   skipped. Commands (`Write-Host`, a bare `Beta`) are references the same way
   shell commands are, and so is a member invocation such as `$obj.Speak()`
   (the grammar spells the node `invokation_expression`).
+- **Zig** — `function_declaration` (a `method` inside a container), plus the
+  containers a constant declares: `struct_declaration` and `union_declaration`
+  are classes, `enum_declaration` an enum, `opaque_declaration` a class. A
+  container has no `name` field; the name is the first identifier child of its
+  `variable_declaration`. Calls read the `function` field (`add()` or
+  `Point.init()`), and `Point{ … }` reaches `Point` through
+  `struct_initializer`.
+- **Kotlin** — `class_declaration` (interface and enum are distinguished by the
+  anonymous `interface`/`enum` tokens), `object_declaration` (a class),
+  `type_alias` and `function_declaration`. An extension function's
+  `receiver_type` is not the name. Calls read the identifier or the last
+  `navigation_suffix` of a `navigation_expression`, so `f()`, `obj.f()` and
+  `foo().f()` all resolve.
+- **Swift** — one `class_declaration` covers class, struct, enum, actor and
+  extension; only `enum` gets its own kind. `protocol_declaration` is an
+  interface, `typealias_declaration` a type, and `protocol_function_declaration`
+  a method beside `function_declaration` (a free function or a method according
+  to its parent). Calls read the first child (`Point()` or `Helper.make()`),
+  taking the final `navigation_suffix` for a qualified call.
+- **Lua** — `function_declaration`, including `local function`. Its `name` is
+  an identifier, a `dot_index_expression` (`function M.add`) or a
+  `method_index_expression` (`function M:method`, recorded as `method`). Calls
+  read the same three shapes from `function_call`.
 
 CSS and INI are not mapped. They have no call graph — only names in a
 stylesheet or a config file — and listing those names would spend the token
@@ -398,9 +433,11 @@ handling on every event.
 ## Languages, subagents and large trees (P3)
 
 **Grammars.** Python, Go, Rust, Java, C#, C++, Ruby, PHP, Bash and PowerShell
-joined TypeScript, TSX and JavaScript (see *Grammars* above). A scan loads only
-the grammars its walk actually found, each once per process; a failed load is not
-cached, so a retry is possible.
+joined TypeScript, TSX and JavaScript (see *Grammars* above). Zig, Kotlin,
+Swift and Lua followed, built from source and vendored because
+`@vscode/tree-sitter-wasm` does not ship them. A scan loads only the grammars
+its walk actually found, each once per process; a failed load is not cached, so
+a retry is possible.
 
 **Subagents.** A subagent's context block now carries the same `# Repository
 map` the parent holds, between the environment section and project memory. The
@@ -466,10 +503,12 @@ pass (23 ms), with everything else under 5 ms.
 
 ## What is left
 
-- More grammars than `@vscode/tree-sitter-wasm` ships. The set it does ship is
-  covered except CSS, INI and regex, which are left out on purpose (see
-  *Grammars*; regex is not a source language). A grammar for a language the
-  package lacks would need its own WASM build and a test per rule.
+- More grammars than the seventeen that ship. The set `@vscode/tree-sitter-wasm`
+  provides is covered except CSS, INI and regex, which are left out on purpose
+  (see *Grammars*; regex is not a source language); Zig, Kotlin, Swift and Lua
+  are the four built in-house. The next language needs a build-script entry, a
+  tag rule and a test, and it should only be added when the grammar's wasm
+  builds against the current tree-sitter runtime.
 - A million-line tree is still linear in files: parses now run on workers, so
   the walk and the per-file stats dominate a cold scan. A persistent file index
   (a directory-level mtime summary stored beside the cache) would cut that, but

@@ -6,6 +6,11 @@
 // back a path Bun can read in both modes; `Language.load` takes the bytes.
 //
 // Long-form design notes: docs/dev/repomap.md (Grammars).
+// Zig, Kotlin, Swift and Lua come from `packages/tools/wasm`: the `@vscode`
+// bundle has no grammar for them, and the prebuilt grammars published on npm
+// are older ABI builds this loader cannot read. `scripts/build-repomap-grammars.ts`
+// rebuilds them from the pinned upstream commits.
+
 import bashWasm from "@vscode/tree-sitter-wasm/wasm/tree-sitter-bash.wasm" with { type: "file" };
 import cSharpWasm from "@vscode/tree-sitter-wasm/wasm/tree-sitter-c-sharp.wasm" with { type: "file" };
 import cppWasm from "@vscode/tree-sitter-wasm/wasm/tree-sitter-cpp.wasm" with { type: "file" };
@@ -21,6 +26,10 @@ import tsxWasm from "@vscode/tree-sitter-wasm/wasm/tree-sitter-tsx.wasm" with { 
 import typescriptWasm from "@vscode/tree-sitter-wasm/wasm/tree-sitter-typescript.wasm" with { type: "file" };
 import { Language, Parser } from "web-tree-sitter";
 import webTreeSitterWasm from "web-tree-sitter/web-tree-sitter.wasm" with { type: "file" };
+import kotlinWasm from "../wasm/tree-sitter-kotlin.wasm" with { type: "file" };
+import luaWasm from "../wasm/tree-sitter-lua.wasm" with { type: "file" };
+import swiftWasm from "../wasm/tree-sitter-swift.wasm" with { type: "file" };
+import zigWasm from "../wasm/tree-sitter-zig.wasm" with { type: "file" };
 import type { RepoMapLanguage } from "./repomap-languages.ts";
 
 const GRAMMAR_WASM: Record<RepoMapLanguage, string> = {
@@ -30,13 +39,17 @@ const GRAMMAR_WASM: Record<RepoMapLanguage, string> = {
 	go: goWasm,
 	java: javaWasm,
 	javascript: javascriptWasm,
+	kotlin: kotlinWasm,
+	lua: luaWasm,
 	php: phpWasm,
 	powershell: powershellWasm,
 	python: pythonWasm,
 	ruby: rubyWasm,
 	rust: rustWasm,
+	swift: swiftWasm,
 	tsx: tsxWasm,
 	typescript: typescriptWasm,
+	zig: zigWasm,
 };
 
 // The runtime may only be initialised once per process, and the grammars are
@@ -59,7 +72,8 @@ const grammars = new Map<RepoMapLanguage, Promise<Language>>();
  * Load one grammar, once per process.
  *
  * A scan loads only the grammars its files actually use: a TypeScript checkout
- * should not pay for Python's WASM, and the six together are several megabytes.
+ * should not pay for Python's WASM, and the grammars together are several
+ * megabytes.
  */
 export function loadRepoMapGrammar(name: RepoMapLanguage): Promise<Language> {
 	let pending = grammars.get(name);

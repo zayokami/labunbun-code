@@ -48,6 +48,11 @@ describe("repoMapLanguageFor", () => {
 		expect(repoMapLanguageFor("bin/a.sh")).toBe("bash");
 		expect(repoMapLanguageFor("bin/a.ps1")).toBe("powershell");
 		expect(repoMapLanguageFor("bin/a.psm1")).toBe("powershell");
+		expect(repoMapLanguageFor("src/a.zig")).toBe("zig");
+		expect(repoMapLanguageFor("src/A.kt")).toBe("kotlin");
+		expect(repoMapLanguageFor("build.gradle.kts")).toBe("kotlin");
+		expect(repoMapLanguageFor("ios/App.swift")).toBe("swift");
+		expect(repoMapLanguageFor("lua/init.lua")).toBe("lua");
 	});
 
 	test("is case-insensitive and declines what it cannot parse", () => {
@@ -560,6 +565,190 @@ describe("PowerShell", () => {
 		expect(definitions(tags)).toEqual(["class:Animal", "method:Name", "method:Speak", "enum:Color", "function:Top"]);
 		// All three calls share line 7, so the tag order is the name tiebreak.
 		expect(references(tags)).toEqual(["Help", "Speak", "new"]);
+	});
+});
+
+describe("Zig", () => {
+	const source = [
+		'const std = @import("std");',
+		"",
+		"pub fn add(a: i32, b: i32) i32 {",
+		"    return a + b;",
+		"}",
+		"",
+		"const Point = struct {",
+		"    x: i32,",
+		"    pub fn init(x: i32) Point { return .{ .x = x }; }",
+		"    pub fn len(self: Point) i32 { return self.x; }",
+		"};",
+		"",
+		"const Color = enum { red, green };",
+		"",
+		'test "add" {',
+		"    const p = Point.init(1);",
+		"    _ = p.len();",
+		"    _ = add(1, 2);",
+		"    const q = Point{ .x = 1 };",
+		"}",
+	].join("\n");
+
+	test("finds functions and the containers a constant declares", async () => {
+		expect(await definitionsInSource(source, "zig")).toEqual([
+			{ name: "add", kind: "function", line: 3 },
+			{ name: "Point", kind: "class", line: 7 },
+			{ name: "Color", kind: "enum", line: 13 },
+		]);
+	});
+
+	test("reads member functions and both call spellings", async () => {
+		const tags = (await tagsInSource(source, "zig", { path: "src/main.zig" })).tags;
+
+		expect(definitions(tags)).toEqual(["function:add", "class:Point", "method:init", "method:len", "enum:Color"]);
+		expect(references(tags)).toEqual(["init", "len", "add", "Point"]);
+	});
+});
+
+describe("Kotlin", () => {
+	const source = [
+		"package demo",
+		"",
+		"interface Greeter { fun greet(name: String): String }",
+		"enum class Color { RED, GREEN }",
+		"data class User(val name: String) {",
+		"    fun shout(): String = name.uppercase()",
+		"}",
+		"object Registry { fun register(u: User): User = u }",
+		"typealias Handler = (String) -> Unit",
+		"fun topLevel(x: Int): Int = x + 1",
+		"fun String.ext(): String = this",
+		"class Impl : Greeter {",
+		"    override fun greet(name: String) = topLevel(1).toString()",
+		"}",
+		"fun main() {",
+		'    val u = User("a")',
+		"    println(u.shout())",
+		"    Registry.register(u)",
+		"}",
+	].join("\n");
+
+	test("tells interfaces, enums, objects, aliases and classes apart", async () => {
+		expect(await definitionsInSource(source, "kotlin")).toEqual([
+			{ name: "Greeter", kind: "interface", line: 3 },
+			{ name: "Color", kind: "enum", line: 4 },
+			{ name: "User", kind: "class", line: 5 },
+			{ name: "Registry", kind: "class", line: 8 },
+			{ name: "Handler", kind: "type", line: 9 },
+			{ name: "topLevel", kind: "function", line: 10 },
+			{ name: "ext", kind: "function", line: 11 },
+			{ name: "Impl", kind: "class", line: 12 },
+			{ name: "main", kind: "function", line: 15 },
+		]);
+	});
+
+	test("reads navigation calls and keeps a receiver's name off an extension", async () => {
+		const tags = (await tagsInSource(source, "kotlin", { path: "src/Main.kt" })).tags;
+
+		expect(definitions(tags)).toEqual([
+			"interface:Greeter",
+			"method:greet",
+			"enum:Color",
+			"class:User",
+			"method:shout",
+			"class:Registry",
+			"method:register",
+			"type:Handler",
+			"function:topLevel",
+			"function:ext",
+			"class:Impl",
+			"method:greet",
+			"function:main",
+		]);
+		// The outer call is visited first, so `toString` precedes the `topLevel`
+		// call it wraps; the same order as `println` over `shout`.
+		expect(references(tags)).toEqual(["uppercase", "toString", "topLevel", "User", "println", "shout", "register"]);
+	});
+});
+
+describe("Swift", () => {
+	const source = [
+		"protocol Greeter { func greet(name: String) -> String }",
+		"enum Color { case red, green }",
+		"struct Point {",
+		"    var x: Int",
+		"    func len() -> Int { return x }",
+		"}",
+		"class Base { func run() {} }",
+		"final class Impl: Greeter, Base {",
+		"    func greet(name: String) -> String { return Helper.make() }",
+		"}",
+		"extension Point { func extra() {} }",
+		"typealias Handler = (String) -> Void",
+		"func topLevel(_ x: Int) -> Int { return x + 1 }",
+		"let p = Point()",
+		"p.len()",
+		'Impl().greet(name: "x")',
+	].join("\n");
+
+	test("finds protocols, enums, structs, extensions and functions", async () => {
+		expect(await definitionsInSource(source, "swift")).toEqual([
+			{ name: "Greeter", kind: "interface", line: 1 },
+			{ name: "Color", kind: "enum", line: 2 },
+			{ name: "Point", kind: "class", line: 3 },
+			{ name: "Base", kind: "class", line: 7 },
+			{ name: "Impl", kind: "class", line: 8 },
+			{ name: "Point", kind: "class", line: 11 },
+			{ name: "Handler", kind: "type", line: 12 },
+			{ name: "topLevel", kind: "function", line: 13 },
+		]);
+	});
+
+	test("reads a call's last navigation suffix", async () => {
+		const tags = (await tagsInSource(source, "swift", { path: "Sources/App.swift" })).tags;
+
+		expect(definitions(tags)).toEqual([
+			"interface:Greeter",
+			"method:greet",
+			"enum:Color",
+			"class:Point",
+			"method:len",
+			"class:Base",
+			"method:run",
+			"class:Impl",
+			"method:greet",
+			"class:Point",
+			"method:extra",
+			"type:Handler",
+			"function:topLevel",
+		]);
+		expect(references(tags)).toEqual(["make", "Point", "len", "Impl", "greet"]);
+	});
+});
+
+describe("Lua", () => {
+	const source = [
+		"local M = {}",
+		"function M.add(a, b) return a + b end",
+		"function M:method(x) return self end",
+		"local function helper(x) return x end",
+		"function global_fn() return helper(1) end",
+		"M.add(1, 2)",
+		"M:method(3)",
+	].join("\n");
+
+	test("finds global, local, dotted and method functions", async () => {
+		expect(await definitionsInSource(source, "lua")).toEqual([
+			{ name: "add", kind: "function", line: 2 },
+			{ name: "method", kind: "function", line: 3 },
+			{ name: "helper", kind: "function", line: 4 },
+			{ name: "global_fn", kind: "function", line: 5 },
+		]);
+	});
+
+	test("reads dotted and colon calls by the name after the separator", async () => {
+		const tags = (await tagsInSource(source, "lua", { path: "src/init.lua" })).tags;
+
+		expect(definitions(tags)).toEqual(["function:add", "method:method", "function:helper", "function:global_fn"]);
+		expect(references(tags)).toEqual(["helper", "add", "method"]);
 	});
 });
 

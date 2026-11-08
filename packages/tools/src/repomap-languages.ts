@@ -1,15 +1,17 @@
 // Per-language tag rules for the repository map: which node types declare a
-// name, and where a call names the thing it reaches. Every grammar in
-// `@vscode/tree-sitter-wasm` exposes the same tree-sitter API but its own node
-// vocabulary, so the rules live beside each other here rather than in the walk
-// that applies them.
+// name, and where a call names the thing it reaches. Every grammar exposes the
+// same tree-sitter API but its own node vocabulary, so the rules live beside
+// each other here rather than in the walk that applies them.
 //
 // The TypeScript/JavaScript rules are the ones P1 shipped. Python, Go, Rust,
 // Java, C#, C++, Ruby, PHP, Bash and PowerShell follow the same shape (Aider's
 // tag queries where it has them) so the graph and the ranker do not need a
-// language concept of their own. CSS and INI are deliberately absent: a
-// stylesheet or an ini file has no call graph, only names, and listing those
-// names would spend the token budget without ranking anything.
+// language concept of their own. Zig, Kotlin, Swift and Lua use grammars built
+// from source and vendored under `packages/tools/wasm`, because the grammar
+// bundle the other thirteen come from does not ship them. CSS and INI are
+// deliberately absent: a stylesheet or an ini file has no call graph, only
+// names, and listing those names would spend the token budget without ranking
+// anything.
 //
 // Long-form design notes: docs/dev/repomap.md (P3).
 import type { Node as SyntaxNode } from "web-tree-sitter";
@@ -28,7 +30,11 @@ export type RepoMapLanguage =
 	| "ruby"
 	| "php"
 	| "bash"
-	| "powershell";
+	| "powershell"
+	| "zig"
+	| "kotlin"
+	| "swift"
+	| "lua";
 
 export const REPO_MAP_LANGUAGES: readonly RepoMapLanguage[] = [
 	"typescript",
@@ -44,6 +50,10 @@ export const REPO_MAP_LANGUAGES: readonly RepoMapLanguage[] = [
 	"php",
 	"bash",
 	"powershell",
+	"zig",
+	"kotlin",
+	"swift",
+	"lua",
 ];
 
 /**
@@ -84,6 +94,11 @@ const REPO_MAP_CODE_EXTENSIONS = [
 	"ps1",
 	"psm1",
 	"psd1",
+	"zig",
+	"kt",
+	"kts",
+	"swift",
+	"lua",
 ] as const;
 
 /** The files a map considers. Shared with the small-repository threshold, which must count the same set. */
@@ -139,6 +154,16 @@ export function repoMapLanguageFor(path: string): RepoMapLanguage | null {
 		case ".psm1":
 		case ".psd1":
 			return "powershell";
+		case ".zig":
+			return "zig";
+		// `.kts` is a Kotlin script; the same grammar parses it.
+		case ".kt":
+		case ".kts":
+			return "kotlin";
+		case ".swift":
+			return "swift";
+		case ".lua":
+			return "lua";
 		default:
 			return null;
 	}
@@ -791,6 +816,211 @@ function powershellReference(node: SyntaxNode): string | null {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Zig
+// ---------------------------------------------------------------------------
+
+/**
+ * `const Point = struct { … }`: the container node is the value, and the
+ * declaration that names it has no `name` field, so the name is the first
+ * identifier child.
+ */
+const ZIG_CONTAINER_DECLARATIONS: Record<string, RepoMapTagDefinitionKind> = {
+	enum_declaration: "enum",
+	struct_declaration: "class",
+	union_declaration: "class",
+	opaque_declaration: "class",
+};
+
+const ZIG_CONTAINER_PARENTS = new Set(Object.keys(ZIG_CONTAINER_DECLARATIONS));
+
+function zigDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
+	if (node.type === "function_declaration") {
+		const name = node.childForFieldName("name");
+		if (!name) return null;
+		const parent = node.parent;
+		return { name: name.text, kind: parent && ZIG_CONTAINER_PARENTS.has(parent.type) ? "method" : "function" };
+	}
+	if (node.type !== "variable_declaration") return null;
+	const container = node.namedChildren.find((child) => child && ZIG_CONTAINER_DECLARATIONS[child.type]);
+	if (!container) return null;
+	const kind = ZIG_CONTAINER_DECLARATIONS[container.type];
+	const name = node.namedChildren.find((child) => child?.type === "identifier");
+	return kind && name ? { name: name.text, kind } : null;
+}
+
+/** `add()`, `Point.init()` and the `Point{ … }` initializer all reach one name. */
+function zigReference(node: SyntaxNode): string | null {
+	switch (node.type) {
+		case "call_expression": {
+			const fn = node.childForFieldName("function");
+			if (!fn) return null;
+			if (fn.type === "identifier") return fn.text;
+			if (fn.type === "field_expression") return fn.childForFieldName("member")?.text ?? null;
+			return null;
+		}
+		case "struct_initializer": {
+			const type = node.namedChildren.find((child) => child?.type === "identifier");
+			return type ? type.text : null;
+		}
+		default:
+			return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Kotlin
+// ---------------------------------------------------------------------------
+
+/** The first direct child of one node type, not a child nested in a parameter. */
+function kotlinDirectChild(node: SyntaxNode, type: string): SyntaxNode | null {
+	return node.namedChildren.find((child) => child?.type === type) ?? null;
+}
+
+function kotlinDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
+	switch (node.type) {
+		case "class_declaration": {
+			const name = kotlinDirectChild(node, "type_identifier");
+			if (!name) return null;
+			// `interface` and `enum` are anonymous tokens, and an enum also has an
+			// `enum_class_body`; both spellings are checked because either alone
+			// would miss one form.
+			const has = (type: string) => node.children.some((child) => child?.type === type);
+			const kind: RepoMapTagDefinitionKind = has("interface")
+				? "interface"
+				: has("enum") || kotlinDirectChild(node, "enum_class_body")
+					? "enum"
+					: "class";
+			return { name: name.text, kind };
+		}
+		case "object_declaration": {
+			const name = kotlinDirectChild(node, "type_identifier");
+			return name ? { name: name.text, kind: "class" } : null;
+		}
+		case "type_alias": {
+			const name = kotlinDirectChild(node, "type_identifier");
+			return name ? { name: name.text, kind: "type" } : null;
+		}
+		case "function_declaration": {
+			// An extension function (`fun String.ext()`) has a `receiver_type`
+			// beside the name; the direct `simple_identifier` is still the name.
+			const name = kotlinDirectChild(node, "simple_identifier");
+			if (!name) return null;
+			const parent = node.parent;
+			const kind: RepoMapTagDefinitionKind =
+				parent?.type === "class_body" || parent?.type === "object_declaration" ? "method" : "function";
+			return { name: name.text, kind };
+		}
+		default:
+			return null;
+	}
+}
+
+/** `f()`, `User("…")`, `obj.f()` and `foo().f()` reach one name. */
+function kotlinCallee(node: SyntaxNode): string | null {
+	if (node.type === "simple_identifier") return node.text;
+	if (node.type !== "navigation_expression") return null;
+	const suffix = node.namedChildren[node.namedChildren.length - 1];
+	if (suffix?.type !== "navigation_suffix") return null;
+	const name = suffix.namedChildren.find((child) => child?.type === "simple_identifier");
+	return name ? name.text : null;
+}
+
+function kotlinReference(node: SyntaxNode): string | null {
+	if (node.type !== "call_expression") return null;
+	const fn = node.namedChildren[0];
+	return fn ? kotlinCallee(fn) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Swift
+// ---------------------------------------------------------------------------
+
+/** A declaration's name is a `type_identifier`, or a `user_type` for `extension`. */
+function swiftTypeName(node: SyntaxNode | null): string | null {
+	if (!node) return null;
+	if (node.type === "type_identifier") return node.text;
+	if (node.type === "user_type") return kotlinDirectChild(node, "type_identifier")?.text ?? null;
+	return null;
+}
+
+function swiftDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
+	switch (node.type) {
+		case "class_declaration": {
+			const name = swiftTypeName(node.childForFieldName("name"));
+			if (!name) return null;
+			// `enum`, `struct`, `class`, `actor` and `extension` are all a
+			// `class_declaration`; only enums get their own kind here.
+			const isEnum = node.children.some((child) => child?.type === "enum");
+			return { name, kind: isEnum ? "enum" : "class" };
+		}
+		case "protocol_declaration": {
+			const name = swiftTypeName(node.childForFieldName("name"));
+			return name ? { name, kind: "interface" } : null;
+		}
+		case "typealias_declaration": {
+			const name = swiftTypeName(node.childForFieldName("name"));
+			return name ? { name, kind: "type" } : null;
+		}
+		case "function_declaration":
+		case "protocol_function_declaration": {
+			const name = node.childForFieldName("name");
+			if (!name) return null;
+			const parent = node.parent;
+			const kind: RepoMapTagDefinitionKind =
+				parent?.type === "class_body" || parent?.type === "protocol_body" ? "method" : "function";
+			return { name: name.text, kind };
+		}
+		default:
+			return null;
+	}
+}
+
+/** `Helper.make()` spells the callee in a `navigation_suffix`. */
+function swiftCallee(node: SyntaxNode): string | null {
+	if (node.type === "simple_identifier") return node.text;
+	if (node.type !== "navigation_expression") return null;
+	return node.childForFieldName("suffix")?.childForFieldName("suffix")?.text ?? null;
+}
+
+function swiftReference(node: SyntaxNode): string | null {
+	if (node.type !== "call_expression") return null;
+	const fn = node.namedChildren[0];
+	return fn ? swiftCallee(fn) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Lua
+// ---------------------------------------------------------------------------
+
+/** `f`, `M.f` and `M:f` all name the function after the separator. */
+function luaName(node: SyntaxNode | null): string | null {
+	if (!node) return null;
+	switch (node.type) {
+		case "identifier":
+			return node.text;
+		case "dot_index_expression":
+			return node.childForFieldName("field")?.text ?? null;
+		case "method_index_expression":
+			return node.childForFieldName("method")?.text ?? null;
+		default:
+			return null;
+	}
+}
+
+function luaDefinition(node: SyntaxNode): RepoMapTagDefinition | null {
+	if (node.type !== "function_declaration") return null;
+	const name = node.childForFieldName("name");
+	const text = luaName(name);
+	if (!text) return null;
+	return { name: text, kind: name?.type === "method_index_expression" ? "method" : "function" };
+}
+
+function luaReference(node: SyntaxNode): string | null {
+	if (node.type !== "function_call") return null;
+	return luaName(node.childForFieldName("name"));
+}
+
 function declarationTable(table: Record<string, RepoMapTagDefinitionKind>): RepoMapTagRules["definition"] {
 	return (node) => {
 		const kind = table[node.type];
@@ -820,6 +1050,10 @@ const powershellRules: RepoMapTagRules = {
 	definition: powershellDefinition,
 	reference: powershellReference,
 };
+const zigRules: RepoMapTagRules = { definition: zigDefinition, reference: zigReference };
+const kotlinRules: RepoMapTagRules = { definition: kotlinDefinition, reference: kotlinReference };
+const swiftRules: RepoMapTagRules = { definition: swiftDefinition, reference: swiftReference };
+const luaRules: RepoMapTagRules = { definition: luaDefinition, reference: luaReference };
 
 export const REPO_MAP_TAG_RULES: Record<RepoMapLanguage, RepoMapTagRules> = {
 	typescript: javascriptRules,
@@ -835,4 +1069,8 @@ export const REPO_MAP_TAG_RULES: Record<RepoMapLanguage, RepoMapTagRules> = {
 	php: phpRules,
 	bash: bashRules,
 	powershell: powershellRules,
+	zig: zigRules,
+	kotlin: kotlinRules,
+	swift: swiftRules,
+	lua: luaRules,
 };
