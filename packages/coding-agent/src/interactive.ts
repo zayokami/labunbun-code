@@ -103,6 +103,7 @@ import {
 	AUTO_THEME_NAME,
 	describeEditor,
 	editorShadowNotice,
+	getTokenUnit,
 	installStdinTrace,
 	liveOutputLines,
 	mountRepl,
@@ -115,6 +116,9 @@ import {
 	resolveBuiltInTheme,
 	resolveEditingMode,
 	ruleSpecifierFor,
+	setTokenUnit,
+	TOKEN_UNITS,
+	type TokenUnit,
 	type UiStartupNote,
 } from "@labunbun/tui";
 import { activitySummaryLine } from "./activity-report.ts";
@@ -3558,6 +3562,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/think", `Show or set how hard the model thinks: /think [${THINKING_LEVELS.join("|")}]`],
 		["/todo", "Show the full task board: every task, its status, owner, blockers, and description"],
+		["/tokens", "Show or switch the token unit: /tokens [k|mtok] — with no argument it toggles"],
 		["/tree", "Show the session branch tree"],
 		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
 		[
@@ -5464,6 +5469,8 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					return true;
 			}
 		}
+		case "/tokens":
+			return applyTokenUnitCommand(ctx, text);
 		case "/vim":
 			return applyEditorCommand(ctx, text, "vimMode");
 		case "/emacs":
@@ -5597,6 +5604,41 @@ function applyYoloCommand(ctx: AppCommandContext, text: string): void {
 			`YOLO on · classifier and approvals off · sandbox ${session.sandbox} · deny rules still apply`,
 		);
 	})();
+}
+
+/**
+ * `/tokens`: which unit the interface writes token counts in.
+ *
+ * The unit is process-wide state in the formatter (`@labunbun/tui/format`),
+ * not a field of the session, so the live toggle is `setTokenUnit` and the
+ * settings file is only how the choice survives the run. With no argument the
+ * command toggles from what is actually in effect rather than from the file —
+ * the same reason `/vim` does: a session that started in `mtok` means the
+ * next press is `k`, whether or not the last write landed.
+ */
+function applyTokenUnitCommand(ctx: AppCommandContext, text: string): boolean {
+	const arg = text.split(/\s+/)[1]?.toLowerCase();
+	if (arg && !(TOKEN_UNITS as readonly string[]).includes(arg)) {
+		pushInfo(ctx.handle, "Usage: /tokens [k|mtok] — with no argument it toggles");
+		return true;
+	}
+	const next: TokenUnit = arg ? (arg as TokenUnit) : getTokenUnit() === "k" ? "mtok" : "k";
+	setTokenUnit(next);
+	const said =
+		next === "mtok"
+			? "Token unit: MTok — counts of a million and up show as 849.9 MTok"
+			: "Token unit: k — 1234 shows as 1.2k";
+	try {
+		writeUserSettingsPatch({ tokenUnit: next }, ctx.home);
+	} catch (error) {
+		// In effect for this session either way; only the save failed.
+		const why = error instanceof Error ? error.message : String(error);
+		pushInfo(ctx.handle, `${said} — not saved: ${why}`);
+		return true;
+	}
+	const shadowed = shadowedChoiceNotice(ctx.loadedSettings, "tokenUnit", (path) => shortenHome(path, ctx.home));
+	pushInfo(ctx.handle, `${said}${shadowed ? ` (${shadowed})` : ""}`);
+	return true;
 }
 
 /**

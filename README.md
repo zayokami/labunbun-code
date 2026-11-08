@@ -642,6 +642,7 @@ Use these commands in the terminal.
 | `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
 | `/memory [rules\|project]` | Open your memory files in your editor. Without an editor, print their paths. |
 | `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |
+| `/tokens [k\|mtok]` | Show or change the unit of the token counts. The value `mtok` writes counts of one million and above as `849.9 MTok`. Without an argument, the command toggles the unit. |
 | `/theme [name\|auto]` | Show the themes, or change the theme. |
 | `/vim [on\|off]` | Turn vim editing on or off. |
 | `/emacs [on\|off]` | Turn Emacs editing on or off. |

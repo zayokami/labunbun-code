@@ -599,7 +599,7 @@ export function formatIgnoredKeysNotice(ignored: IgnoredSettingsKey[]): string |
 }
 
 /** The settings a command persists for the user, which another tier can override. */
-export type UserChoiceKey = "theme" | "model" | "vimMode" | "emacsMode" | "gamepad" | "thinkingLevel";
+export type UserChoiceKey = "theme" | "model" | "vimMode" | "emacsMode" | "gamepad" | "thinkingLevel" | "tokenUnit";
 
 /** Tiers that outrank the user's own file, highest first. */
 const OVERRIDING_TIERS = ["flag", "policy", "local", "project"] as const;
