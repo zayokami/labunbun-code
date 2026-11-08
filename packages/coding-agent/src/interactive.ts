@@ -323,6 +323,7 @@ import {
 import { createShellPassthrough } from "./shell-passthrough.ts";
 import { createSkillTool } from "./skill-tool.ts";
 import {
+	adoptApprovedSkills,
 	loadSkillsWithNotes,
 	type Skill,
 	skillDiscoveryBlock,
@@ -1554,8 +1555,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	mcpToolsSeededAtBirth = mcpConnections.length > 0;
 
 	// The skill discovery block is built once at startup and shared by the main
-	// prompt and by every subagent's context block, so the two see one list.
-	const skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
+	// prompt and by every subagent's context block, so the two see one list. It
+	// is reassigned by `/agents approve`: the block is a snapshot, and an adopted
+	// project skill has to reach both readers without a restart.
+	let skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
 	// The repository's shape, when it fits the prompt. Computed at startup and
 	// replaced by `/map-refresh`: the section is part of the live system prompt,
 	// so a refresh has to rebuild the prompt rather than only the screen. A
@@ -2515,6 +2518,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				agentDefinitions,
 				withheldAgents,
 				withheldSkills,
+				// The approved skills join the array the Skill tool holds and the
+				// block both prompts were built from. Rebuilding the block here — at
+				// the approval, not only at startup — is what lets the model use a
+				// skill the user just trusted, in this session.
+				adoptSkills: (adopted) => {
+					adoptApprovedSkills(skills, adopted);
+					skillsBlock = skillDiscoveryBlock(
+						skills,
+						skillDiscoveryBudgetChars((sessionRef?.model ?? model).contextWindow),
+					);
+					sessionRef?.setSystemPrompt(buildPrompt(memoryText));
+				},
 				withheldMemory,
 				withheldStyles,
 				workflowDefinitions,
@@ -3354,6 +3369,14 @@ interface AppCommandContext {
 	withheldAgents: AgentDefinition[];
 	withheldSkills: Skill[];
 	/**
+	 * Load adopted project skills into the live session: the array the Skill tool
+	 * closes over, the discovery block, and — since the block is part of the
+	 * prompt — a rebuilt system prompt. `/agents approve` is the only caller. A
+	 * hand-built context may omit it; the slash-command registry is then the only
+	 * surface that learns about the approval.
+	 */
+	adoptSkills?(skills: Skill[]): void;
+	/**
 	 * The memory files the gate is holding back (`withheldProjectMemoryFiles`).
 	 *
 	 * Optional because a context assembled by hand (a test) has no memory walk
@@ -3795,7 +3818,20 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					pushInfo(ctx.handle, "Nothing pending: this project's definitions are already loaded.");
 					return true;
 				}
-				approveProjectDefinitions(ctx.cwd, kinds, ctx.home);
+				try {
+					approveProjectDefinitions(ctx.cwd, kinds, ctx.home);
+				} catch (error) {
+					// The ledger write is the approval's only record: if it fails, the
+					// decision did not happen, so nothing is spliced and every file stays
+					// withheld. Throwing out of a command handler would take the REPL
+					// down (there is no catch between here and Ink's input dispatch), so
+					// the failure is reported where the user is looking instead.
+					pushInfo(
+						ctx.handle,
+						`Approval failed, so nothing was loaded: ${error instanceof Error ? error.message : String(error)}`,
+					);
+					return true;
+				}
 				const agents = ctx.withheldAgents.splice(0, ctx.withheldAgents.length);
 				ctx.agentDefinitions.push(...agents);
 				// Pushed into the registry the dispatcher reads rather than rebuilt: that
@@ -3804,7 +3840,19 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// catches up on the next start — a restart is a smaller price than
 				// rebuilding the mounted screen for a once-per-repository decision.
 				const adopted = ctx.withheldSkills.splice(0, ctx.withheldSkills.length);
-				ctx.commands.push(...skillsAsCommands(adopted));
+				// A project skill and a user skill can share a name, and a restart
+				// resolves that in the project's favour. The live registry has to agree:
+				// `findCommand` returns the first match, so appending would leave the
+				// user's body answering while the confirmation claimed the project's.
+				for (const command of skillsAsCommands(adopted)) {
+					const existing = ctx.commands.findIndex((candidate) => candidate.name === command.name);
+					if (existing >= 0) ctx.commands[existing] = command;
+					else ctx.commands.push(command);
+				}
+				// The Skill tool and the `# Skills` block read the startup list, which is
+				// a different array from `commands`. Handing the adopted skills to the
+				// live session reaches those consumers too, and rebuilds the prompt.
+				ctx.adoptSkills?.(adopted);
 				// Memory and styles are spliced like the others so a second approve
 				// has nothing pending, but they cannot join them in being "now
 				// loaded": both are read into the system prompt, and this session's

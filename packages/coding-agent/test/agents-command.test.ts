@@ -16,7 +16,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, sanitizeCwd } from "@labunbun/agent";
+import { AgentSession, sanitizeCwd, type ToolCallContext } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { expandPromptCommand, findCommand } from "../src/commands.ts";
@@ -24,7 +24,8 @@ import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts"
 import { withheldProjectMemoryFiles } from "../src/memory.ts";
 import { loadOutputStyles, withheldProjectOutputStyles } from "../src/output-styles.ts";
 import { loadTrustedDefinitionKinds } from "../src/project-trust.ts";
-import { loadSkills, skillsAsCommands, withheldProjectSkills } from "../src/skills.ts";
+import { createSkillTool } from "../src/skill-tool.ts";
+import { adoptApprovedSkills, loadSkills, type Skill, skillsAsCommands, withheldProjectSkills } from "../src/skills.ts";
 import { loadAgentDefinitions, withheldProjectAgents } from "../src/subagents.ts";
 import { loadWorkflowDefinitions, withheldProjectWorkflows } from "../src/workflow-definitions.ts";
 
@@ -50,6 +51,7 @@ function harness(): {
 	lines: () => string;
 	home: string;
 	cwd: string;
+	skills: Skill[];
 } {
 	const home = mkdtempSync(join(tmpdir(), "lbb-agents-home-"));
 	const cwd = mkdtempSync(join(tmpdir(), "lbb-agents-cwd-"));
@@ -73,12 +75,19 @@ function harness(): {
 		baseRules: [],
 		sessionRules: [],
 		sessionStore: () => undefined,
+		// The mounted app hands the adopted skills to the live array the Skill
+		// tool closes over; a hand-built context has to do the same or the
+		// test can only see the slash-command half of an approval.
+		adoptSkills: (adopted: Skill[]) => {
+			adoptApprovedSkills(skills, adopted);
+		},
 	} as unknown as AppCommandContext;
 
 	return {
 		ctx,
 		home,
 		cwd,
+		skills,
 		lines: () =>
 			store
 				.get()
@@ -91,6 +100,18 @@ function harness(): {
 /** The file the approval ledger is supposed to land in — spelled out, not recomputed. */
 function ledgerPath(home: string, cwd: string): string {
 	return join(home, ".labunbun", "projects", sanitizeCwd(cwd), "trusted-definitions.json");
+}
+
+/** The Skill tool reads no part of this context; `Tool.call` still requires one. */
+function callCtx(): ToolCallContext {
+	return {
+		callId: "t1",
+		signal: new AbortController().signal,
+		cwd: process.cwd(),
+		sandbox: "workspace-write",
+		network: { access: "enabled", domains: [] },
+		onUpdate: () => {},
+	};
 }
 
 describe("/agents", () => {
@@ -149,6 +170,77 @@ describe("/agents", () => {
 		expect(h.ctx.withheldAgents).toEqual([]);
 		expect(h.ctx.withheldSkills).toEqual([]);
 		expect(h.lines()).toContain("1 agent definition, 1 skill now loaded");
+	});
+
+	test("approve loads the skill into the Skill tool, not only the slash commands", async () => {
+		const h = harness();
+		plant(join(h.cwd, ".labunbun", "skills", "deploy", "SKILL.md"), "---\nname: deploy\n---\nPROJECT-SKILL-BODY\n");
+		h.ctx.commands = skillsAsCommands(loadSkills(h.cwd, h.home));
+		h.ctx.withheldSkills = withheldProjectSkills(h.cwd, h.home);
+		const skillTool = createSkillTool(h.skills);
+
+		// Before the decision the tool names the session's list, and deploy is not on it.
+		const before = await skillTool.call({ name: "deploy" }, callCtx());
+		expect(before.isError).toBe(true);
+		expect((before.content[0] as { text: string }).text).toContain("No skills are available");
+
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+
+		// The array the Skill tool closes over is the one the approval fed. Without
+		// `adoptSkills` the registry learned the command and the model could not
+		// invoke the skill until a restart, which the confirmation never mentioned.
+		expect(h.skills.map((skill) => skill.name)).toEqual(["deploy"]);
+		const after = await skillTool.call({ name: "deploy" }, callCtx());
+		expect(after.isError).toBeFalsy();
+		expect((after.content[0] as { text: string }).text).toContain("PROJECT-SKILL-BODY");
+	});
+
+	test("a project skill takes a same-named user skill's place at both invocation paths", async () => {
+		const h = harness();
+		plant(join(h.home, ".labunbun", "skills", "review", "SKILL.md"), "---\nname: review\n---\nUSER-BODY\n");
+		plant(join(h.cwd, ".labunbun", "skills", "review", "SKILL.md"), "---\nname: review\n---\nPROJECT-BODY\n");
+		// The startup state: the user tier is live, the project copy is withheld.
+		h.skills.push(...loadSkills(h.cwd, h.home));
+		h.ctx.commands = skillsAsCommands(h.skills);
+		h.ctx.withheldSkills = withheldProjectSkills(h.cwd, h.home);
+		const skillTool = createSkillTool(h.skills);
+
+		expect(expandPromptCommand(h.ctx.commands, "/skill-review")).toContain("USER-BODY");
+		expect((await skillTool.call({ name: "review" }, callCtx())).content[0]).toMatchObject({
+			text: expect.stringContaining("USER-BODY"),
+		});
+
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+
+		// A restart resolves a collision in the project's favour. The live state has
+		// to agree in both places: appending would leave `find` on the user's body
+		// while the slash command answered with the project's, and the confirmation
+		// would claim a load that only one path could see.
+		expect(h.ctx.commands.filter((command) => command.name === "skill-review")).toHaveLength(1);
+		expect(expandPromptCommand(h.ctx.commands, "/skill-review")).toContain("PROJECT-BODY");
+		expect(h.skills.map((skill) => skill.name)).toEqual(["review"]);
+		const invoked = await skillTool.call({ name: "review" }, callCtx());
+		expect((invoked.content[0] as { text: string }).text).toContain("PROJECT-BODY");
+		expect((invoked.content[0] as { text: string }).text).not.toContain("USER-BODY");
+	});
+
+	test("an approval whose ledger write fails says so and leaves everything withheld", () => {
+		const h = harness();
+		plant(join(h.cwd, ".labunbun", "skills", "deploy", "SKILL.md"), "---\nname: deploy\n---\nDeploy body.\n");
+		h.ctx.withheldSkills = withheldProjectSkills(h.cwd, h.home);
+		// `~/.labunbun` is a file, so the ledger's parent cannot be created and
+		// mkdir -p fails. Before the catch this error left `/agents approve` and
+		// took the REPL's line with it: the user was asked to trust a repository
+		// and the command answering crashed instead of recording or refusing.
+		writeFileSync(join(h.home, ".labunbun"), "not a directory", "utf8");
+
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+
+		expect(h.lines()).toContain("Approval failed, so nothing was loaded");
+		// Nothing was spliced: no decision was recorded, so the definitions are
+		// still pending and a later approval can still grant them.
+		expect(h.ctx.withheldSkills).toHaveLength(1);
+		expect(h.ctx.commands.some((command) => command.name === "skill-deploy")).toBe(false);
 	});
 
 	test("approve records memory with the rest, and the confirmation asks for a restart", () => {

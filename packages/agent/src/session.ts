@@ -761,6 +761,15 @@ export class AgentSession {
 				if (toolCalls.length === 0) {
 					await this.#emit({ type: "turn_end", message: assistant, toolResults: [] });
 					turns++;
+					// The terminal turn can be the one a listener ends: the budget
+					// gate aborts this session from its own turn_end handler. The
+					// tool-call branch below has this check; without it here the run
+					// reported "completed" for a turn the gate had just stopped, and
+					// a caller holding a schema retry spent one more request.
+					if (this.#abortController?.signal.aborted) {
+						reason = "aborted";
+						break;
+					}
 					const followUpText = this.#followUp[0];
 					if (followUpText !== undefined) {
 						const followUpMsg = userMessage(await this.#userText(followUpText));

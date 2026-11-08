@@ -180,6 +180,20 @@ describe("parseJsonValue", () => {
 	test("a fence without a language tag works too", () => {
 		expect(parseJsonValue('```\n{"a": true}\n```')).toEqual({ value: { a: true } });
 	});
+
+	test("two distinct values in prose are ambiguous, not a first-match guess", () => {
+		// An example then the answer: silently returning the example was the bug.
+		const parsed = parseJsonValue('For example an answer might be {"n": 0}, but my answer is {"n": 7}.');
+		expect(parsed).toEqual({
+			error:
+				"the answer contained more than one JSON value, so which one was meant is ambiguous; " +
+				"reply with only the JSON value",
+		});
+	});
+
+	test("two equal values are one value", () => {
+		expect(parseJsonValue('{"a":1} and again {"a":1}')).toEqual({ value: { a: 1 } });
+	});
 });
 
 describe("structuredAnswerInstruction", () => {

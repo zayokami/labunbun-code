@@ -35,7 +35,7 @@ import { isProjectTierTrusted } from "./project-trust.ts";
 import { subagentSourceLabel } from "./subagent-commands.ts";
 import { SUBAGENT_END_KIND, SUBAGENT_START_KIND } from "./subagent-ledger.ts";
 import { MAX_RETAINED_SUBAGENTS, type SubagentHandle, SubagentRegistry } from "./subagent-registry.ts";
-import { parseJsonValue, structuredAnswerInstruction, validateWorkflowSchema } from "./workflow-schema.ts";
+import { parseJsonCandidates, structuredAnswerInstruction, validateWorkflowSchema } from "./workflow-schema.ts";
 
 export interface AgentDefinition {
 	agentType: string;
@@ -455,6 +455,10 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		signal: AbortSignal,
 		events: string[],
 	): Promise<AgentEndReason> => {
+		// A stopped handle is never run again. Its callers check this too, but a
+		// stop can land between that check and this entry, and reviving the handle
+		// here would undo the never-resume verdict the stop recorded.
+		if (handle.state === "stopped") return "aborted";
 		const unsubscribe = handle.session.on((event) => {
 			if (event.type === "tool_execution_end") {
 				events.push(`${event.toolName}: ${event.result.isError ? "error" : "ok"}`);
@@ -480,7 +484,14 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			}
 		});
 		const onAbort = () => handle.session.abort();
+		// A continuation or a schema retry re-enters this same handle. The last
+		// run's verdict is not this run's: left in place, a stop that lands during
+		// the new run reports the old "completed" through `subagentStatus`, and a
+		// cancelled continuation reads as finished work.
 		handle.state = "live";
+		handle.endReason = undefined;
+		handle.finishedAt = undefined;
+		handle.endedAt = 0;
 		signal.addEventListener("abort", onAbort, { once: true });
 		// A throw out of prompt() is a failure ending too: the registry hears
 		// about every end, not only the ones that come back politely.
@@ -514,16 +525,30 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 	};
 
 	/**
-	 * Read a structured answer out of the final prose: parse, then check. Both
-	 * failures mean the same thing to the caller — the run produced no usable
-	 * object — and the message is worded for the retry that follows it.
+	 * Read a structured answer out of the final prose: parse every candidate,
+	 * then check. Both failures mean the same thing to the caller — the run
+	 * produced no usable object — and the message is worded for the retry that
+	 * follows it. A prose example and the real answer can both be valid JSON, so
+	 * the schema is what chooses: exactly one candidate that validates is the
+	 * answer, and two are reported as ambiguous rather than silently taking the
+	 * example that came first.
 	 */
 	const readStructured = (schema: Record<string, unknown>, text: string): { value?: unknown; error?: string } => {
-		const parsed = parseJsonValue(text);
-		if ("error" in parsed && typeof parsed.error === "string") return { error: parsed.error };
-		const problems = validateWorkflowSchema(schema, (parsed as { value: unknown }).value);
-		if (problems.length > 0) return { error: problems.slice(0, 8).join("; ") };
-		return { value: (parsed as { value: unknown }).value };
+		const parsed = parseJsonCandidates(text);
+		if ("error" in parsed) return { error: parsed.error };
+		const matches = parsed.values.filter((value) => validateWorkflowSchema(schema, value).length === 0);
+		if (matches.length === 1) return { value: matches[0] };
+		if (matches.length > 1) {
+			return {
+				error:
+					"the answer contained more than one JSON value that matches the schema, so which one was meant " +
+					"is ambiguous; reply with only the JSON value",
+			};
+		}
+		// Nothing satisfied the schema: the first candidate's problems are the
+		// concrete complaint the retry needs.
+		const problems = validateWorkflowSchema(schema, parsed.values[0]);
+		return { error: problems.slice(0, 8).join("; ") };
 	};
 
 	/**
@@ -790,29 +815,47 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 				// hide a correctable mistake. A second failure is reported, not
 				// retried again — the caller decided how much one answer is worth.
 				let attempt = readStructured(run.outputSchema, finalReport(subSession));
-				if (attempt.error !== undefined && mayAnswer()) {
-					const retryPrompt = [
-						`Your previous answer did not satisfy the required JSON schema: ${attempt.error}.`,
-						"Reply again with ONLY the JSON value that matches this schema — no prose, no Markdown fences:",
-						JSON.stringify(run.outputSchema),
-					].join("\n");
-					reason = await runPrompt(handle, retryPrompt, signal, events);
-					attempt = readStructured(run.outputSchema, finalReport(subSession));
-				}
-				if (mayAnswer()) {
-					if (attempt.error !== undefined) structuredError = attempt.error;
-					else structured = attempt.value;
+				// The retry is another request on this seat, so it goes through the
+				// same gate the spawn and SendMessage doors use: a concurrent run
+				// that pushed the seat over its ceiling must not be handed one more
+				// request just because this answer needs correcting.
+				const refusal = attempt.error !== undefined && seat.role ? ctx.budgetGate?.(seat.role) : undefined;
+				if (refusal) {
+					ctx.report?.(refusal);
+					structuredError = attempt.error;
+				} else {
+					if (attempt.error !== undefined && mayAnswer()) {
+						const retryPrompt = [
+							`Your previous answer did not satisfy the required JSON schema: ${attempt.error}.`,
+							"Reply again with ONLY the JSON value that matches this schema — no prose, no Markdown fences:",
+							JSON.stringify(run.outputSchema),
+						].join("\n");
+						reason = await runPrompt(handle, retryPrompt, signal, events);
+						attempt = readStructured(run.outputSchema, finalReport(subSession));
+					}
+					if (mayAnswer()) {
+						if (attempt.error !== undefined) structuredError = attempt.error;
+						else structured = attempt.value;
+					}
 				}
 			}
 		} finally {
-			store?.appendCustom(SUBAGENT_END_KIND, {
-				sidechainId,
-				reason,
-				toolCalls: events,
-				messages: subSession.messages.length,
-				notes,
-				report: finalReport(subSession),
-			});
+			try {
+				store?.appendCustom(SUBAGENT_END_KIND, {
+					sidechainId,
+					reason,
+					toolCalls: events,
+					messages: subSession.messages.length,
+					notes,
+					report: finalReport(subSession),
+				});
+			} finally {
+				// `runPrompt` finishes the handle in its own finally, but a start
+				// write that throws never reaches it. Without this the handle would
+				// stay live forever with no run behind it: listed as running,
+				// steered into, and never evicted.
+				if (handle.state === "live") registry.finish(handle, reason);
+			}
 		}
 
 		const report = finalReport(subSession);

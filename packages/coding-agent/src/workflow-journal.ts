@@ -336,16 +336,21 @@ function repairTornJournal(path: string): void {
 	if (text === "" || text.endsWith("\n")) return;
 	const lastNewline = text.lastIndexOf("\n");
 	const tail = text.slice(lastNewline + 1);
+	let repaired: string | undefined;
 	try {
 		const parsed = JSON.parse(tail) as unknown;
-		if (parsed !== null && typeof parsed === "object") {
-			writeFileSync(path, `${text}\n`, "utf8");
-			return;
-		}
+		if (parsed !== null && typeof parsed === "object") repaired = `${text}\n`;
 	} catch {
 		// A torn line: fall through to the cut.
 	}
-	writeFileSync(path, text.slice(0, lastNewline + 1), "utf8");
+	repaired ??= text.slice(0, lastNewline + 1);
+	// Rewrite through a sibling temp file and rename it into place: writeFileSync
+	// truncates before writing, so a crash between the two would destroy the
+	// records the repair exists to preserve. The rename either swaps the whole
+	// file in or leaves the original untouched.
+	const temp = `${path}.repair-${process.pid}`;
+	writeFileSync(temp, repaired, "utf8");
+	renameSync(temp, path);
 }
 
 function readJournal(path: string): WorkflowJournalEntry[] {

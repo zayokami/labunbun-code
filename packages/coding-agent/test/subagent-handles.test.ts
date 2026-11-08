@@ -386,6 +386,49 @@ describe("the lifecycle record", () => {
 		expect(subagentStatus(listed[0] ?? { state: "live" })).toBe("completed");
 	});
 
+	test("a stop during a continuation reads as cancelled, not the first run's completed", async () => {
+		// runPrompt re-enters the same handle for a continuation. The previous
+		// run's endReason stayed behind, so a stop that landed here reported the
+		// old "completed" through subagentStatus — a cancelled run listed as
+		// finished work, and not offered by /subagents retry.
+		const registry = new SubagentRegistry();
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-recont-")),
+			mkdtempSync(join(tmpdir(), "lbb-recont-home-")),
+		);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const faux = fauxProvider([
+			{ text: "R1" },
+			{ toolCalls: [{ name: "gate", arguments: {} }] },
+			{ text: "never reached" },
+		]);
+		const [task, sendMessage, , control] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: () => [gatedTool(() => entered.resolve(), release.promise)],
+			definitions: () => [],
+			store: () => store,
+			registry,
+		});
+
+		const first = await task.call({ description: "x", prompt: "go" }, callCtx());
+		const handle = registry.list()[0];
+		if (!handle) throw new Error("no handle registered");
+		expect(subagentStatus(handle)).toBe("completed");
+
+		const call = sendMessage.call({ sidechain_id: idOf(first), message: "keep going" }, callCtx());
+		await entered.promise;
+		control.stop(handle);
+		release.resolve();
+		const result = await call;
+
+		expect(text(result)).toContain("[subagent ended: aborted]");
+		expect(handle.state).toBe("stopped");
+		expect(handle.endReason).toBeUndefined();
+		expect(subagentStatus(handle)).toBe("cancelled");
+	});
+
 	test("a stop while running reads as cancelled, not completed", async () => {
 		const registry = new SubagentRegistry();
 		const store = SessionStore.startNew(

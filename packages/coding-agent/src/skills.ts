@@ -227,6 +227,25 @@ export function loadSkills(cwd: string, home = homedir(), options: SkillLoadOpti
 	return loadSkillsWithNotes(cwd, home, options).skills;
 }
 
+/**
+ * Adopt approved project skills into the live array, with the precedence
+ * `loadSkills` applies on the next start.
+ *
+ * `/agents approve` has to reach the Skill tool and the `# Skills` block, which
+ * read the startup array rather than the slash-command registry. Appending is
+ * wrong when a project skill shares a user skill's name: the tool's lookup is
+ * `find` by name, so the user's body would keep answering while the command
+ * registry, which replaces, answered with the project's — one approval, two
+ * answers depending on which path the invocation took.
+ */
+export function adoptApprovedSkills(skills: Skill[], adopted: Skill[]): void {
+	for (const skill of adopted) {
+		const existing = skills.findIndex((candidate) => candidate.name === skill.name);
+		if (existing >= 0) skills[existing] = skill;
+		else skills.push(skill);
+	}
+}
+
 /** The project skills the trust gate is holding back, for a dialog to offer. */
 export function withheldProjectSkills(cwd: string, home = homedir()): Skill[] {
 	if (isProjectTierTrusted(cwd, "skills", home)) return [];

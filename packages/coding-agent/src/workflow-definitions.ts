@@ -66,6 +66,17 @@ function loadWorkflowsFromDir(
 		for (const entry of readdirSync(root, { withFileTypes: true })) {
 			if (!entry.isFile() || !entry.name.endsWith(".js")) continue;
 			const stem = entry.name.slice(0, -3);
+			// The name is checkable before the file is read, and a stem that can
+			// never be a workflow name must not reach `parseWorkflowScript`:
+			// that evaluates the meta literal in a vm, so reading first would
+			// execute code for a file the catalogue will never list. The
+			// withheld tier already filters these names; this keeps the loaded
+			// tier's evaluated set identical to the offered one.
+			const stemProblem = nameProblem(stem, stem);
+			if (stemProblem !== null) {
+				notes.push(`workflow "${stem}" not loaded: ${stemProblem}`);
+				continue;
+			}
 			const sourcePath = join(root, entry.name);
 			let script: string;
 			try {

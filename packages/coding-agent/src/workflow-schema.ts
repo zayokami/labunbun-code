@@ -253,36 +253,96 @@ function balancedSpanEnd(text: string, start: number): number {
 }
 
 /**
- * Pull a JSON value out of a model's answer. Fenced blocks come first because
- * refusing a correct answer over its packaging teaches the model the wrong
- * lesson; the surrounding prose is only searched after the whole text fails.
+ * Every distinct JSON value the answer contains, outermost first, or why none
+ * could be read.
+ *
+ * The whole answer being one JSON value is unambiguous and wins outright.
+ * Otherwise each fence and each opener's balanced span is a candidate; a span
+ * nested inside another carries the same value, so only the outermost is kept,
+ * and a value found twice counts once. What remains can be more than one value
+ * — an example in the prose and the answer after it — and choosing between
+ * them needs the schema, so the caller gets the list rather than the first
+ * candidate that happened to parse.
  */
-export function parseJsonValue(text: string): { value: unknown } | { error: string } {
+export function parseJsonCandidates(text: string): { values: unknown[] } | { error: string } {
 	const trimmed = text.trim();
 	if (trimmed === "") return { error: "the answer was empty" };
-	const candidates: string[] = [];
-	const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
-	if (fenced?.[1] !== undefined && fenced[1].trim() !== "") candidates.push(fenced[1].trim());
-	candidates.push(trimmed);
+	try {
+		return { values: [JSON.parse(trimmed)] };
+	} catch {
+		// Not the whole answer; the prose below is searched instead.
+	}
+
+	interface JsonSpan {
+		start: number;
+		end: number;
+		value: unknown;
+	}
+	const spans: JsonSpan[] = [];
+	const addSpan = (start: number, end: number): void => {
+		try {
+			spans.push({ start, end, value: JSON.parse(trimmed.slice(start, end)) });
+		} catch {
+			// Not JSON; the next extraction gets its turn.
+		}
+	};
+	// Fenced blocks come first because refusing a correct answer over its
+	// packaging teaches the model the wrong lesson.
+	const fences = /```(?:json)?\s*([\s\S]*?)```/gi;
+	for (let match = fences.exec(trimmed), found = 0; match !== null && found < 16; match = fences.exec(trimmed)) {
+		const content = match[1];
+		if (content === undefined || content.trim() === "") continue;
+		found++;
+		const opening = /^```(?:json)?\s*/i.exec(match[0]);
+		const offset = match.index + (opening?.[0].length ?? 0);
+		addSpan(offset, offset + content.length);
+	}
 	// Each opener gets its own balanced span. Slicing from the first opener to
 	// the last closer would grab an example plus the answer and parse as
 	// neither whenever the prose contains more than one JSON-looking piece.
-	let spans = 0;
-	for (let index = 0; index < trimmed.length && spans < 16; index++) {
+	let openers = 0;
+	for (let index = 0; index < trimmed.length && openers < 16; index++) {
 		const char = trimmed[index];
 		if (char !== "{" && char !== "[") continue;
-		spans++;
+		openers++;
 		const end = balancedSpanEnd(trimmed, index);
-		if (end > index) candidates.push(trimmed.slice(index, end));
+		if (end > index) addSpan(index, end);
 	}
-	for (const candidate of candidates) {
-		try {
-			return { value: JSON.parse(candidate) };
-		} catch {
-			// Try the next extraction.
-		}
+	const outermost = spans
+		.filter(
+			(span, index) =>
+				!spans.some(
+					(other, otherIndex) =>
+						otherIndex !== index &&
+						other.start <= span.start &&
+						other.end >= span.end &&
+						(other.start < span.start || other.end > span.end),
+				),
+		)
+		.sort((left, right) => left.start - right.start);
+	const values: unknown[] = [];
+	for (const span of outermost) {
+		if (!values.some((value) => jsonEqual(value, span.value))) values.push(span.value);
 	}
-	return { error: "the answer was not valid JSON" };
+	if (values.length === 0) return { error: "the answer was not valid JSON" };
+	return { values };
+}
+
+/**
+ * The one JSON value an answer holds. More than one is an error rather than a
+ * guess: two parseable values mean an example and the answer are
+ * indistinguishable without the schema, and a caller that only wants a value
+ * has no way to choose.
+ */
+export function parseJsonValue(text: string): { value: unknown } | { error: string } {
+	const parsed = parseJsonCandidates(text);
+	if ("error" in parsed) return parsed;
+	if (parsed.values.length === 1) return { value: parsed.values[0] };
+	return {
+		error:
+			"the answer contained more than one JSON value, so which one was meant is ambiguous; " +
+			"reply with only the JSON value",
+	};
 }
 
 /** The instruction appended to a subagent's prompt when a schema is requested. */

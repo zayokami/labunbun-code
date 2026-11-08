@@ -118,11 +118,18 @@ export async function worktreeChanged(
 	// collapses an ignored directory to one line, so a dependency install costs a
 	// line rather than a directory walk. A git too old for the flag falls back to
 	// the plain check rather than keeping every worktree forever.
+	//
+	// `--untracked-files=normal` is passed even though it is the default: the
+	// default is the *config* `status.showUntrackedFiles`, and a user who set it
+	// to `no` would otherwise hide exactly the new files an agent writes — the
+	// worktree would read as unchanged and be removed.
 	let status: string;
 	try {
-		status = (await git(["status", "--porcelain", "--ignored=traditional"], worktree.path)).trim();
+		status = (
+			await git(["status", "--porcelain", "--untracked-files=normal", "--ignored=traditional"], worktree.path)
+		).trim();
 	} catch {
-		status = (await git(["status", "--porcelain"], worktree.path)).trim();
+		status = (await git(["status", "--porcelain", "--untracked-files=normal"], worktree.path)).trim();
 	}
 	if (status !== "") return true;
 	const head = (await git(["rev-parse", "HEAD"], worktree.path)).trim();
