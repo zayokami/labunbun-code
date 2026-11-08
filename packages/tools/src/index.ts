@@ -72,6 +72,11 @@ export {
 	type RepoMapSummary,
 } from "./repomap-service.ts";
 export { createRepoMapTool, formatRepoMapResult, type RepoMapToolOptions } from "./repomap-tool.ts";
+export {
+	type RepoMapWatchHandle,
+	type RepoMapWatchOptions,
+	watchRepoMap,
+} from "./repomap-watch.ts";
 // The bridge process, reached two ways: a source checkout runs
 // `sandbox/bridge-main.ts` beside the tools package, and a compiled binary
 // re-enters the CLI's main with `__bridge` — see `bridgeRuntime` in

@@ -98,6 +98,7 @@ import {
 	type SandboxBackend,
 	type SpawnConfiner,
 	TaskStore,
+	watchRepoMap,
 } from "@labunbun/tools";
 import {
 	AUTO_THEME_NAME,
@@ -1535,6 +1536,56 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	};
 	const systemPrompt = buildPrompt(memoryText);
 
+	// The map follows files saved outside the session, not only `/map-refresh`.
+	// The watcher coalesces a burst of saves into one signal, and the section is
+	// rebuilt at the next prompt rather than on the save itself: a burst costs
+	// one walk, a prompt already in flight keeps the prompt it started with, and
+	// a rebuild that produces the same text swaps nothing — so edits that did
+	// not move what the map shows leave the prompt cache alone. A platform with
+	// no recursive watch keeps the old behaviour; `watching` is false there.
+	let repoMapStale = false;
+	let repoMapRefresh: Promise<void> | undefined;
+	const repoMapWatch = watchRepoMap({
+		root: cwd,
+		onChange: () => {
+			repoMapStale = true;
+		},
+	});
+	/**
+	 * Bring the prompt's map section up to date, if a save since the last prompt
+	 * marked it stale. Cheap when nothing changed (`repoMapStale` is false), and
+	 * one scan when something did: the walk is bounded by the same small-
+	 * repository ceiling that decided the section was worth carrying at all.
+	 */
+	const refreshRepoMapIfStale = async (): Promise<void> => {
+		if (!repoMapStale) return;
+		if (repoMapRefresh) return repoMapRefresh;
+		// Cleared before the scan: a change that lands while it runs sets the flag
+		// again, and the next prompt asks for another look.
+		repoMapStale = false;
+		repoMapRefresh = (async () => {
+			try {
+				// The service's own call rather than the startup helper: the helper
+				// turns a failed scan into "no section", which at startup is the
+				// right answer and here would silently remove a section that a later
+				// prompt could still carry. An undefined result is the legitimate
+				// "too large now" answer, and that one does replace the section.
+				const next = (await repoMap.promptSection())?.text;
+				if (next === repoMapText) return;
+				repoMapText = next;
+				sessionRef?.setSystemPrompt(buildPrompt(memoryText));
+			} catch {
+				// A failed scan leaves the section as it was. The flag goes back so
+				// the next prompt — or the next save — tries again rather than
+				// leaving the map stale for the rest of the session.
+				repoMapStale = true;
+			} finally {
+				repoMapRefresh = undefined;
+			}
+		})();
+		return repoMapRefresh;
+	};
+
 	/**
 	 * The ledger writer: one entry per finished call, the /rewind snapshots, and
 	 * the fingerprints on either side of an Edit or Write. Defined in
@@ -2326,6 +2377,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// REPL's push) and delivers; hooks do not run for it, because it is not
 			// a prompt to this session. Nothing intercepts when no band is active.
 			if (beetleSurface.handleMention(text)) return { handled: true };
+			// A save made outside the session since the last prompt refreshes the
+			// repository section here, before the request is built: the model sees
+			// what is on disk now, and a burst of saves costs one scan rather than
+			// one per event. A no-op when nothing the map reads has changed.
+			await refreshRepoMapIfStale();
 			if (!hooksRuntime.has("UserPromptSubmit")) return undefined;
 			const outcome = await hooksRuntime.run("UserPromptSubmit", {
 				prompt: text,
@@ -2396,6 +2452,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// files) becomes `undefined`, which removes a map the session may no
 				// longer deserve to carry.
 				onRepoMapRefreshed: async () => {
+					// The manual refresh has already read the tree; the watcher has
+					// nothing left to announce for the saves that led here.
+					repoMapStale = false;
 					repoMapText = await repoMapPromptSection(repoMap);
 					sessionRef?.setSystemPrompt(buildPrompt(memoryText));
 				},
@@ -2755,6 +2814,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	unsubTasks();
 	detachShellNotices();
 	detachShellLedger();
+	// A watcher is a handle on the tree, and the tree outlives this session; the
+	// handle must not.
+	repoMapWatch.close();
 	clearInterval(shellPoll);
 	// The watch poll is the shell poll's twin and outlives the session by
 	// exactly as much: nothing reads the watch surface once the user has quit,

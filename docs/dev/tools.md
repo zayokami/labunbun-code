@@ -736,6 +736,7 @@ The comments also state the measured costs and the run or date that measured the
 | `packages/tools/src/repomap-generate.ts` | The scan, rank and render pipeline in one call. |
 | `packages/tools/src/repomap-service.ts` | The session's repository map: shared cache, path containment, the prompt threshold. |
 | `packages/tools/src/repomap-tool.ts` | RepoMap: the ranked, token-budgeted outline of a checkout. |
+| `packages/tools/src/repomap-watch.ts` | The recursive tree watch that turns a saved file into a prompt-section refresh. |
 | `packages/tools/src/binary.ts` | InspectBinary: PE, ELF, Mach-O, WASM, and the embedded metadata blocks. |
 | `packages/tools/src/electron-fuses.ts` | The Electron fuse wire behind the binary inspection. |
 | `packages/tools/src/dotnet.ts` | .NET metadata and the managed method-body operand walk. |

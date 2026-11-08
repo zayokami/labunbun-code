@@ -352,6 +352,35 @@ and a context without one answers that maps are unavailable. Local commands
 exist only in the REPL; `-p` runs and ACP sessions still get the tool and the
 prompt section.
 
+## Keeping the prompt section fresh
+
+The cache is validated on every read, so a map is never *wrong* about a file
+that changed while the session was open. The prompt section is a different
+question: it is built once, and without a watcher `/map-refresh` is the only
+thing that pulls a save made in another window into the next request.
+
+`watchRepoMap` (`packages/tools/src/repomap-watch.ts`) observes the root with a
+recursive `fs.watch` and reports coalesced changes. Events are filtered by
+`REPO_MAP_CODE_FILES` and `GLOB_SKIP_DIRS` — the same file set and directory
+skips the walk uses — and a burst is collected for one 400 ms window, so a `git
+checkout` is one report rather than thousands. Where recursive watching is
+unavailable the handle is inert (`watching: false`), which is the old
+behaviour: the tool and `/map-refresh` still work.
+
+The interactive host sets a stale flag on each report and rebuilds at the next
+prompt, not on the save. Three reasons for the turn boundary: a prompt already
+in flight cannot change its system prompt, a burst of saves should cost one
+walk, and a rebuild whose text equals the current section swaps nothing — so an
+edit that does not move what the map shows leaves the prompt cache alone. The
+walk is bounded by the same 200-file ceiling that decided the section was worth
+carrying; a large repository pays one rejected walk per burst and keeps the
+tool as its map.
+
+The watcher does not read `.gitignore`: a gitignored file that changes wakes
+the host, the rebuild's walk skips it, and nothing in the section moves.
+Teaching the watcher the ignore chain would duplicate the walk's gitignore
+handling on every event.
+
 ## Languages, subagents and large trees (P3)
 
 **Grammars.** Python, Go, Rust, Java, C#, C++, Ruby, PHP, Bash and PowerShell
@@ -426,9 +455,5 @@ benchmark a real checkout (`bun run repomap:bench .`).
   the walk and the per-file stats dominate a cold scan. A persistent file index
   (a directory-level mtime summary stored beside the cache) would cut that, but
   a directory's mtime does not change when a file's contents do on Windows, so
-  the per-file stat remains. A session watcher (`fs.watch`) is the more useful
-  lever: it keeps the map fresh, not just the walk cheaper. The 20,000-file
-  ceiling makes the current behaviour honest; it does not make it fast.
-- Nothing watches the tree. `/map-refresh` is the only thing that pulls an edit
-  made outside the session into the prompt; a watcher would let it follow every
-  save, at the cost of invalidating the cached prefix each time.
+  the per-file stat remains. The 20,000-file ceiling makes the current behaviour
+  honest; it does not make it fast.
