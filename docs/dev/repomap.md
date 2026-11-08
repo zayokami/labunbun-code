@@ -332,7 +332,10 @@ back as the result text, not a thrown error.
 the scan finds at least one definition, and every definition fits the 1,024-token
 budget. The walk is asked for 201 matches, so a large repository is rejected as
 soon as the ceiling is crossed rather than after walking thousands of files; the
-byte pass runs only for a tree that is still a candidate. A larger repository
+byte pass runs only for a tree that is still a candidate. The walk and that byte
+pass are handed to the scan (`RepoMapScanInputs`), which reuses them instead of
+walking and stat'ing the same tree again — on Windows the per-file stat is the
+largest cost of a warm prompt-section rebuild. A larger repository
 gets no section — a truncated map presented as *the*
 map would say the files it left out have nothing in them — and the tool answers
 instead, where the model can raise the budget. The section is injected below
@@ -363,19 +366,29 @@ thing that pulls a save made in another window into the next request.
 recursive `fs.watch` and reports coalesced changes. Events are filtered by
 `REPO_MAP_CODE_FILES` and `GLOB_SKIP_DIRS` — the same file set and directory
 skips the walk uses — and a burst is collected for one 400 ms window, so a `git
-checkout` is one report rather than thousands. Where recursive watching is
-unavailable the handle is inert (`watching: false`), which is the old
-behaviour: the tool and `/map-refresh` still work.
+checkout` is one report rather than thousands. A dotless path naming a directory
+is reported even though it cannot match the code glob: the platform reports a
+directory rename by the directory's name, and `git mv src lib` would otherwise
+leave the section naming paths that no longer exist until some code file inside
+the tree was saved. Where recursive watching is unavailable the handle is inert
+(`watching: false`), which is the old behaviour: the tool and `/map-refresh`
+still work; the flag turns false when the watch stops or fails, not only when
+it was never accepted. A watch that fails after it started is reported once by
+the host — a transcript notice in the REPL, stderr in ACP — and the section
+then stays as last built until `/map-refresh` (REPL) or a new session.
 
 The interactive host sets a stale flag on each report and rebuilds at the next
 prompt, not on the save; an ACP session does the same before each
 `session/prompt`. Three reasons for the turn boundary: a prompt already in
 flight cannot change its system prompt, a burst of saves should cost one walk,
 and a rebuild whose text equals the current section swaps nothing — so an edit
-that does not move what the map shows leaves the prompt cache alone. The walk
-is bounded by the same 200-file ceiling that decided the section was worth
-carrying; a large repository pays one rejected walk per burst and keeps the
-tool as its map.
+that does not move what the map shows leaves the prompt cache alone. A host whose
+repository was declined *for size* gets no watcher at all: there is nothing to
+keep fresh, and the tree that was declined is the one a recursive watch costs the
+most to follow. The small trees are watched even when they started without a
+section — a repository with no definitions yet, or one whose map the budget
+cannot finish, is where a save can make the section answerable. `/map-refresh`
+remains the way a large repository gains a section if the tree changes shape.
 
 The watcher does not read `.gitignore`: a gitignored file that changes wakes
 the host, the rebuild's walk skips it, and nothing in the section moves.
@@ -445,6 +458,11 @@ Map sizes at the two budgets:
 
 The synthetic tree is reproducible with `bun run repomap:bench`; pass a path to
 benchmark a real checkout (`bun run repomap:bench .`).
+
+`promptSection` on the 150-file synthetic tree, warm cache: 89 ms before the
+scan reused the walk and byte-pass stats, 46 ms after. What is left is the
+per-file stat (17 ms for those 150; 45 ms for this checkout's 734) and the rank
+pass (23 ms), with everything else under 5 ms.
 
 ## What is left
 

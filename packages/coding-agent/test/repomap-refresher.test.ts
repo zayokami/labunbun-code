@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { NodeFileSystemOperations, RepoMapService, watchRepoMap } from "@labunbun/tools";
-import { watchRepoMapPromptSection } from "../src/repomap-wiring.ts";
+import { repoMapWatchFailureNotice, watchRepoMapPromptSection } from "../src/repomap-wiring.ts";
 
 const ops = new NodeFileSystemOperations();
 const roots: string[] = [];
@@ -145,5 +145,20 @@ describe("watchRepoMapPromptSection", () => {
 			800,
 		);
 		expect(applied).toEqual([]);
+	});
+});
+
+describe("repoMapWatchFailureNotice", () => {
+	test("names the reason in one line", () => {
+		const error = new Error("EMFILE: inotify watch limit reached\nat watch (node:fs)");
+		const notice = repoMapWatchFailureNotice(error);
+		expect(notice).toBe("Repository map: watching for changes stopped (EMFILE: inotify watch limit reached).");
+		expect(notice).not.toContain("\n");
+	});
+
+	test("stringifies a non-Error", () => {
+		expect(repoMapWatchFailureNotice("share unmounted")).toBe(
+			"Repository map: watching for changes stopped (share unmounted).",
+		);
 	});
 });

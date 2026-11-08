@@ -112,6 +112,7 @@ import {
 	createRepoMapService,
 	type RepoMapPromptRefresher,
 	repoMapPromptSection,
+	repoMapWatchFailureNotice,
 	watchRepoMapPromptSection,
 } from "./repomap-wiring.ts";
 import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
@@ -717,7 +718,10 @@ class AcpAgent implements acp.Agent {
 		// Registered only now, after the replay: `session/prompt` and
 		// `session/cancel` resolve sessions through this map, and a request that
 		// raced the replay must not find a session whose history is still
-		// arriving.
+		// arriving. Loading an id this connection already holds replaces the
+		// entry, so the displaced session's watch is closed here — `shutdown`
+		// only ever sees what the map still holds.
+		this.#sessions.get(live.sessionId)?.repoMap.close();
 		this.#sessions.set(live.sessionId, live);
 		// No `models` in the response: it is UNSTABLE in the protocol, the same
 		// reason `session/set_model` is not implemented (see the file header).
@@ -1366,6 +1370,9 @@ class AcpAgent implements acp.Agent {
 				repoMapText = text;
 				session.setSystemPrompt(buildPrompt());
 			},
+			// Stdout carries frames and nothing else; the editor's log is stderr.
+			onWatchError: (error) =>
+				process.stderr.write(`Warning: ${repoMapWatchFailureNotice(error)} A new session watches again.\n`),
 		});
 		const live: LiveSession = {
 			session,

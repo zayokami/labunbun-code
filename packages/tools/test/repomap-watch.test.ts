@@ -7,7 +7,7 @@
  * tests skip, the same way the map keeps working without the watcher.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { watchRepoMap } from "../src/repomap-watch.ts";
@@ -75,6 +75,30 @@ describe("watchRepoMap", () => {
 			writeFileSync(join(root, "kept.ts"), "export const kept = 1;\n");
 			await waitFor(() => batches.some((paths) => paths.includes(join(root, "kept.ts"))));
 			expect(batches.flat()).toContain(join(root, "kept.ts"));
+		} finally {
+			handle.close();
+		}
+	});
+
+	test.skipIf(!RECURSIVE_WATCH)("reports a directory move, whose name no code glob can match", async () => {
+		const root = tempRoot();
+		mkdirSync(join(root, "src"));
+		writeFileSync(join(root, "src", "a.ts"), "export const a = 1;\n");
+		const batches: string[][] = [];
+		const handle = watchRepoMap({ root, debounceMs: 40, onChange: (paths) => batches.push(paths) });
+		try {
+			// A save proves the watch is armed before the move is made: a rename
+			// issued in the instant after `watch()` returns races the OS watcher
+			// that is still being set up, and the event can be lost.
+			writeFileSync(join(root, "probe.ts"), "export const probe = 1;\n");
+			await waitFor(() => batches.some((paths) => paths.includes(join(root, "probe.ts"))));
+			const before = batches.length;
+			// `fs.watch` reports this as the directory `src` (or `lib`), never as the
+			// file that moved with it; the section would otherwise keep naming
+			// `src/a.ts` until some code file was saved.
+			renameSync(join(root, "src"), join(root, "lib"));
+			await waitFor(() => batches.length > before);
+			expect(batches.length).toBeGreaterThan(before);
 		} finally {
 			handle.close();
 		}

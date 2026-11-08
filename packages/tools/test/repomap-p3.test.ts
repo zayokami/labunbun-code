@@ -705,6 +705,29 @@ describe("scan economics", () => {
 		expect(stats).toBe(0);
 	});
 
+	test("the prompt section stats each file once, and the scan reuses the answer", async () => {
+		const root = tempDir();
+		write(root, "a.ts", "export function alpha() {}\n");
+		write(root, "b.ts", "export function beta() {}\n");
+		const counted = new Map<string, number>();
+		const base = new NodeFileSystemOperations();
+		const counting = {
+			readdir: (path: string) => base.readdir(path),
+			stat: async (path: string) => {
+				counted.set(path, (counted.get(path) ?? 0) + 1);
+				return base.stat(path);
+			},
+			readTextFile: (path: string) => base.readTextFile(path),
+		};
+
+		// The byte ceiling makes the section stat every path first; the scan it
+		// then runs must use those stats rather than taking them a second time.
+		const section = await new RepoMapService({ root, ops: counting }).promptSection();
+
+		expect(section?.text).toContain("alpha");
+		expect([...counted.values()]).toEqual([1, 1]);
+	});
+
 	test("the default pattern walks code files whatever case their extension is", async () => {
 		const root = tempDir();
 		write(root, "A.C", "int main() { return 0; }\n");

@@ -14,6 +14,7 @@ import {
 	type RepoMapCache,
 	type RepoMapOps,
 	type RepoMapOptions,
+	type RepoMapScanInputs,
 	type RepoMapScanStats,
 	scanRepoFiles,
 } from "./repomap.ts";
@@ -228,11 +229,17 @@ function compactTagsCache(cache: RepoMapCache<RepoMapFileTags>, root: string): R
 	return compact;
 }
 
-/** Walk `root` and extract tags, using `cache` to skip unchanged files. */
+/**
+ * Walk `root` and extract tags, using `cache` to skip unchanged files.
+ *
+ * `inputs` is a walk and its stats a caller already took (the prompt section's
+ * ceiling check); the scan reuses them instead of walking and stat'ing again.
+ */
 export async function buildRepoMapTags(
 	root: string,
 	ops: RepoMapOps,
 	options: RepoMapTagsOptions = {},
+	inputs?: RepoMapScanInputs,
 ): Promise<RepoMapTagsResult> {
 	const cache: RepoMapCache<RepoMapFileTags> = options.cache ?? new InMemoryRepoMapCache<RepoMapFileTags>();
 	const maxSnippetLines = options.maxSnippetLines ?? DEFAULT_MAX_SNIPPET_LINES;
@@ -248,6 +255,7 @@ export async function buildRepoMapTags(
 		},
 		compactTagsCache(cache, root),
 		(tree, source, language, path) => extractTags(tree, source, path, { maxSnippetLines, language }),
+		inputs,
 	);
 	let definitions = 0;
 	let references = 0;

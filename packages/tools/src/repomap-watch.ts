@@ -7,7 +7,7 @@
 // next request. The watcher turns "saved in the editor" into a signal, and the
 // host decides when rebuilding the section is worth the prompt-cache prefix it
 // costs. `docs/dev/repomap.md` has the rest.
-import { type FSWatcher, watch } from "node:fs";
+import { type FSWatcher, statSync, watch } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { GLOB_SKIP_DIRS } from "./glob.ts";
 import { REPO_MAP_CODE_FILES } from "./repomap.ts";
@@ -55,6 +55,31 @@ export interface RepoMapWatchHandle {
 }
 
 /**
+ * Whether an event's path names a directory rather than a file.
+ *
+ * `fs.watch` reports a directory rename or move by the directory's own name,
+ * which a code-file glob can never match: `git mv src lib` would leave the
+ * section naming `src/…` until some file below the tree is saved. Only an
+ * extensionless name is a candidate — the files the walk skips and the temp
+ * files an editor writes around a save all carry a dot, so they cost no stat
+ * and never wake the host. A name with no dot that is a directory now, or that
+ * has gone away (the shape of a directory leaving), can take every file below
+ * it with it and is a reason to rebuild. A dotted directory moving out is the
+ * one miss; a code save or `/map-refresh` still heals the section.
+ */
+function namesDirectory(full: string): boolean {
+	const name = full.slice(Math.max(full.lastIndexOf("/"), full.lastIndexOf("\\")) + 1);
+	if (name.lastIndexOf(".") !== -1) return false;
+	try {
+		return statSync(full).isDirectory();
+	} catch {
+		// Gone: a delete or a rename away. Being wrong here costs one rebuild that
+		// finds nothing changed, and the text-equality check swaps no prompt.
+		return true;
+	}
+}
+
+/**
  * Observe the files a repository map would read, and report changes in batches.
  *
  * Recursive `fs.watch` is one handle on macOS and Windows. A platform (or a
@@ -73,7 +98,10 @@ export function watchRepoMap(options: RepoMapWatchOptions): RepoMapWatchHandle {
 	const root = resolve(options.root);
 	const pattern = options.pattern ?? REPO_MAP_CODE_FILES;
 	const debounceMs = options.debounceMs ?? REPO_MAP_WATCH_DEBOUNCE_MS;
-	const ignored = new Set((options.ignoreDirectories ?? GLOB_SKIP_DIRS).map((name) => name.toLowerCase()));
+	// Compared exactly as the walk compares them (`glob.ts`): a directory whose
+	// name only differs in case is a directory the walk reads, so a save in it is
+	// a save the map saw, and folding case here would leave that save unreported.
+	const ignored = new Set<string>(options.ignoreDirectories ?? GLOB_SKIP_DIRS);
 	const pending = new Set<string>();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let watcher: FSWatcher | undefined;
@@ -110,10 +138,11 @@ export function watchRepoMap(options: RepoMapWatchOptions): RepoMapWatchHandle {
 		// and `..` checks alone would let one through.
 		if (!rel || rel.startsWith("..") || isAbsolute(rel)) return;
 		const segments = rel.split(/[\\/]/);
-		if (segments.some((segment) => ignored.has(segment.toLowerCase()))) return;
-		// The map's own set of files. A directory rename, a README, and anything
-		// the walk would skip are not reasons to rebuild its section.
-		if (!pattern.match(segments.join("/"))) return;
+		if (segments.some((segment) => ignored.has(segment))) return;
+		// The map's own set of files. A README and anything else the walk would
+		// skip are not reasons to rebuild its section; a directory is, because its
+		// name never matches the glob and moving one moves every file below it.
+		if (!pattern.match(segments.join("/")) && !namesDirectory(full)) return;
 		if (pending.size < MAX_REPORTED_PATHS) pending.add(full);
 		if (timer === undefined) timer = setTimeout(flush, debounceMs);
 	};
@@ -126,9 +155,22 @@ export function watchRepoMap(options: RepoMapWatchOptions): RepoMapWatchHandle {
 	watcher.on("error", (error) => {
 		// An inotify limit, an unmounted share, a removed root: the observation is
 		// over. The host hears once so it can say why freshness stopped, and the
-		// handle stays safe to close.
-		options.onError?.(error);
-		stop();
+		// handle stays safe to close. A host callback that throws must not keep a
+		// dead watcher alive — `stop` runs either way, the same rule `flush` uses.
+		try {
+			options.onError?.(error);
+		} catch {
+			// The failure being reported is the event; the report is not.
+		} finally {
+			stop();
+		}
 	});
-	return { watching: true, close: stop };
+	return {
+		// Read when asked, not frozen at creation: `stop` and an error both end the
+		// observation, and a host that checks after either should hear the truth.
+		get watching() {
+			return !closed;
+		},
+		close: stop,
+	};
 }

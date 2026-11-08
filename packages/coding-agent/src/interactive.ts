@@ -276,7 +276,12 @@ import {
 	enclosingRepositoryRoot,
 	withheldDefinitionNotice,
 } from "./project-trust.ts";
-import { createRepoMapService, repoMapPromptSection, watchRepoMapPromptSection } from "./repomap-wiring.ts";
+import {
+	createRepoMapService,
+	repoMapPromptSection,
+	repoMapWatchFailureNotice,
+	watchRepoMapPromptSection,
+} from "./repomap-wiring.ts";
 import { createPreviewRequester } from "./session-preview.ts";
 import {
 	damagedSessionNotice,
@@ -1548,6 +1553,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			repoMapText = text;
 			sessionRef?.setSystemPrompt(buildPrompt(memoryText));
 		},
+		// A watch that stopped is said once, where the user is looking; the
+		// section then waits for the manual pull, which still works.
+		onWatchError: (error) => sayNotice(`${repoMapWatchFailureNotice(error)} /map-refresh still rebuilds the section.`),
 	});
 
 	/**
@@ -2414,12 +2422,22 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// the section is rebuilt from that warm cache, so this is a prompt
 				// swap rather than a second cold scan. A declined section (too many
 				// files) becomes `undefined`, which removes a map the session may no
-				// longer deserve to carry.
+				// longer deserve to carry. A scan that throws is different: it keeps
+				// the section as it was, matching the watcher's policy, because a
+				// transient I/O error is not a reason to drop a map the prompt
+				// already carries.
 				onRepoMapRefreshed: async () => {
 					// The manual refresh has already read the tree; the watcher has
 					// nothing left to announce for the saves that led here.
 					repoMapRefresher.reset();
-					repoMapText = await repoMapPromptSection(repoMap);
+					// The service is called directly rather than through
+					// `repoMapPromptSection`: that helper answers a throw with
+					// `undefined`, which here would read as a decline and remove the
+					// section. A throw propagates instead — `repoMapText` is assigned
+					// only once the call resolves, so the section and the prompt stay
+					// as they were, and `/map-refresh` reports that the prompt still
+					// holds the old map.
+					repoMapText = (await repoMap.promptSection())?.text;
 					sessionRef?.setSystemPrompt(buildPrompt(memoryText));
 				},
 				sandboxBackend: ops.sandboxBackend,

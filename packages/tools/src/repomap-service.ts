@@ -8,7 +8,13 @@
 // Long-form design notes: docs/dev/repomap.md (P2).
 import { guardPathContainment, resolveCanonical } from "./containment.ts";
 import { walkProjectFiles } from "./glob.ts";
-import { InMemoryRepoMapCache, REPO_MAP_CODE_FILES, type RepoMapCache, type RepoMapOps } from "./repomap.ts";
+import {
+	InMemoryRepoMapCache,
+	REPO_MAP_CODE_FILES,
+	type RepoMapCache,
+	type RepoMapOps,
+	type RepoMapScanInputs,
+} from "./repomap.ts";
 import { rankRepoMap } from "./repomap-rank.ts";
 import { renderRepoMap } from "./repomap-render.ts";
 import { SqliteRepoMapCache } from "./repomap-sqlite.ts";
@@ -111,6 +117,13 @@ export interface RepoMapPromptSection {
 	files: number;
 }
 
+/**
+ * Why a prompt section was withheld. `too-large` is the tree past the file or
+ * byte ceiling; `empty` is a tree with no definitions to show; `budget` is a
+ * small tree whose map could not finish inside the token budget.
+ */
+export type RepoMapPromptDecline = "too-large" | "empty" | "budget";
+
 export interface RepoMapPromptOptions {
 	/** File-count ceiling. Default: `REPO_MAP_PROMPT_MAX_FILES`. */
 	maxFiles?: number;
@@ -151,6 +164,7 @@ export class RepoMapService {
 	#explicitCache: RepoMapCache<RepoMapFileTags> | undefined;
 	#cache: RepoMapCache<RepoMapFileTags> | undefined;
 	#inflight = 0;
+	#promptDecline: RepoMapPromptDecline | undefined;
 
 	constructor(options: RepoMapServiceOptions) {
 		this.root = options.root;
@@ -228,6 +242,17 @@ export class RepoMapService {
 
 	/** Render a map and report how much of the repository the budget left out. */
 	async map(request: RepoMapRequest = {}): Promise<RepoMapSummary> {
+		return this.#map(request);
+	}
+
+	/**
+	 * `map`, with the walk and stats a caller already took. The prompt section
+	 * stats every path to decide whether the repository fits the ceilings it may
+	 * be injected under; without this the scan would walk and stat the same tree
+	 * a second time. Private because those inputs are only ever the ones
+	 * `promptSection` itself just produced.
+	 */
+	async #map(request: RepoMapRequest = {}, inputs?: RepoMapScanInputs): Promise<RepoMapSummary> {
 		const started = performance.now();
 		const root = this.#resolveRoot(request.path);
 		try {
@@ -239,22 +264,27 @@ export class RepoMapService {
 		let truncated = false;
 		let unreadableDirectories = 0;
 		const scan = await this.#withCache((cache) =>
-			buildRepoMapTags(root, this.#ops, {
-				cache,
-				pattern: this.#pattern,
-				respectGitignore: this.#respectGitignore,
-				maxFileBytes: this.#maxFileBytes,
-				onUnreadableDirectory: (path) => {
-					unreadableDirectories++;
-					this.#onUnreadableDirectory?.(path);
+			buildRepoMapTags(
+				root,
+				this.#ops,
+				{
+					cache,
+					pattern: this.#pattern,
+					respectGitignore: this.#respectGitignore,
+					maxFileBytes: this.#maxFileBytes,
+					onUnreadableDirectory: (path) => {
+						unreadableDirectories++;
+						this.#onUnreadableDirectory?.(path);
+					},
+					maxFiles: this.#maxFiles,
+					parseWorkers: this.#parseWorkers,
+					onTruncated: () => {
+						truncated = true;
+					},
+					signal: request.signal,
 				},
-				maxFiles: this.#maxFiles,
-				parseWorkers: this.#parseWorkers,
-				onTruncated: () => {
-					truncated = true;
-				},
-				signal: request.signal,
-			}),
+				inputs,
+			),
 		);
 		const entries = rankRepoMap(scan.files, {
 			chatFiles: request.chatFiles,
@@ -276,6 +306,19 @@ export class RepoMapService {
 			unreadableDirectories,
 			elapsedMs: performance.now() - started,
 		};
+	}
+
+	/**
+	 * Why the last `promptSection` declined, or `undefined` when it answered.
+	 *
+	 * A host that watches the tree needs the distinction: a repository declined
+	 * for size is the large checkout a recursive watch costs the most to follow,
+	 * and a rebuild can only ever answer the same decline. A repository declined
+	 * for having no definitions, or for a map the budget cannot finish, is small
+	 * — those are exactly the trees whose first definition can change the answer.
+	 */
+	get promptSectionDecline(): RepoMapPromptDecline | undefined {
+		return this.#promptDecline;
 	}
 
 	/**
@@ -307,23 +350,40 @@ export class RepoMapService {
 			// would stat them all once more.
 			sortByMtime: false,
 		});
-		if (paths.length === 0 || paths.length > maxFiles) return undefined;
+		if (paths.length === 0) return this.#decline("empty");
+		if (paths.length > maxFiles) return this.#decline("too-large");
+		// The walk and these stats are what the scan would otherwise repeat: the
+		// byte ceiling has to be answered before anything is parsed, and a file
+		// that could not be stat'ed is left out of the map rather than counted as
+		// empty. The stats run together — one per file in turn is the slowest part
+		// of a prompt-section rebuild on Windows — and a failed one is simply
+		// absent, so the scan stats that file again and reports it as skipped.
+		const stats = new Map<string, { mtimeMs: number; size: number }>();
 		let bytes = 0;
-		for (const path of paths) {
-			const stat = await this.#ops.stat(path).catch(() => null);
-			if (!stat) continue;
-			bytes += stat.size;
-			if (bytes > maxBytes) return undefined;
-		}
-		const summary = await this.map({ maxTokens: options.maxTokens ?? REPO_MAP_DEFAULT_TOKENS });
-		if (summary.totalDefinitions === 0) return undefined;
-		if (summary.definitions !== summary.totalDefinitions) return undefined;
+		await Promise.all(
+			paths.map(async (path) => {
+				const stat = await this.#ops.stat(path).catch(() => null);
+				if (!stat) return;
+				stats.set(path, stat);
+				bytes += stat.size;
+			}),
+		);
+		if (bytes > maxBytes) return this.#decline("too-large");
+		const summary = await this.#map({ maxTokens: options.maxTokens ?? REPO_MAP_DEFAULT_TOKENS }, { paths, stats });
+		if (summary.totalDefinitions === 0) return this.#decline("empty");
+		if (summary.definitions !== summary.totalDefinitions) return this.#decline("budget");
+		this.#promptDecline = undefined;
 		return {
 			text: summary.text,
 			tokens: summary.tokens,
 			definitions: summary.definitions,
 			files: summary.files,
 		};
+	}
+
+	#decline(reason: RepoMapPromptDecline): undefined {
+		this.#promptDecline = reason;
+		return undefined;
 	}
 
 	/**

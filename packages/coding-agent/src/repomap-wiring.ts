@@ -59,6 +59,25 @@ export interface RepoMapPromptRefresherOptions {
 	 * afterwards.
 	 */
 	apply(text: string | undefined): void;
+	/**
+	 * Called once when a watch that started has stopped — an inotify limit, an
+	 * unmounted share, a removed root. The section then stays as it was last
+	 * built until the host rebuilds it by other means (`/map-refresh` in the
+	 * REPL, a new session in ACP).
+	 */
+	onWatchError?(error: unknown): void;
+}
+
+/**
+ * One line a host says when a watch that started has stopped.
+ *
+ * Only the first line of an Error's message is used — a message can carry
+ * newlines, and a notice is one line — with `String(error)` for anything else.
+ * No stack: the reason the freshness ended is the fact, not where it was thrown.
+ */
+export function repoMapWatchFailureNotice(error: unknown): string {
+	const detail = error instanceof Error ? (error.message.split(/\r?\n/)[0] ?? "") : String(error);
+	return `Repository map: watching for changes stopped (${detail}).`;
 }
 
 /**
@@ -74,17 +93,29 @@ export interface RepoMapPromptRefresherOptions {
  * The section is built through the service directly rather than through
  * `repoMapPromptSection`: a failed scan must leave the section as it is, while
  * an undefined result — the repository no longer fits — is the legitimate
- * answer that removes it.
+ * answer that removes it. A host whose repository was declined *for size* gets
+ * no watcher: there is nothing to keep fresh, and the tree that was declined is
+ * exactly the one a recursive watch costs the most to follow.
  */
 export function watchRepoMapPromptSection(options: RepoMapPromptRefresherOptions): RepoMapPromptRefresher {
 	let stale = false;
 	let inflight: Promise<void> | undefined;
-	const watch = watchRepoMap({
-		root: options.root,
-		onChange: () => {
-			stale = true;
-		},
-	});
+	// A repository declined for size has nothing to keep fresh: that is the large
+	// checkout, the tree a recursive watch costs the most to follow, and a rebuild
+	// can only ever answer the same decline. The small trees are watched even when
+	// they started without a section — a repository that has no definitions yet,
+	// or whose map the budget cannot finish, is exactly where a save can make the
+	// section answerable.
+	const watch =
+		options.current() === undefined && options.service.promptSectionDecline === "too-large"
+			? null
+			: watchRepoMap({
+					root: options.root,
+					onChange: () => {
+						stale = true;
+					},
+					onError: options.onWatchError,
+				});
 	return {
 		async refreshIfStale() {
 			if (!stale) return;
@@ -110,7 +141,7 @@ export function watchRepoMapPromptSection(options: RepoMapPromptRefresherOptions
 			stale = false;
 		},
 		close() {
-			watch.close();
+			watch?.close();
 		},
 	};
 }

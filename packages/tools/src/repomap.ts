@@ -330,6 +330,26 @@ export interface RepoMapScanResult<T> {
 export type RepoMapExtractor<T> = (tree: Tree, source: string, language: RepoMapLanguage, path: string) => T;
 
 /**
+ * A walk and its stats, when the caller already took them.
+ *
+ * The prompt section is the caller: it walks and stats to decide whether the
+ * repository fits the ceilings it may inject under, and handing those facts to
+ * the scan stops the same tree being walked and every file stat'ed twice. A
+ * caller that passes `paths` owns the walk options: `maxFiles` and
+ * `onTruncated` are not applied to a list it framed itself.
+ */
+export interface RepoMapScanInputs {
+	/** Absolute paths, the shape `walkProjectFiles` returns. The scan skips its own walk. */
+	paths: readonly string[];
+	/**
+	 * Stats already taken, keyed by the same path strings. A path absent here —
+	 * an unreadable file, say — is stat'ed as usual, so the scan still reports
+	 * what it could not see rather than inheriting the caller's blind spot.
+	 */
+	stats?: ReadonlyMap<string, { mtimeMs: number; size: number }>;
+}
+
+/**
  * Walk `root` and extract a payload from every source file a grammar covers.
  *
  * Files are processed a few at a time: the reads are I/O-bound and the parses
@@ -347,19 +367,22 @@ export async function scanRepoFiles<T>(
 	options: RepoMapOptions<T>,
 	cache: RepoMapCache<T>,
 	extract: RepoMapExtractor<T>,
+	inputs?: RepoMapScanInputs,
 ): Promise<RepoMapScanResult<T>> {
 	const started = performance.now();
-	const paths = await walkProjectFiles(root, ops, {
-		pattern: options.pattern ?? REPO_MAP_CODE_FILES,
-		respectGitignore: options.respectGitignore ?? true,
-		onUnreadableDirectory: options.onUnreadableDirectory,
-		maxFiles: options.maxFiles,
-		onTruncated: options.onTruncated,
-		signal: options.signal,
-		// The scan sorts by path below; a walk that stats every match only to have
-		// its mtime order discarded would pay the largest cost of a hot scan twice.
-		sortByMtime: false,
-	});
+	const paths =
+		inputs?.paths ??
+		(await walkProjectFiles(root, ops, {
+			pattern: options.pattern ?? REPO_MAP_CODE_FILES,
+			respectGitignore: options.respectGitignore ?? true,
+			onUnreadableDirectory: options.onUnreadableDirectory,
+			maxFiles: options.maxFiles,
+			onTruncated: options.onTruncated,
+			signal: options.signal,
+			// The scan sorts by path below; a walk that stats every match only to have
+			// its mtime order discarded would pay the largest cost of a hot scan twice.
+			sortByMtime: false,
+		}));
 	const languages = new Map<RepoMapLanguage, Language>();
 	const present = new Set<RepoMapLanguage>();
 	for (const full of paths) {
@@ -404,7 +427,7 @@ export async function scanRepoFiles<T>(
 				const language = repoMapLanguageFor(path);
 				const grammar = language ? languages.get(language) : undefined;
 				if (!language || !grammar) continue;
-				const stat = await ops.stat(full).catch(() => null);
+				const stat = inputs?.stats?.get(full) ?? (await ops.stat(full).catch(() => null));
 				if (!stat || stat.size > maxBytes) {
 					skipped++;
 					continue;

@@ -188,6 +188,28 @@ describe("RepoMapService.promptSection", () => {
 
 		expect(await new RepoMapService({ root, ops }).promptSection()).toBeUndefined();
 	});
+
+	test("says why it declined, so a watcher can tell a large tree from a small one", async () => {
+		const large = tempDir();
+		for (let index = 0; index < 201; index++) write(large, `f${index}.ts`, "export function f() {}\n");
+		const largeService = new RepoMapService({ root: large, ops });
+		expect(await largeService.promptSection()).toBeUndefined();
+		expect(largeService.promptSectionDecline).toBe("too-large");
+
+		const empty = tempDir();
+		write(empty, "a.ts", "const answer = 42;\n");
+		const emptyService = new RepoMapService({ root: empty, ops });
+		expect(await emptyService.promptSection()).toBeUndefined();
+		expect(emptyService.promptSectionDecline).toBe("empty");
+
+		const budget = new RepoMapService({ root: fixtures, ops });
+		expect(await budget.promptSection({ maxTokens: REPO_MAP_MIN_TOKENS })).toBeUndefined();
+		expect(budget.promptSectionDecline).toBe("budget");
+
+		const answered = new RepoMapService({ root: fixtures, ops });
+		expect((await answered.promptSection())?.text).toContain("sample.js:");
+		expect(answered.promptSectionDecline).toBeUndefined();
+	});
 });
 
 async function textOf(tool: ReturnType<typeof createRepoMapTool>, input: unknown): Promise<string> {
