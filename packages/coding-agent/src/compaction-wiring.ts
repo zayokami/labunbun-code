@@ -35,6 +35,7 @@ import {
 	resolvePromptCacheRetention,
 	type StreamFn,
 } from "@labunbun/ai";
+import { formatTokenTotal } from "@labunbun/tui/format";
 import { rewriteCause } from "./cache-report.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE, formatTokens } from "./context-report.ts";
 
@@ -425,6 +426,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				streamFn: options.streamFn,
 				store: forStore,
 				summarizerModel: options.tuning?.summarizerModel ?? forModel,
+				formatTokens: formatTokenTotal,
 				readFile: options.readFile,
 				spillOutput: options.spillOutput,
 				onPhase: phase,

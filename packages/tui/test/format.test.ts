@@ -52,4 +52,10 @@ describe("formatTokenTotal", () => {
 		expect(formatTokenTotal(1_234_567)).toBe("1.2 MTok");
 		expect(formatTokenTotal(849_928_626)).toBe("849.9 MTok");
 	});
+
+	test("switches at exactly one million, the boundary a full window lands on", () => {
+		expect(formatTokenTotal(999_999, "mtok")).toBe("999,999");
+		expect(formatTokenTotal(1_000_000, "mtok")).toBe("1.0 MTok");
+		expect(formatTokenTotal(1_000_000, "k")).toBe("1,000,000");
+	});
 });

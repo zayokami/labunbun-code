@@ -1691,6 +1691,36 @@ describe("the hard-limit rescue", () => {
 		// Without a context the old, unmeasured wording is what a caller still gets.
 		expect(manager.blockedMessage()).not.toContain("The context is");
 	});
+
+	test("a host formatter is used for every count the blocked message prints", () => {
+		// The agent layer has no display package, so a host that has one passes its
+		// formatter in; the notice must not fall back to its own separators beside a
+		// status line that reads differently.
+		const config = { contextWindow: 8_000, maxOutputTokens: 1_000 };
+		const seen: number[] = [];
+		const manager = new CompactionManager(config, {
+			streamFn: fauxProvider([{ text: "unused" }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			formatTokens: (tokens) => {
+				seen.push(tokens);
+				return `<${tokens}>`;
+			},
+		});
+		const context: Context = {
+			systemPrompt: "s".repeat(30_000), // ~7,500 tokens alone
+			messages: [userMessage("hi")],
+		};
+		const breakdown = contextBreakdown(context);
+		const fixed = breakdown.systemPromptTokens + breakdown.toolSchemaTokens;
+		const limit = hardContextLimit(config);
+
+		const message = manager.blockedMessage(context);
+
+		expect(message).toContain(`The context is <${breakdown.usedTokens}> tokens against a hard limit of <${limit}>.`);
+		expect(message).toContain(`The system prompt and tool schemas alone take <${fixed}> tokens`);
+		expect(message).toContain(`this model's <${config.contextWindow}> token window`);
+		expect(seen).toEqual([breakdown.usedTokens, limit, fixed, config.contextWindow]);
+	});
 });
 
 describe("the boundary's transcript pointer", () => {

@@ -8,7 +8,7 @@
  * session *and* in the session file, so the next `--continue` resumes from the
  * summary rather than from the transcript it replaced.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,13 +29,16 @@ import {
 	toolResultMessage,
 	userMessage,
 } from "@labunbun/ai";
+import { formatTokenTotal, setTokenUnit } from "@labunbun/tui/format";
 import { builtInCommands, type LocalCommand, type LocalCommandContext } from "../src/commands.ts";
 import { type AppCommandContext, handleCommandDispatch } from "../src/interactive.ts";
 
 const CONFIG = { contextWindow: 200_000, maxOutputTokens: 8_192 };
 
+afterEach(() => setTokenUnit("k"));
+
 /** A conversation with enough history to summarize. */
-function bigSession(): AgentSession {
+function bigSession(usageInput = 90_000): AgentSession {
 	const session = new AgentSession({
 		model: FAUX_MODEL,
 		systemPrompt: "you are a coding agent",
@@ -48,7 +51,7 @@ function bigSession(): AgentSession {
 			content: [{ type: "text", text: "working on it" }],
 			provider: "faux",
 			model: FAUX_MODEL.id,
-			usage: { input: 90_000, output: 200, cacheRead: 0, cacheWrite: 0 },
+			usage: { input: usageInput, output: 200, cacheRead: 0, cacheWrite: 0 },
 			stopReason: "stop",
 			timestamp: 1,
 		},
@@ -71,6 +74,7 @@ function makeHarness(
 			customInstructions?: string,
 		) => Promise<{ blocked: boolean; reason?: string }>;
 	} = {},
+	usageInput = 90_000,
 ) {
 	const infos: string[] = [];
 	const prompted: string[] = [];
@@ -81,7 +85,7 @@ function makeHarness(
 	};
 	const dir = mkdtempSync(join(tmpdir(), "lbb-compact-cmd-"));
 	const store = SessionStore.startNew(dir, mkdtempSync(join(tmpdir(), "lbb-compact-home-")));
-	const session = bigSession();
+	const session = bigSession(usageInput);
 	// The live history is the store's history: /compact must leave both agreeing.
 	for (const message of session.messages) store.appendMessage(message);
 
@@ -220,8 +224,28 @@ describe("/compact", () => {
 		const limit = h.compaction.limits().hardLimit;
 		expect(after).toBeGreaterThanOrEqual(limit); // the fixture's point
 		expect(result.split("\n")).toContain(
-			`Warning: the compacted context is still ~${after.toLocaleString()} tokens, over this model's hard limit of ${limit.toLocaleString()}; ` +
+			`Warning: the compacted context is still ~${formatTokenTotal(after)} tokens, over this model's hard limit of ${formatTokenTotal(limit)}; ` +
 				"the next request may still be refused. Run /trim to drop old tool results, or use a model with a larger window.",
+		);
+	});
+
+	test("the headline follows the MTok token unit", async () => {
+		// The unit is a process-wide display setting, so the command's own numbers
+		// have to follow it: a saving in the millions reads "1.1 MTok" here the way
+		// it does in `/cost`, rather than as a comma-separated count.
+		setTokenUnit("mtok");
+		const h = makeHarness("<summary>\n1. Primary Request: x\n</summary>", {}, 1_100_000);
+		const before = estimateContextUsage(h.session.currentContext());
+
+		const result = (await h.command.call(h.ctx, "")) ?? "";
+
+		// Every count on the line, not just the substring: asserting one number
+		// would let the other two fall back to a raw count unnoticed.
+		const after = estimateContextUsage(h.session.currentContext());
+		const freed = Math.max(0, before - after);
+		expect(freed).toBeGreaterThanOrEqual(1_000_000); // the fixture's point
+		expect(result.split("\n")[0]).toBe(
+			`Conversation compacted: ~${formatTokenTotal(freed)} tokens freed (${formatTokenTotal(before)} → ${formatTokenTotal(after)}).`,
 		);
 	});
 

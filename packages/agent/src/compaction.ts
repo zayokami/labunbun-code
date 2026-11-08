@@ -737,6 +737,17 @@ export interface CompactionManagerDeps {
 	 */
 	summarizerModel: Model;
 	/**
+	 * How a token count reads in a notice the manager writes.
+	 *
+	 * The agent layer has no display package — the TUI depends on it, not the
+	 * other way round — so a host that has one passes its formatter here. The
+	 * coding agent passes the report formatter: every digit with separators
+	 * below a million, the configured MTok form above it, so a notice and
+	 * `/cost` agree. Without one the counts keep every digit with separators,
+	 * which is what this layer has always printed.
+	 */
+	formatTokens?: (tokens: number) => string;
+	/**
 	 * Watch a summarization happen. Never consulted for a decision.
 	 *
 	 * Awaited, so a listener that has work to finish — the `PostCompact` hook a
@@ -1210,18 +1221,19 @@ export class CompactionManager {
 	 * or toolset is over its window while its messages look small.
 	 */
 	blockedMessage(context?: Context): string {
+		const formatTokens = this.#deps.formatTokens ?? ((tokens: number) => tokens.toLocaleString());
 		let measured = "";
 		if (context) {
 			const breakdown = contextBreakdown(context);
 			const limit = hardContextLimit(this.#config);
-			measured += `The context is ${breakdown.usedTokens.toLocaleString()} tokens against a hard limit of ${limit.toLocaleString()}. `;
+			measured += `The context is ${formatTokens(breakdown.usedTokens)} tokens against a hard limit of ${formatTokens(limit)}. `;
 			const fixed = breakdown.systemPromptTokens + breakdown.toolSchemaTokens;
 			if (fixed >= limit) {
 				// Not "trim harder": the part that is over the limit is the part every
 				// request pays before the transcript is counted, and no compaction can
 				// reduce it. The fixes are outside the conversation.
 				measured +=
-					`The system prompt and tool schemas alone take ${fixed.toLocaleString()} tokens, over that limit; ` +
+					`The system prompt and tool schemas alone take ${formatTokens(fixed)} tokens, over that limit; ` +
 					"compaction cannot reduce that part. Use a model with a larger window, or load fewer tools, skills, or memory files. ";
 			} else if (breakdown.messageTokens >= limit) {
 				// The summary and the rescue trim already had their turn, so the
@@ -1237,7 +1249,7 @@ export class CompactionManager {
 		if (this.#rapidRefills >= MAX_RAPID_REFILLS) {
 			return (
 				`The context refilled within ${RAPID_REFILL_CHECKS} requests of each of the last ${MAX_RAPID_REFILLS} compactions, so automatic compaction is switched off for this session, ` +
-				`and the conversation no longer fits in this model's ${this.#config.contextWindow.toLocaleString()} token window. ` +
+				`and the conversation no longer fits in this model's ${formatTokens(this.#config.contextWindow)} token window. ` +
 				measured +
 				"A single oversized tool result or file read can refill a window that fast; reading it in pieces avoids it. " +
 				"Run /compact to summarize it now, /trim to drop old tool results for free, " +
@@ -1248,7 +1260,7 @@ export class CompactionManager {
 			? `Automatic compaction failed ${MAX_CONSECUTIVE_FAILURES} times and is switched off for this session`
 			: "Automatic compaction could not free enough space";
 		return (
-			`${cause}, and the conversation no longer fits in this model's ${this.#config.contextWindow.toLocaleString()} token window. ` +
+			`${cause}, and the conversation no longer fits in this model's ${formatTokens(this.#config.contextWindow)} token window. ` +
 			measured +
 			"Run /compact to summarize it now, /trim to drop old tool results for free, " +
 			"or exit and start a new session."

@@ -9,6 +9,7 @@
  */
 import type { AgentSession, CompactionManager, CompactionTrigger } from "@labunbun/agent";
 import { estimateContextUsage } from "@labunbun/agent";
+import { formatTokenTotal } from "@labunbun/tui/format";
 import { compactionReceiptLines } from "./compaction-wiring.ts";
 import { playDaisyBell } from "./daisy-bell.ts";
 import type { MigrationDialogBridge } from "./migrate-wizard.ts";
@@ -235,7 +236,7 @@ export function builtInCommands(): Command[] {
 				ctx.refreshContext?.();
 				const after = estimateContextUsage(compacted);
 				const freed = Math.max(0, before - after);
-				const headline = `Conversation compacted: ~${freed.toLocaleString()} tokens freed (${before.toLocaleString()} → ${after.toLocaleString()}).`;
+				const headline = `Conversation compacted: ~${formatTokenTotal(freed)} tokens freed (${formatTokenTotal(before)} → ${formatTokenTotal(after)}).`;
 				// The receipt under the headline. The app's automatic report
 				// suppresses itself for this trigger precisely so this line can be the
 				// full account, and what the pass verified about its own product is
@@ -254,7 +255,7 @@ export function builtInCommands(): Command[] {
 				const overLimit =
 					after >= hardLimit
 						? [
-								`Warning: the compacted context is still ~${after.toLocaleString()} tokens, over this model's hard limit of ${hardLimit.toLocaleString()}; ` +
+								`Warning: the compacted context is still ~${formatTokenTotal(after)} tokens, over this model's hard limit of ${formatTokenTotal(hardLimit)}; ` +
 									"the next request may still be refused. Run /trim to drop old tool results, or use a model with a larger window.",
 							]
 						: [];
@@ -359,7 +360,7 @@ export function builtInCommands(): Command[] {
 				const freed = Math.max(0, before - after);
 				return (
 					`Replaced ${trimmed.cleared.results} old tool result${trimmed.cleared.results === 1 ? "" : "s"} with previews: ` +
-					`~${freed.toLocaleString()} tokens freed (${before.toLocaleString()} → ${after.toLocaleString()}). ` +
+					`~${formatTokenTotal(freed)} tokens freed (${formatTokenTotal(before)} → ${formatTokenTotal(after)}). ` +
 					"Files on disk are unchanged; /compact summarizes instead when this is not enough."
 				);
 			},
