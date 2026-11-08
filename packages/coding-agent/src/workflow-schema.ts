@@ -26,8 +26,28 @@ function typeOf(value: unknown): string {
 	return typeof value;
 }
 
+/**
+ * JSON equality as the values are written: object key order is not part of the
+ * value. `JSON.stringify` would make `{a:1,b:2}` differ from `{b:2,a:1}`, so a
+ * `const` or `enum` written in another order would reject a correct answer.
+ */
 function jsonEqual(a: unknown, b: unknown): boolean {
-	return JSON.stringify(a) === JSON.stringify(b);
+	if (a === b) return true;
+	if (Array.isArray(a) || Array.isArray(b)) {
+		if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+		return a.every((item, index) => jsonEqual(item, b[index]));
+	}
+	if (isRecord(a) && isRecord(b)) {
+		const keys = Object.keys(a);
+		if (keys.length !== Object.keys(b).length) return false;
+		return keys.every((key) => Object.hasOwn(b, key) && jsonEqual(a[key], b[key]));
+	}
+	return false;
+}
+
+/** Own-property membership: `in` would accept `toString` from the prototype. */
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+	return Object.hasOwn(value, key);
 }
 
 function childPath(path: string, key: string): string {
@@ -142,16 +162,16 @@ function checkSchema(schema: unknown, value: unknown, path: string, errors: stri
 	if (isRecord(value)) {
 		const properties = isRecord(schema.properties) ? schema.properties : {};
 		for (const [key, sub] of Object.entries(properties)) {
-			if (key in value) checkSchema(sub, value[key], childPath(path, key), errors, depth + 1);
+			if (hasOwn(value, key)) checkSchema(sub, value[key], childPath(path, key), errors, depth + 1);
 		}
 		if (Array.isArray(schema.required)) {
 			for (const key of schema.required) {
-				if (typeof key === "string" && !(key in value)) errors.push(`${childPath(path, key)}: required`);
+				if (typeof key === "string" && !hasOwn(value, key)) errors.push(`${childPath(path, key)}: required`);
 			}
 		}
 		if (schema.additionalProperties === false || isRecord(schema.additionalProperties)) {
 			for (const key of Object.keys(value)) {
-				if (key in properties) continue;
+				if (hasOwn(properties, key)) continue;
 				if (schema.additionalProperties === false) {
 					errors.push(`${childPath(path, key)}: not allowed`);
 				} else {
@@ -196,12 +216,40 @@ export function checkWorkflowSchemaShape(schema: unknown): string | undefined {
 	if (!isObjectRoot) return 'a workflow result schema must have type "object" at the root';
 	if (isRecord(schema.properties) && Array.isArray(schema.required)) {
 		for (const key of schema.required) {
-			if (typeof key === "string" && !(key in schema.properties)) {
+			if (typeof key === "string" && !Object.hasOwn(schema.properties, key)) {
 				return `required key "${key}" is not declared in properties`;
 			}
 		}
 	}
 	return undefined;
+}
+
+/**
+ * End (exclusive) of the balanced JSON span starting at `start`, or -1.
+ * Strings are skipped so a brace inside a quoted value does not move the depth,
+ * and only the opener's own bracket kind is counted — `{"a": [1]}` is balanced
+ * by its braces.
+ */
+function balancedSpanEnd(text: string, start: number): number {
+	const open = text[start];
+	const close = open === "{" ? "}" : "]";
+	let depth = 0;
+	let inString = false;
+	for (let index = start; index < text.length; index++) {
+		const char = text[index];
+		if (inString) {
+			if (char === "\\") index++;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') inString = true;
+		else if (char === open) depth++;
+		else if (char === close) {
+			depth--;
+			if (depth === 0) return index + 1;
+		}
+	}
+	return -1;
 }
 
 /**
@@ -216,9 +264,17 @@ export function parseJsonValue(text: string): { value: unknown } | { error: stri
 	const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
 	if (fenced?.[1] !== undefined && fenced[1].trim() !== "") candidates.push(fenced[1].trim());
 	candidates.push(trimmed);
-	const first = trimmed.search(/[[{]/);
-	const last = Math.max(trimmed.lastIndexOf("}"), trimmed.lastIndexOf("]"));
-	if (first >= 0 && last > first) candidates.push(trimmed.slice(first, last + 1));
+	// Each opener gets its own balanced span. Slicing from the first opener to
+	// the last closer would grab an example plus the answer and parse as
+	// neither whenever the prose contains more than one JSON-looking piece.
+	let spans = 0;
+	for (let index = 0; index < trimmed.length && spans < 16; index++) {
+		const char = trimmed[index];
+		if (char !== "{" && char !== "[") continue;
+		spans++;
+		const end = balancedSpanEnd(trimmed, index);
+		if (end > index) candidates.push(trimmed.slice(index, end));
+	}
 	for (const candidate of candidates) {
 		try {
 			return { value: JSON.parse(candidate) };

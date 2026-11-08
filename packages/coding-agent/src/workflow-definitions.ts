@@ -130,10 +130,51 @@ export function loadWorkflowDefinitions(cwd: string, home = homedir()): Workflow
 	return { workflows, notes };
 }
 
-/** The project workflows the trust gate is holding back, for a dialog to offer. */
+/**
+ * The project's workflow files, named without being read.
+ *
+ * The withheld tier exists so a dialog can say what an approval would load, and
+ * nothing about that needs the file's contents. Reading `meta` would mean
+ * evaluating a repository's code before the person trusted it — `node:vm` is
+ * not a security boundary (`this.constructor.constructor` reaches the host
+ * realm's `process`), so an unread file is the only safe offer. Name validation
+ * is still applied to the stem, because that is the name the catalogue would
+ * use.
+ */
+function projectWorkflowFiles(cwd: string): WorkflowDefinition[] {
+	const root = join(cwd, ".labunbun", "workflows");
+	const out: WorkflowDefinition[] = [];
+	if (!existsSync(root)) return out;
+	try {
+		for (const entry of readdirSync(root, { withFileTypes: true })) {
+			if (!entry.isFile() || !entry.name.endsWith(".js")) continue;
+			const stem = entry.name.slice(0, -3);
+			if (stem.length > WORKFLOW_NAME_MAX_CHARS || !WORKFLOW_NAME_PATTERN.test(stem)) continue;
+			out.push({
+				name: stem,
+				description: "",
+				script: "",
+				sourcePath: join(root, entry.name),
+				source: "project",
+			});
+		}
+	} catch {
+		// An unreadable directory offers nothing; once the tier is trusted the
+		// loader reports the same failure as a note.
+	}
+	return out.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/**
+ * The project workflows the trust gate is holding back, for a dialog to offer.
+ *
+ * Deliberately not `projectWorkflows`: that parses every file, and parsing
+ * evaluates `meta` in a vm context. Before an approval, the file is untrusted
+ * input, so this lists names and paths only.
+ */
 export function withheldProjectWorkflows(cwd: string, home = homedir()): WorkflowDefinition[] {
 	if (isProjectTierTrusted(cwd, "workflows", home)) return [];
-	return projectWorkflows(cwd, []);
+	return projectWorkflowFiles(cwd);
 }
 
 /** The saved-workflow lines the Workflow tool's description lists. */

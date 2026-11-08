@@ -252,6 +252,33 @@ describe("resume", () => {
 		expect(readFileSync(join(original.dir, "script.resume.js"), "utf8")).toBe(edited);
 	});
 
+	test("a resume with different args records them beside the original", async () => {
+		const runsRoot = tempRoot();
+		const original = await runWorkflow({
+			cwd: tempRoot(),
+			runsRoot,
+			signal: new AbortController().signal,
+			script: "return args;",
+			args: { target: "a" },
+			spawn: spawner(() => ({ ok: true, report: "unused" })).spawn,
+		});
+		const resumed = await runWorkflow({
+			cwd: tempRoot(),
+			runsRoot,
+			signal: new AbortController().signal,
+			resumeFrom: original.runId,
+			args: { target: "b" },
+			spawn: spawner(() => ({ ok: true, report: "unused" })).spawn,
+		});
+
+		expect(resumed.value).toEqual({ target: "b" });
+		// The original args stay the record of the original run; the resume's
+		// args are kept beside them rather than overwriting what ran.
+		expect(JSON.parse(readFileSync(join(original.dir, "args.json"), "utf8"))).toEqual({ target: "a" });
+		expect(JSON.parse(readFileSync(join(original.dir, "args.resume.json"), "utf8"))).toEqual({ target: "b" });
+		expect(readFileSync(join(original.dir, "log.txt"), "utf8")).toContain("resumed with different args");
+	});
+
 	test("without a script or a run there is nothing to run", async () => {
 		await expect(runWorkflow(baseOptions({}))).rejects.toThrow("A workflow needs a script or a run to resume");
 	});
@@ -351,6 +378,50 @@ describe("worktree isolation", () => {
 		expect(result.keptWorktrees).toEqual([requests[0].cwd]);
 		expect(calls.some((args) => args[0] === "worktree" && args[1] === "remove")).toBe(false);
 		expect(lines.join("\n")).toContain(`kept worktree: ${requests[0].cwd}`);
+	});
+
+	test("a taken worktree directory gets the next free suffix instead of failing", async () => {
+		// A kept worktree from an earlier run owns `agent-1`; a resumed run must
+		// not collide with it, and nothing is deleted to make room.
+		const { calls, git: base } = fakeGit();
+		let adds = 0;
+		const git: WorkflowGit = async (args, cwd) => {
+			if (args[0] === "worktree" && args[1] === "add") {
+				adds++;
+				if (adds === 1) {
+					calls.push([...args]);
+					throw new Error(`fatal: '${args[3]}' already exists`);
+				}
+			}
+			return base(args, cwd);
+		};
+		const { requests, spawn } = spawner(() => ({ ok: true, report: "done" }));
+		const result = await runWorkflow(
+			baseOptions({ script: 'return await agent("x", { isolation: "worktree" });', spawn, git }),
+		);
+
+		expect(requests).toHaveLength(1);
+		const add = calls.filter((args) => args[0] === "worktree" && args[1] === "add");
+		expect(add).toHaveLength(2);
+		expect(add[0][3]).toMatch(/agent-1$/);
+		expect(add[1][3]).toBe(`${add[0][3]}-2`);
+		expect(requests[0].cwd).toBe(add[1][3]);
+		expect(result.keptWorktrees).toEqual([]);
+	});
+
+	test("a worktree holding only ignored files is kept, not deleted", async () => {
+		// A build output or a local config is often ignored by git; deleting the
+		// worktree because tracked status is clean would delete the agent's work.
+		const { calls, git } = fakeGit(() => "!! dist/\n");
+		const { requests, spawn } = spawner(() => ({ ok: true, report: "done" }));
+		const result = await runWorkflow(
+			baseOptions({ script: 'return await agent("x", { isolation: "worktree" });', spawn, git }),
+		);
+
+		expect(result.keptWorktrees).toEqual([requests[0].cwd]);
+		expect(calls.some((args) => args[0] === "worktree" && args[1] === "remove")).toBe(false);
+		const status = calls.find((args) => args[0] === "status");
+		expect(status).toContain("--ignored=traditional");
 	});
 
 	test("a worktree that cannot be created fails the call, not the run", async () => {

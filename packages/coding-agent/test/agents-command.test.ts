@@ -229,6 +229,22 @@ describe("/agents", () => {
 		expect(h.lines()).toContain("1 workflow now loaded");
 	});
 
+	test("approve says when a project workflow did not survive loading", () => {
+		const h = harness();
+		plant(join(h.cwd, ".labunbun", "workflows", "broken.js"), "export const meta = { name: 7 };");
+		h.ctx.workflowDefinitions = loadWorkflowDefinitions(h.cwd, h.home).workflows;
+		h.ctx.withheldWorkflows = withheldProjectWorkflows(h.cwd, h.home);
+		// The pending entry is the file name: the file itself is not read or
+		// evaluated until the approval makes it trusted.
+		expect(h.ctx.withheldWorkflows.map((workflow) => workflow.name)).toEqual(["broken"]);
+
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+
+		expect(h.ctx.workflowDefinitions).toEqual([]);
+		expect(h.ctx.withheldWorkflows).toEqual([]);
+		expect(h.lines()).toContain('Workflow: workflow "broken" not loaded');
+	});
+
 	test("approve with nothing pending says so and writes nothing", () => {
 		const h = harness();
 		plant(join(h.home, ".labunbun", "agents", "researcher.md"), "---\ndescription: Deep research\n---\nUser body.\n");

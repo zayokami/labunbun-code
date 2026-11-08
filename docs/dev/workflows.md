@@ -13,7 +13,9 @@ The runtime is `packages/coding-agent/src/workflow-*.ts`. Saved definitions are 
 
 `console` is shadowed to `log()`, so a stray `console.log` becomes a progress line instead of writing somewhere nobody reads. `Object.create(Math)` keeps every other `Math` method while replacing only `random`.
 
-The script is wrapped in an async IIFE; the meta statement is blanked with spaces (newlines preserved) before evaluation, so line numbers in a stack trace still point at the saved file. Only `export const meta` is allowed as an export; any other `export` is rejected before anything runs.
+The script is wrapped in an async IIFE; the meta statement is blanked with spaces (newlines preserved) before evaluation, so line numbers in a stack trace still point at the saved file. Only `export const meta` is allowed as an export; any other `export` is rejected before anything runs. Both the meta search and the export guard run on a copy with comments and string/template literals blanked, so a mention of either in prose is not mistaken for a declaration.
+
+The runner never waits forever on a script that does not settle: the script's promise is raced with the abort signal, so a canceled run ends even when the script is parked on a promise nothing will resolve. The script itself cannot be unwound, but every `agent()` call it makes afterwards refuses on the aborted signal.
 
 ## Hooks
 
@@ -25,9 +27,11 @@ The concurrency cap is one `Gate` for the whole run, held around the `agent()` c
 
 ## Structured output
 
-`agent(prompt, {schema})` returns a validated object instead of text. The subagent layer appends an instruction to its system prompt and, where the wire has the field, sends the schema natively (`output-schema.ts`, shared with `-p --output-schema`). After the run, `parseJsonValue` extracts the answer — a fenced block, the whole text, or the first balanced `{`/`[` span — and `validateWorkflowSchema` checks the keywords a workflow author reaches for: `type`, `properties`, `required`, `items`, `enum`, `const`, string and number bounds, `additionalProperties`, and `allOf`/`anyOf`/`oneOf`. Unknown keywords are treated as satisfied, so a schema written for a stricter validator still works.
+`agent(prompt, {schema})` returns a validated object instead of text. The subagent layer appends an instruction to its system prompt and, where the wire has the field, sends the schema natively (`output-schema.ts`, shared with `-p --output-schema`). After the run, `parseJsonValue` extracts the answer — a fenced block, the whole text, or the earliest balanced `{`/`[` span that parses — and `validateWorkflowSchema` checks the keywords a workflow author reaches for: `type`, `properties`, `required`, `items`, `enum`, `const`, string and number bounds, `additionalProperties`, and `allOf`/`anyOf`/`oneOf`. Unknown keywords are treated as satisfied, so a schema written for a stricter validator still works.
 
-One failure gets one retry with the validator's complaints in the prompt. A second failure is reported, not retried again: the caller decides how much one answer is worth. The retry is a new prompt on the same subagent session, so the model keeps the context that produced the answer it is fixing.
+The wire list is only wires that actually forward the schema. `openai-responses` carries `text.format`; the ChatGPT subscription adapter rebuilds that request field by field and has no `text`, so it is absent — a workflow call there still gets the prompt instruction and the post-run parse, but not a wire-level guarantee, and `-p --output-schema` refuses up front instead of returning free-form text under a structured flag.
+
+One failure gets one retry with the validator's complaints in the prompt. A second failure is reported, not retried again: the caller decides how much one answer is worth. The retry is a new prompt on the same subagent session, so the model keeps the context that produced the answer it is fixing. A retry only happens after a run that ended `completed`: a session stopped by max-turns, by the budget gate, or by `/subagents stop` has already been told it will not answer again, and asking once more would revive a stopped run and spend after the stop.
 
 ## Resume
 
@@ -46,20 +50,28 @@ On resume the occurrence counters start at zero for every call hash, not after t
 
 A result too large to store (over 4 MB of JSON) is journaled as an error saying so, so resume re-runs that call instead of replaying part of it. This is the same rule as the item cap: fail loudly, never hand back a silent truncation.
 
-`resume_from` with no script or name reuses the saved `script.js` and `args.json`. A new run is created for every call without `resume_from`; there is no automatic "continue the last run", because a resumed workflow is a deliberate act.
+A crash can leave the final journal line half-written. `open` repairs the file before replaying: a complete record missing only its newline keeps its entry, and a torn one is cut — the same entry `readJournal` was already skipping. Without the cut, the next append would fuse onto the fragment and the two records would be unreadable to every later open.
+
+A resume with different `args` records them in `args.resume.json`, beside the original `args.json`, and logs that it did. The original file stays the record of the original invocation, and a later resume with no args still replays it — the same rule `script.resume.js` follows.
+
+`resume_from` with no script or name reuses the saved `script.js` and `args.json`. The id is checked as a single directory name before it is joined to the runs root, so a `../` cannot point the journal somewhere else. A new run is created for every call without `resume_from`; there is no automatic "continue the last run", because a resumed workflow is a deliberate act.
 
 ## Worktree isolation
 
-`isolation: "worktree"` creates a detached worktree at HEAD for that call, runs the subagent with `cwd` set to it, then checks `git status --porcelain` and `rev-parse HEAD`:
+`isolation: "worktree"` creates a detached worktree at HEAD for that call, runs the subagent with `cwd` set to it, then checks `git status --porcelain --ignored=traditional` and `rev-parse HEAD`:
 
 - unchanged → `git worktree remove --force`, the directory goes away;
 - changed, or any git failure → the worktree is kept and its path reported in the tool result and the journal.
 
+Ignored files count as changed. An agent asked to produce a build output, a log or a local config writes exactly the files git ignores, and a plain status call would have called that worktree untouched and deleted them. `traditional` mode collapses an ignored directory to one line, so a dependency install costs a line rather than a walk; a git too old for the flag falls back to the plain check.
+
 Kept worktrees are the one cleanup decision that can destroy work, so the rule is fail-closed. This also means a script that isolates a read-only agent pays a checkout per call with nothing to show for it; the tool description and the skill both say to use it only for parallel mutation.
+
+Each call prefers `worktrees/agent-<n>`. When that name is taken — a kept worktree from an earlier run, or a registration git still holds — `createWorkflowWorktree` tries `agent-<n>-2`, `-3`, … up to 100 rather than failing the call. The directory name is a slot, not the record; the journal entry names the directory that actually ran. Nothing is deleted to make room.
 
 ## Trust and discovery
 
-Workflow scripts are executable, so the project tier sits behind the same one-time trust decision as project agents, skills, memory files and output styles. `DefinitionKind` gains `"workflows"`; `/agents approve` records it alongside the others and pushes the adopted definitions into the live list the tool reads, so a project workflow runs in the session that approved it. The tool description's catalogue is frozen at mount, like every other prompt list — the next start lists it there, while `/agents` lists it immediately. A `-p` run has no dialog and withholds the project tier, saying so on stderr.
+Workflow scripts are executable, so the project tier sits behind the same one-time trust decision as project agents, skills, memory files and output styles. `DefinitionKind` gains `"workflows"`; `/agents approve` records it and reloads the trusted definitions into the live list the tool reads, so a project workflow runs in the session that approved it. Before approval the withheld tier is enumerated from file names alone — it never reads or evaluates a project file, because evaluating `meta` means `vm.runInContext` on a repository's code and `node:vm` is not a security boundary. A file that turns out to be invalid after approval is reported as a note and does not count as loaded. The tool description's catalogue is frozen at mount, like every other prompt list — the next start lists it there, while `/agents` lists it immediately. A `-p` run has no dialog and withholds the project tier, saying so on stderr.
 
 Definition loading details:
 

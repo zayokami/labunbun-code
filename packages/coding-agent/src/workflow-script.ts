@@ -123,14 +123,78 @@ interface MetaLiteral {
 	literal: string;
 }
 
+/**
+ * Blank out everything that is not code — comments, string literals and
+ * template literals — keeping newlines so every index still points at the same
+ * place in the original script. The meta declaration and the `export` guard are
+ * statements, so a mention of either inside a comment or a string must not be
+ * mistaken for one.
+ */
+function maskNonCode(script: string): string {
+	let out = "";
+	let mode: "code" | "'" | '"' | "`" | "line" | "block" = "code";
+	for (let index = 0; index < script.length; index++) {
+		const char = script[index];
+		const next = script[index + 1];
+		if (mode === "code") {
+			if (char === "/" && next === "/") {
+				mode = "line";
+				out += "  ";
+				index++;
+				continue;
+			}
+			if (char === "/" && next === "*") {
+				mode = "block";
+				out += "  ";
+				index++;
+				continue;
+			}
+			if (char === "'" || char === '"' || char === "`") {
+				mode = char;
+				out += " ";
+				continue;
+			}
+			out += char;
+			continue;
+		}
+		if (mode === "line") {
+			if (char === "\n") {
+				mode = "code";
+				out += "\n";
+			} else out += " ";
+			continue;
+		}
+		if (mode === "block") {
+			if (char === "*" && next === "/") {
+				mode = "code";
+				out += "  ";
+				index++;
+				continue;
+			}
+			out += char === "\n" ? "\n" : " ";
+			continue;
+		}
+		// Inside a string or template: keep the length and the newlines, drop the text.
+		if (char === "\\") {
+			out += "  ";
+			index++;
+			continue;
+		}
+		if (char === mode) mode = "code";
+		out += char === "\n" ? "\n" : " ";
+	}
+	return out;
+}
+
 /** Find `export const meta = <object literal>` and the extent of the statement. */
 function findMetaLiteral(script: string): MetaLiteral | undefined {
-	const declaration = /(^|\n)([ \t]*)export\s+const\s+meta\s*=\s*/g.exec(script);
+	const code = maskNonCode(script);
+	const declaration = /(^|\n)([ \t]*)export\s+const\s+meta\s*=\s*/g.exec(code);
 	if (!declaration) return undefined;
 	const start = declaration.index + declaration[1].length;
 	let index = declaration.index + declaration[0].length;
-	while (index < script.length && /\s/.test(script[index])) index++;
-	if (script[index] !== "{") return undefined;
+	while (index < script.length && /\s/.test(code[index])) index++;
+	if (code[index] !== "{") return undefined;
 	const literalStart = index;
 	let depth = 0;
 	let mode: "code" | "'" | '"' | "`" | "line" | "block" = "code";
@@ -225,7 +289,7 @@ export function parseWorkflowScript(script: string): ParsedWorkflowScript {
 		}
 		body = maskRange(script, found.start, found.end);
 	}
-	if (/(^|\n)\s*export\s+/.test(body)) {
+	if (/(^|\n)\s*export\s+/.test(maskNonCode(body))) {
 		return { body, meta, error: "workflow scripts run as a function body; only `export const meta` is supported" };
 	}
 	return { body, meta };
@@ -509,11 +573,27 @@ export async function runWorkflowScript(options: RunWorkflowScriptOptions): Prom
 	const compiled = new vm.Script(body, { filename: "workflow.js" });
 	const promise = compiled.runInContext(context, { timeout: options.timeoutMs ?? WORKFLOW_SYNC_TIMEOUT_MS });
 	let value: unknown;
+	let onAbort: (() => void) | undefined;
+	// Race the script with the cancel rather than checking after it: a script
+	// awaiting something that never settles would otherwise hold the run open
+	// long after the user stopped it. The script cannot be unwound, but the run
+	// can stop waiting for it — and every `agent()` call it makes afterwards
+	// refuses on the aborted signal.
+	const aborted = new Promise<never>((_resolve, reject) => {
+		if (signal.aborted) {
+			reject(new WorkflowAbortedError());
+			return;
+		}
+		onAbort = () => reject(new WorkflowAbortedError());
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 	try {
-		value = await (promise as Promise<unknown>);
+		value = await Promise.race([promise as Promise<unknown>, aborted]);
 	} catch (error) {
 		if (signal.aborted) throw new WorkflowAbortedError();
 		throw error;
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
 	}
 	if (signal.aborted) throw new WorkflowAbortedError();
 	return {

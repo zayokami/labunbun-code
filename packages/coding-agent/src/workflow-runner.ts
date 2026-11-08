@@ -15,7 +15,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Model, ThinkingLevel } from "@labunbun/ai";
-import { WorkflowJournal, workflowCallKey } from "./workflow-journal.ts";
+import { hashWorkflowValue, WorkflowJournal, workflowCallKey } from "./workflow-journal.ts";
 import {
 	formatWorkflowError,
 	runWorkflowScript,
@@ -128,6 +128,22 @@ function saveResumedScript(journal: WorkflowJournal, script: string): void {
 	journal.appendLog("resumed with an edited script (script.resume.js)");
 }
 
+/**
+ * Record the args a resume was given, when they differ from the saved ones.
+ *
+ * `args.json` is the original invocation's record, and a resume without args
+ * replays it — that is what resuming means. A resume with different args is a
+ * different work order against the same script, so the new value is kept beside
+ * the original (the same shape as `script.resume.js`) instead of overwriting
+ * the record or being dropped after the run.
+ */
+function saveResumedArgs(journal: WorkflowJournal, args: unknown): void {
+	if (!journal.resumed || args === undefined) return;
+	if (hashWorkflowValue(args) === journal.meta.argsHash) return;
+	writeFileSync(join(journal.dir, "args.resume.json"), `${JSON.stringify(args, null, 2)}\n`, "utf8");
+	journal.appendLog("resumed with different args (args.resume.json)");
+}
+
 export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkflowResult> {
 	const now = options.now ?? Date.now;
 	const startedAt = now();
@@ -146,6 +162,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
 	const name = options.name ?? journal.meta.name;
 	const script = options.script ?? journal.script;
 	saveResumedScript(journal, script);
+	saveResumedArgs(journal, options.args);
 
 	const report = (line: string) => {
 		journal.appendLog(line);

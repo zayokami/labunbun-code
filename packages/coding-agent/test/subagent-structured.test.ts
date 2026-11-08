@@ -130,6 +130,20 @@ describe("structured answers", () => {
 		expect(contexts).toHaveLength(2);
 	});
 
+	test("a run that ended before completing is not asked again for its schema", async () => {
+		// max_turns ends the run with no final prose. The schema retry used to
+		// send another request anyway, spending on a run the session had already
+		// ended — the same shape as a stopped subagent being revived.
+		const { control, contexts } = harness({ steps: [{ toolCalls: [{ name: "echo", arguments: { text: "hi" } }] }] });
+		const outcome = await control.spawn({ ...REQUEST, maxTurns: 1 }, { cwd: tempRoot() }, { outputSchema: SCHEMA });
+
+		expect(outcome.reason).not.toBe("completed");
+		expect(outcome.structured).toBeUndefined();
+		expect(outcome.structuredError).toBeUndefined();
+		// One request: the original. No retry after a run that did not finish.
+		expect(contexts).toHaveLength(1);
+	});
+
 	test("the retry continues the same conversation", async () => {
 		const { control, contexts } = harness({ steps: [{ text: "nope" }, { text: '{"n": 4}' }] });
 		await control.spawn(REQUEST, { cwd: tempRoot() }, { outputSchema: SCHEMA });

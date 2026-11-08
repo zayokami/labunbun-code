@@ -23,6 +23,9 @@ import { join } from "node:path";
 
 export const WORKFLOW_RUN_VERSION = 1;
 
+/** A run id names exactly one directory; anything with a separator is not one. */
+const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /** Entries larger than this are not journaled; the call re-runs on resume. */
 export const MAX_JOURNAL_RESULT_CHARS = 4_000_000;
 
@@ -177,7 +180,7 @@ export class WorkflowJournal {
 	static create(options: WorkflowJournalOptions): WorkflowJournal {
 		const now = options.now ?? Date.now;
 		const createdAt = now();
-		const runId = options.runId ?? `wf-${createdAt.toString(36)}-${randomBytes(2).toString("hex")}`;
+		const runId = options.runId ?? `wf-${createdAt.toString(36)}-${randomBytes(4).toString("hex")}`;
 		const dir = join(options.root, runId);
 		mkdirSync(dir, { recursive: true });
 		const meta: WorkflowRunMeta = {
@@ -209,6 +212,10 @@ export class WorkflowJournal {
 
 	/** Load an earlier run. Unknown run ids throw with the path that was tried. */
 	static open(options: WorkflowJournalOpenOptions): WorkflowJournal {
+		// `resume_from` reaches this from a tool call, so the id is checked before
+		// it is joined: `../` must not be able to point the journal at a directory
+		// outside the runs root.
+		if (!RUN_ID_PATTERN.test(options.runId)) throw new Error(`Invalid workflow run id: ${options.runId}`);
 		const dir = join(options.root, options.runId);
 		const metaPath = join(dir, "run.json");
 		if (!existsSync(metaPath)) throw new Error(`Unknown workflow run ${options.runId} (looked in ${dir})`);
@@ -218,6 +225,7 @@ export class WorkflowJournal {
 		const script = readFileSync(scriptPath, "utf8");
 		const argsPath = join(dir, "args.json");
 		const args: unknown = existsSync(argsPath) ? JSON.parse(readFileSync(argsPath, "utf8")) : undefined;
+		repairTornJournal(join(dir, "journal.jsonl"));
 		const entries = readJournal(join(dir, "journal.jsonl"));
 		return new WorkflowJournal({
 			dir,
@@ -313,6 +321,31 @@ function writeMeta(dir: string, meta: WorkflowRunMeta): void {
 	const tmp = `${path}.tmp`;
 	writeFileSync(tmp, JSON.stringify(meta, null, 2), "utf8");
 	renameSync(tmp, path);
+}
+
+/**
+ * A crash can leave the last journal line half-written. `readJournal` skips it,
+ * but the next append would be glued onto it, fusing two records into one line
+ * that parses as neither — every later entry then disappears on the next open.
+ * Repair at open: a complete-but-unterminated line gets its newline back, and a
+ * torn one is cut, which is the same entry `readJournal` already ignores.
+ */
+function repairTornJournal(path: string): void {
+	if (!existsSync(path)) return;
+	const text = readFileSync(path, "utf8");
+	if (text === "" || text.endsWith("\n")) return;
+	const lastNewline = text.lastIndexOf("\n");
+	const tail = text.slice(lastNewline + 1);
+	try {
+		const parsed = JSON.parse(tail) as unknown;
+		if (parsed !== null && typeof parsed === "object") {
+			writeFileSync(path, `${text}\n`, "utf8");
+			return;
+		}
+	} catch {
+		// A torn line: fall through to the cut.
+	}
+	writeFileSync(path, text.slice(0, lastNewline + 1), "utf8");
 }
 
 function readJournal(path: string): WorkflowJournalEntry[] {

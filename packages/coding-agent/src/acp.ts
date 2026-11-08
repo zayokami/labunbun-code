@@ -1203,7 +1203,12 @@ class AcpAgent implements acp.Agent {
 
 		const memory = loadMemoryFiles(cwd, home);
 		for (const warning of memory.warnings) process.stderr.write(`Memory: ${warning}\n`);
-		const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home, { bundled: true });
+		const { skills: loadedSkills, notes: skillNotes } = loadSkillsWithNotes(cwd, home, { bundled: true });
+		// The bundled `workflow` skill teaches the Workflow tool, and this host has
+		// no subagent fleet to run one with. Offering the document would promise a
+		// call this session cannot resolve, so the one skill is dropped here — the
+		// same filter the discovery block below reads, so it is not listed either.
+		const skills = loadedSkills.filter((skill) => skill.name !== "workflow");
 		// The model's door to the same skills the discovery block lists, merged
 		// beside the sandbox tools because the skill directory is this package's
 		// to know. No `Task` and no plan tools are built here, but a skill is a

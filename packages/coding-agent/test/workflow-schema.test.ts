@@ -73,6 +73,19 @@ describe("validateWorkflowSchema", () => {
 		expect(validateWorkflowSchema({ enum: [{ a: 1 }] }, { a: 1 })).toEqual([]);
 	});
 
+	test("key order is not part of an object's value", () => {
+		expect(validateWorkflowSchema({ const: { a: 1, b: 2 } }, { b: 2, a: 1 })).toEqual([]);
+		expect(validateWorkflowSchema({ enum: [{ a: 1, b: 2 }] }, { b: 2, a: 1 })).toEqual([]);
+		expect(validateWorkflowSchema({ const: { a: 1 } }, { a: 2 })).toEqual(['$: must equal {"a":1}']);
+	});
+
+	test("prototype names are not properties of the answer", () => {
+		// `"toString" in {}` is true; a required key named after an Object
+		// prototype member must still read as missing.
+		expect(validateWorkflowSchema({ required: ["toString"] }, {})).toEqual(["$.toString: required"]);
+		expect(validateWorkflowSchema({ properties: { constructor: { type: "string" } } }, {})).toEqual([]);
+	});
+
 	test("array items, lengths, and tuple schemas", () => {
 		expect(validateWorkflowSchema({ type: "array", items: { type: "number" } }, [1, "x"])).toEqual([
 			"$[1]: expected number, got string",
@@ -147,6 +160,16 @@ describe("parseJsonValue", () => {
 
 	test("a balanced span inside prose is the last resort", () => {
 		expect(parseJsonValue('The answer is {"a": {"b": 2}} as requested.')).toEqual({ value: { a: { b: 2 } } });
+	});
+
+	test("each opener gets its own span instead of one slice across both", () => {
+		// First-opener/last-closer slicing would span `{not json}` and the real
+		// answer, parse as neither, and report the answer missing.
+		expect(parseJsonValue('Use {not json} and then the answer {"a": 2}.')).toEqual({ value: { a: 2 } });
+	});
+
+	test("a brace inside a string does not end the span", () => {
+		expect(parseJsonValue('Answer: {"note": "x } y"} — done.')).toEqual({ value: { note: "x } y" } });
 	});
 
 	test("empty and non-JSON answers fail with a sentence", () => {

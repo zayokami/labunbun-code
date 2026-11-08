@@ -82,6 +82,20 @@ describe("parseWorkflowScript", () => {
 	test("meta fields must be strings", () => {
 		expect(parseWorkflowScript("export const meta = { name: 3 };").error).toContain("meta.name must be a string");
 	});
+
+	test("a meta declaration inside a comment or a string is not a meta", () => {
+		const commented = parseWorkflowScript('/*\nexport const meta = { name: "fake" };\n*/\nreturn 1;');
+		expect(commented.meta).toBeNull();
+		expect(commented.body).toContain("export const meta");
+
+		const stringy = parseWorkflowScript('const note = `\nexport const meta = { name: "fake" };\n`;\nreturn note;');
+		expect(stringy.meta).toBeNull();
+		expect(stringy.error).toBeUndefined();
+	});
+
+	test("an export mentioned in a comment is not a second export", () => {
+		expect(parseWorkflowScript("/*\nexport default 1;\n*/\nreturn 1;").error).toBeUndefined();
+	});
 });
 
 describe("runWorkflowScript", () => {
@@ -383,6 +397,16 @@ describe("abort", () => {
 			},
 		});
 		await expect(run()).rejects.toBeInstanceOf(WorkflowAbortedError);
+	});
+
+	test("a script that never settles does not keep the run alive after a cancel", async () => {
+		// The script cannot be unwound, but the runner must stop waiting for it;
+		// otherwise an `await new Promise(() => {})` outlives the user's stop.
+		const controller = new AbortController();
+		const { run } = harness({ script: "await new Promise(() => {});\nreturn 1;", signal: controller.signal });
+		const pending = run();
+		controller.abort();
+		await expect(pending).rejects.toBeInstanceOf(WorkflowAbortedError);
 	});
 });
 

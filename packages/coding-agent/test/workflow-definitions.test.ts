@@ -101,6 +101,28 @@ describe("loading", () => {
 		expect(loadWorkflowDefinitions(cwd, home).workflows).toEqual([]);
 	});
 
+	test("the withheld tier lists names and never evaluates the files", () => {
+		const { home, cwd, projectDir } = layout();
+		write(projectDir, "deploy.js", workflow("deploy", "Deploy it"));
+		const probe = "LBB_WORKFLOW_WITHHELD_PROBE";
+		delete process.env[probe];
+		// If the metadata were evaluated, this vm escape would reach the host
+		// realm and set the variable. Withholding is supposed to mean the file
+		// has not run — even in a sandbox that is not a security boundary.
+		write(
+			projectDir,
+			"probe.js",
+			`export const meta = { name: (this.constructor.constructor("return process")().env.${probe} = "ran", "probe") };`,
+		);
+
+		const withheld = withheldProjectWorkflows(cwd, home);
+
+		expect(withheld.map((definition) => definition.name)).toEqual(["deploy", "probe"]);
+		expect(withheld.every((definition) => definition.script === "" && definition.description === "")).toBe(true);
+		expect(process.env[probe]).toBeUndefined();
+		delete process.env[probe];
+	});
+
 	test("a project definition overrides a user definition of the same name", () => {
 		const { home, cwd, userDir, projectDir } = layout();
 		write(userDir, "shared.js", workflow("shared", "From the user tier"));

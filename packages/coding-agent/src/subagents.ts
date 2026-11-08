@@ -763,28 +763,34 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// The handle is in the table and the first request has not gone out:
 		// the one moment a caller can learn the new id before the run ends.
 		onSpawned?.(handle);
-		store?.appendCustom(SUBAGENT_START_KIND, { sidechainId, agentType: definition.agentType, prompt: input.prompt });
 
 		// The end entry is the start's pair, and it is written on the way out
 		// however the run leaves: a throw out of prompt() used to skip this
 		// write, leaving a start that can only be read as a run that never
-		// ended. `reason` defaults to "error" so an abnormal exit is recorded
-		// as one, and the report and message count are read after the throw —
-		// whatever the subagent managed before it died is still worth keeping.
+		// ended. The start write happens inside the same guard for the same
+		// reason — a store that refuses it must not leave a live handle with no
+		// ending, so it fails through the pairing just like a prompt throw.
 		const events: string[] = [];
 		let reason: AgentEndReason = "error";
 		let structured: unknown;
 		let structuredError: string | undefined;
 		try {
+			store?.appendCustom(SUBAGENT_START_KIND, { sidechainId, agentType: definition.agentType, prompt: input.prompt });
 			reason = await runPrompt(handle, input.prompt, signal, events);
-			if (run?.outputSchema && !signal.aborted) {
+			// A structured answer is only owed by a run that finished normally. A
+			// run ended by max-turns, by the budget gate's abort, or by
+			// `/subagents stop` has already been told it will not answer again, and
+			// asking it once more would spend a request after the stop — and
+			// `runPrompt` would mark the stopped handle live again.
+			const mayAnswer = () => reason === "completed" && !signal.aborted && handle.state !== "stopped";
+			if (run?.outputSchema && mayAnswer()) {
 				// One retry, with the validator's complaints in hand: a model that
 				// answered in prose or missed a required key can usually fix it when
 				// told what was wrong, and reporting `null` on the first miss would
 				// hide a correctable mistake. A second failure is reported, not
 				// retried again — the caller decided how much one answer is worth.
 				let attempt = readStructured(run.outputSchema, finalReport(subSession));
-				if (attempt.error !== undefined && !signal.aborted) {
+				if (attempt.error !== undefined && mayAnswer()) {
 					const retryPrompt = [
 						`Your previous answer did not satisfy the required JSON schema: ${attempt.error}.`,
 						"Reply again with ONLY the JSON value that matches this schema — no prose, no Markdown fences:",
@@ -793,7 +799,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 					reason = await runPrompt(handle, retryPrompt, signal, events);
 					attempt = readStructured(run.outputSchema, finalReport(subSession));
 				}
-				if (!signal.aborted) {
+				if (mayAnswer()) {
 					if (attempt.error !== undefined) structuredError = attempt.error;
 					else structured = attempt.value;
 				}

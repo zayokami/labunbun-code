@@ -12,11 +12,15 @@
  *   discard.
  */
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+
+/** How many numbered alternatives to try before giving up on a taken path. */
+const MAX_WORKTREE_NAME_ATTEMPTS = 100;
 
 /** Run git and return stdout; reject on a nonzero exit. */
 export type WorkflowGit = (args: string[], cwd: string) => Promise<string>;
@@ -39,13 +43,29 @@ export interface WorkflowWorktree {
 
 export interface CreateWorktreeOptions {
 	cwd: string;
-	/** Directory to create; must not exist yet. */
+	/**
+	 * Preferred directory to create. When it is already taken — a kept worktree
+	 * from an earlier run, or a registration git still holds — the next free
+	 * `<dest>-2`, `<dest>-3`, … is used instead.
+	 */
 	dest: string;
 	git?: WorkflowGit;
 }
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Whether `git worktree add` refused because the slot is taken rather than
+ * because the command is broken.
+ *
+ * git has no machine-readable code here, so the three refusals a taken slot
+ * produces are matched by sentence. A localized git would fall through to the
+ * plain error, which is the same outcome as before this loop existed.
+ */
+function slotTaken(error: unknown): boolean {
+	return /already exists|already registered|already checked out/i.test(messageOf(error));
 }
 
 /** Add a detached worktree of `cwd`'s repository at HEAD. */
@@ -65,20 +85,45 @@ export async function createWorkflowWorktree(options: CreateWorktreeOptions): Pr
 		throw new Error(`isolation: "worktree" needs a HEAD commit (${messageOf(error)})`);
 	}
 	await mkdir(dirname(options.dest), { recursive: true });
-	try {
-		await git(["worktree", "add", "--detach", options.dest, baseHead], repoRoot);
-	} catch (error) {
-		throw new Error(`Could not create a worktree at ${options.dest} (${messageOf(error)})`);
+	let dest = options.dest;
+	for (let attempt = 1; ; attempt++) {
+		if (!existsSync(dest)) {
+			try {
+				await git(["worktree", "add", "--detach", dest, baseHead], repoRoot);
+				return { repoRoot, path: dest, baseHead };
+			} catch (error) {
+				if (!slotTaken(error)) throw new Error(`Could not create a worktree at ${dest} (${messageOf(error)})`);
+			}
+		}
+		// A kept worktree from a resumed run owns the preferred name. The name is a
+		// slot, not the record — the journal entry names the directory — so the
+		// next free suffix is the answer, and nothing is ever deleted to make room.
+		if (attempt >= MAX_WORKTREE_NAME_ATTEMPTS) {
+			throw new Error(
+				`Could not create a worktree near ${options.dest}: ${MAX_WORKTREE_NAME_ATTEMPTS} names are taken`,
+			);
+		}
+		dest = `${options.dest}-${attempt + 1}`;
 	}
-	return { repoRoot, path: options.dest, baseHead };
 }
 
-/** Whether the agent left anything behind: tracked edits, untracked files, or a commit. */
+/** Whether the agent left anything behind: tracked edits, untracked files, ignored files, or a commit. */
 export async function worktreeChanged(
 	worktree: WorkflowWorktree,
 	git: WorkflowGit = defaultWorkflowGit,
 ): Promise<boolean> {
-	const status = (await git(["status", "--porcelain"], worktree.path)).trim();
+	// Ignored files count as work too. An agent asked to produce a build output,
+	// a log or a local config writes exactly those, and a plain status call would
+	// call the worktree untouched and delete the files. `traditional` mode
+	// collapses an ignored directory to one line, so a dependency install costs a
+	// line rather than a directory walk. A git too old for the flag falls back to
+	// the plain check rather than keeping every worktree forever.
+	let status: string;
+	try {
+		status = (await git(["status", "--porcelain", "--ignored=traditional"], worktree.path)).trim();
+	} catch {
+		status = (await git(["status", "--porcelain"], worktree.path)).trim();
+	}
 	if (status !== "") return true;
 	const head = (await git(["rev-parse", "HEAD"], worktree.path)).trim();
 	return head !== worktree.baseHead;

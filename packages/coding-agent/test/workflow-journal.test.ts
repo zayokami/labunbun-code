@@ -151,6 +151,37 @@ describe("the journal's honesty rules", () => {
 		expect(reopened.nextKey("k")).toBe("k#0");
 	});
 
+	test("a torn line is cut at open, so the next record is not fused onto it", () => {
+		const root = tempRoot();
+		const journal = journalAt(root);
+		journal.record({ key: "k#0", label: "a", status: "ok", result: "v" });
+		const path = join(journal.dir, "journal.jsonl");
+		appendFileSync(path, '{"seq": 1, "key": "k#1"', "utf8");
+
+		const reopened = WorkflowJournal.open({ root, runId: "run-1" });
+		reopened.record({ key: "k#1", label: "b", status: "ok", result: "w" });
+
+		// Appending straight after the torn tail would produce one line that
+		// parses as neither record, losing both on the next open.
+		const lines = readFileSync(path, "utf8").trim().split("\n");
+		expect(lines).toHaveLength(2);
+		for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
+		expect(WorkflowJournal.open({ root, runId: "run-1" }).lookup("k#1")?.result).toBe("w");
+	});
+
+	test("a complete final line missing its newline keeps its entry", () => {
+		const root = tempRoot();
+		const journal = journalAt(root);
+		journal.record({ key: "k#0", label: "a", status: "ok", result: "v" });
+		const path = join(journal.dir, "journal.jsonl");
+		writeFileSync(path, readFileSync(path, "utf8").slice(0, -1), "utf8");
+
+		const reopened = WorkflowJournal.open({ root, runId: "run-1" });
+
+		expect(reopened.lookup("k#0")?.result).toBe("v");
+		expect(readFileSync(path, "utf8").endsWith("\n")).toBe(true);
+	});
+
 	test("finish seals the run with its counts", () => {
 		const root = tempRoot();
 		const journal = journalAt(root);
@@ -165,6 +196,13 @@ describe("the journal's honesty rules", () => {
 		expect(() => WorkflowJournal.open({ root, runId: "nope" })).toThrow(
 			/Unknown workflow run nope \(looked in .*nope\)/,
 		);
+	});
+
+	test("a run id that would leave the runs root is refused", () => {
+		const root = tempRoot();
+		expect(() => WorkflowJournal.open({ root, runId: "../escape" })).toThrow("Invalid workflow run id");
+		expect(() => WorkflowJournal.open({ root, runId: ".." })).toThrow("Invalid workflow run id");
+		expect(() => WorkflowJournal.open({ root, runId: "a/b" })).toThrow("Invalid workflow run id");
 	});
 
 	test("a run without its saved script cannot be resumed", () => {

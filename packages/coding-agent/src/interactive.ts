@@ -1300,7 +1300,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * subagent makes while it is still running.
 	 */
 	let thinkingLevel: ThinkingLevel | undefined = settings.thinkingLevel;
-	const agentDefinitions = loadAgentDefinitions(cwd);
+	const agentDefinitions = loadAgentDefinitions(cwd, home);
 	// The host's own registry, so `/subagents` can see lifecycles the REPL
 	// did not spawn — the tools hold no display state of their own.
 	const subagentRegistry = new SubagentRegistry();
@@ -1398,7 +1398,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// The three tools as one list for every consumer that spreads them; the
 	// control rides beside them for the command layer only.
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
-	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, undefined, { bundled: true });
+	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home, { bundled: true });
 	markStartup("definitions+skills loaded");
 	// The model's half of the same skill list the slash commands expand for the
 	// user. Built here because the skill directory is this package's to know;
@@ -3816,18 +3816,26 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const memoryFiles = pendingMemory.splice(0, pendingMemory.length);
 				const styleFiles = pendingStyles.splice(0, pendingStyles.length);
 				const workflowFiles = pendingWorkflows.splice(0, pendingWorkflows.length);
-				// Workflows join the live list at once: a definition is read from disk
-				// at the call, so there is nothing frozen to wait for. A project file
-				// replaces a user file of the same name, exactly as the loader's
-				// precedence would on the next start — appending would leave the user
-				// copy first in the list and winning the lookup.
-				if (ctx.workflowDefinitions) {
-					for (const workflow of workflowFiles) {
-						const at = ctx.workflowDefinitions.findIndex((candidate) => candidate.name === workflow.name);
-						if (at >= 0) ctx.workflowDefinitions[at] = workflow;
-						else ctx.workflowDefinitions.push(workflow);
-					}
+				// Workflows join the live list at once, but they are reloaded rather
+				// than copied over: the withheld entries carry only a name (evaluating
+				// an untrusted file's meta is exactly what the approval buys), so the
+				// trusted tier is read now. Replacing the array's contents in place
+				// keeps the reference the tool's definition getter already holds.
+				// Project files replace a user file of the same name, exactly as the
+				// loader's precedence would on the next start.
+				if (ctx.workflowDefinitions && workflowFiles.length > 0) {
+					const reloaded = loadWorkflowDefinitions(ctx.cwd, ctx.home);
+					ctx.workflowDefinitions.splice(0, ctx.workflowDefinitions.length, ...reloaded.workflows);
+					for (const note of reloaded.notes) pushInfo(ctx.handle, `Workflow: ${note}`);
 				}
+				// Counted from the reloaded list, not from the pending names: a file
+				// that turned out to be invalid did not load, and the confirmation
+				// must not say it did.
+				const adoptedWorkflows = workflowFiles.filter((workflow) =>
+					(ctx.workflowDefinitions ?? []).some(
+						(loaded) => loaded.name === workflow.name && loaded.source === "project",
+					),
+				).length;
 				const restarts: string[] = [];
 				if (memoryFiles.length > 0) restarts.push("memory loads on the next start, since it is read at startup");
 				if (styleFiles.length > 0) {
@@ -3846,7 +3854,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						skills: adopted.length,
 						memory: memoryFiles.length,
 						styles: styleFiles.length,
-						workflows: workflowFiles.length,
+						workflows: adoptedWorkflows,
 					})}${tail}.`,
 				);
 				return true;
