@@ -914,6 +914,7 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 	"CompareArtifacts",
 	"InspectWebCapture",
 	"RepoMap",
+	"DetectReverseEngines",
 	"TaskList",
 	"TaskGet",
 	"Skill",

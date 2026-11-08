@@ -1098,6 +1098,12 @@ describe("tool registry shape", () => {
 			"CompareArtifacts",
 			"InspectWebCapture",
 			"RepoMap",
+			"DetectReverseEngines",
+			"AnalyzeWithIda",
+			"AnalyzeWithGhidra",
+			"ListFridaTargets",
+			"InstrumentWithFrida",
+			"DebugWithX64dbg",
 		]);
 	});
 

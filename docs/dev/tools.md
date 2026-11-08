@@ -645,6 +645,10 @@ The walker follows the operand length of every single-byte and `0xFE` opcode fro
 
 The report lists up to 40 types, 20 user strings of up to 120 displayed characters each, 20 call edges, and 20 field edges. It counts up to 4,000 distinct edges; occurrences past that cap are still counted but not listed. It reads at most 2,000 method bodies or 8 MiB of IL, whichever comes first. Every cap has a counted line of its own. The block does not resolve nested-type enclosures, signature types, generic arguments, or exception handlers, and it does not execute or interpret IL. It is a structural summary, not a disassembler or a decompiler.
 
+### Native reverse-engineering engines
+
+Six tools in `packages/tools/src/engines/` drive installed engines rather than parsing bytes. They are appended to the frozen order as one block: `DetectReverseEngines`, `AnalyzeWithIda`, `AnalyzeWithGhidra`, `ListFridaTargets`, `InstrumentWithFrida`, and `DebugWithX64dbg`. `DetectReverseEngines` is the only read-only member and the only one in `PLAN_MODE_READ_ONLY_TOOLS`; it reads the filesystem and never starts a process. The other five go through `Operations.exec` under a workspace policy, are not concurrency safe, and say in their descriptions whether they execute the target. IDA and Ghidra analyze a private copy, verify it by SHA-256, and never run it; Frida and x64dbg are dynamic and require the sandbox permissions their descriptions name. Each run has a timeout, a capped report, and a workspace removed in a `finally`. `docs/dev/native-engines.md` holds the command shapes, the bridge scripts, and the known traps.
+
 ### Tool set assembly
 
 `createAllTools` builds the default set, and the order of the tools is frozen there for the cache reason above.
@@ -730,6 +734,12 @@ The comments also state the measured costs and the run or date that measured the
 | `packages/tools/src/repomap-tags.ts` | Definitions, references and snippets, and the compact cache payload. |
 | `packages/tools/src/repomap-worker-pool.ts` | The parse worker pool, its lazy start, and the in-thread fallback. |
 | `packages/tools/src/repomap-worker.ts` | The worker entry: one Parser, one grammar per language. |
+| `packages/tools/src/engines/common.ts` | Engine discovery, the private workspace, the copy and digest check, and failure text. |
+| `packages/tools/src/engines/detect.ts` | `DetectReverseEngines`: the read-only install report. |
+| `packages/tools/src/engines/ida.ts` | `AnalyzeWithIda` and its embedded IDAPython bridge. |
+| `packages/tools/src/engines/ghidra.ts` | `AnalyzeWithGhidra`, the generated Java script, and the renderers. |
+| `packages/tools/src/engines/frida.ts` | `ListFridaTargets` and `InstrumentWithFrida`. |
+| `packages/tools/src/engines/x64dbg.ts` | `DebugWithX64dbg`, PE machine selection, and the fixed snapshot script. |
 | `packages/tools/src/repomap-rank.ts` | Aider-style PageRank over the file graph. |
 | `packages/tools/src/repomap-render.ts` | The token-budgeted render and the probe that fits it. |
 | `packages/tools/src/repomap-sqlite.ts` | The persistent cache table, buffered writes, and handle lifetime. |

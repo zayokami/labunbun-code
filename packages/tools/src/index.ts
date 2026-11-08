@@ -21,6 +21,20 @@ export { createCompareArtifactsTool } from "./compare-artifacts.ts";
 export { caseInsensitivePaths } from "./containment.ts";
 export { createDigestTool } from "./digest.ts";
 export { createEditTool } from "./edit.ts";
+export {
+	createAnalyzeWithGhidraTool,
+	createAnalyzeWithIdaTool,
+	createDebugWithX64dbgTool,
+	createDetectReverseEnginesTool,
+	createInstrumentWithFridaTool,
+	createListFridaTargetsTool,
+	discoverEngine,
+	discoverEngines,
+	ENGINE_LABELS,
+	type EngineId,
+	type EngineInstall,
+	type EngineSource,
+} from "./engines/index.ts";
 export { createGlobTool, type FileWalkerOps, walkProjectFiles } from "./glob.ts";
 export { createGrepTool } from "./grep.ts";
 export { createInspectSqliteTool } from "./inspect-sqlite.ts";
@@ -128,6 +142,14 @@ import { createInspectBinaryTool } from "./binary.ts";
 import { createCompareArtifactsTool } from "./compare-artifacts.ts";
 import { createDigestTool } from "./digest.ts";
 import { createEditTool } from "./edit.ts";
+import {
+	createAnalyzeWithGhidraTool,
+	createAnalyzeWithIdaTool,
+	createDebugWithX64dbgTool,
+	createDetectReverseEnginesTool,
+	createInstrumentWithFridaTool,
+	createListFridaTargetsTool,
+} from "./engines/index.ts";
 import { createGlobTool } from "./glob.ts";
 import { createGrepTool } from "./grep.ts";
 import { createInspectSqliteTool } from "./inspect-sqlite.ts";
@@ -254,5 +276,14 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createCompareArtifactsTool(cwd),
 		createInspectWebCaptureTool(cwd),
 		createRepoMapTool(cwd, { operations: ops, service: options.repoMap }),
+		// The native reverse-engineering family is appended after the read-only
+		// probes, as one block: detection first (the only read-only member), then
+		// the static engines, then the dynamic ones.
+		createDetectReverseEnginesTool(),
+		createAnalyzeWithIdaTool(cwd, ops, { tempDir: options.tempDir }),
+		createAnalyzeWithGhidraTool(cwd, ops, { tempDir: options.tempDir }),
+		createListFridaTargetsTool(cwd, ops, { tempDir: options.tempDir }),
+		createInstrumentWithFridaTool(cwd, ops, { tempDir: options.tempDir }),
+		createDebugWithX64dbgTool(cwd, ops, { tempDir: options.tempDir }),
 	];
 }

@@ -275,8 +275,12 @@ describe("recovering from a refusal for size", () => {
 		const { infos, requests, replies, activity } = await run(
 			JSON.stringify([
 				// A reply big enough that the next turn's estimate crosses the
-				// compaction threshold (window 200k → threshold 178,808).
-				{ text: "first answer", usage: { input: 185_000, output: 10 } },
+				// compaction threshold (window 200k → threshold 178,808) while staying
+				// under the hard limit once the tool schemas are added (197,000). The
+				// schemas count toward the estimate, so an anchor close to the window
+				// would put the request past the hard limit — and there a failed
+				// summary ends the run instead of being retried to the breaker.
+				{ text: "first answer", usage: { input: 181_000, output: 10 } },
 				failure,
 				{ text: "second answer" },
 				failure,
