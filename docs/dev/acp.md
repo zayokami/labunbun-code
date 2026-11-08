@@ -38,7 +38,7 @@ A remembered answer writes the same session-scoped rule the REPL's "don't ask ag
 
 ## One turn
 
-`session/prompt` (`acp.ts:707-753`) runs one prompt at a time per session (`:710-712`) and rejects an empty one (`:714-716`). The `UserPromptSubmit` hook runs on the typed text before anything is stored — the same order `-p` uses, so a hook that blocks a prompt blocks it in both; a blocked prompt becomes a JSON-RPC error carrying the hook's reason (`:718-737`).
+`session/prompt` (`acp.ts:707-753`) runs one prompt at a time per session (`:710-712`) and rejects an empty one (`:714-716`). Before the gate, the prompt's repository-map section is refreshed if the editor saved files since the last turn (`watchRepoMapPromptSection` in `repomap-wiring.ts`) — a no-op when nothing the map reads changed, so a request always carries the tree as it is on disk now. The `UserPromptSubmit` hook runs on the typed text before anything is stored — the same order `-p` uses, so a hook that blocks a prompt blocks it in both; a blocked prompt becomes a JSON-RPC error carrying the hook's reason (`:718-737`).
 
 The turn's progress arrives as `session/update` notifications built by `updatesForEvent` (`:308-331`):
 

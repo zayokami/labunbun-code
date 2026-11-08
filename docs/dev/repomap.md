@@ -368,11 +368,12 @@ unavailable the handle is inert (`watching: false`), which is the old
 behaviour: the tool and `/map-refresh` still work.
 
 The interactive host sets a stale flag on each report and rebuilds at the next
-prompt, not on the save. Three reasons for the turn boundary: a prompt already
-in flight cannot change its system prompt, a burst of saves should cost one
-walk, and a rebuild whose text equals the current section swaps nothing — so an
-edit that does not move what the map shows leaves the prompt cache alone. The
-walk is bounded by the same 200-file ceiling that decided the section was worth
+prompt, not on the save; an ACP session does the same before each
+`session/prompt`. Three reasons for the turn boundary: a prompt already in
+flight cannot change its system prompt, a burst of saves should cost one walk,
+and a rebuild whose text equals the current section swaps nothing — so an edit
+that does not move what the map shows leaves the prompt cache alone. The walk
+is bounded by the same 200-file ceiling that decided the section was worth
 carrying; a large repository pays one rejected walk per burst and keeps the
 tool as its map.
 

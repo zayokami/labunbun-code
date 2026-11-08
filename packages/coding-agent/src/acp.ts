@@ -108,7 +108,12 @@ import {
 	seatsByRef,
 } from "./model-roles.ts";
 import { loadOutputStylesWithNotes, resolveOutputStyle } from "./output-styles.ts";
-import { createRepoMapService, repoMapPromptSection } from "./repomap-wiring.ts";
+import {
+	createRepoMapService,
+	type RepoMapPromptRefresher,
+	repoMapPromptSection,
+	watchRepoMapPromptSection,
+} from "./repomap-wiring.ts";
 import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
@@ -591,6 +596,11 @@ interface LiveSession {
 	hooks: { runtime: HooksRuntime; context: string[] };
 	/** True while a `session/prompt` turn is in flight — one at a time per session. */
 	running: boolean;
+	/**
+	 * The prompt's repository section, kept fresh between turns: the watcher is
+	 * this live session's, and closing it is part of shutting the session down.
+	 */
+	repoMap: RepoMapPromptRefresher;
 }
 
 /**
@@ -739,6 +749,10 @@ class AcpAgent implements acp.Agent {
 		}
 		live.running = true;
 		try {
+			// Files saved in the editor since the last turn refresh the map section
+			// here, before this request is built. A no-op when nothing the map reads
+			// has changed, so the common turn pays a flag check.
+			await live.repoMap.refreshIfStale();
 			// The gate runs on the typed text, before anything is stored — the same
 			// order `-p` uses, so a hook that blocks a prompt blocks it in both.
 			const { runtime, context } = live.hooks;
@@ -953,6 +967,9 @@ class AcpAgent implements acp.Agent {
 			for (const message of advisoryHookFailures("SessionEnd", outcome)) {
 				process.stderr.write(`Warning: ${message}\n`);
 			}
+			// The session's turns are over; a watch on its tree is not something to
+			// leave behind the closing connection.
+			live.repoMap.close();
 		}
 	}
 
@@ -1279,11 +1296,11 @@ class AcpAgent implements acp.Agent {
 		const outputStyles = loadOutputStylesWithNotes(cwd, home);
 		for (const note of outputStyles.notes) process.stderr.write(`Output style: ${note}\n`);
 		// The repository's shape, when it fits the prompt; a large checkout gets no
-		// section and the RepoMap tool instead.
-		const repoMapText = await repoMapPromptSection(repoMap);
-		const session: AgentSession = new AgentSession({
-			model,
-			systemPrompt: buildSystemPrompt(allTools, {
+		// section and the RepoMap tool instead. Rebuilt through one function so a
+		// refresh below changes the section and nothing else.
+		let repoMapText = await repoMapPromptSection(repoMap);
+		const buildPrompt = () =>
+			buildSystemPrompt(allTools, {
 				cwd,
 				platform: process.platform,
 				isTTY: process.stdout.isTTY ?? false,
@@ -1293,7 +1310,10 @@ class AcpAgent implements acp.Agent {
 				skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 				model,
 				repoMap: repoMapText,
-			}),
+			});
+		const session: AgentSession = new AgentSession({
+			model,
+			systemPrompt: buildPrompt(),
 			tools: allTools,
 			store,
 			cwd,
@@ -1334,6 +1354,19 @@ class AcpAgent implements acp.Agent {
 		// it — the same seeding `headless.ts` does for `--resume`. A session that
 		// was just started has none.
 		if (resumed) session.messages.push(...resumed.messages);
+		// An editor saves files between turns, and the map section built above is
+		// otherwise frozen for the life of the session. The refresher watches the
+		// tree and rebuilds before each `session/prompt`; its own note says why
+		// that boundary, and why a rebuild with the same text swaps nothing.
+		const repoMapRefresher = watchRepoMapPromptSection({
+			root: cwd,
+			service: repoMap,
+			current: () => repoMapText,
+			apply: (text) => {
+				repoMapText = text;
+				session.setSystemPrompt(buildPrompt());
+			},
+		});
 		const live: LiveSession = {
 			session,
 			store,
@@ -1342,6 +1375,7 @@ class AcpAgent implements acp.Agent {
 			permissions,
 			hooks: { runtime: hooksRuntime, context: hookContext },
 			running: false,
+			repoMap: repoMapRefresher,
 		};
 		session.on((event) => this.#onEvent(live, event));
 		return live;
