@@ -6,13 +6,14 @@
  * system prompt of every subagent spawned from it, and a skill becomes a slash
  * command whose expansion is sent to the model. Cloning a repository and opening
  * it was therefore enough to change what the model is told to be, with no user
- * action and nothing on screen to point at. The same move wears two more names:
+ * action and nothing on screen to point at. The same move wears three more names:
  * a `LABUNBUN.md`/`AGENTS.md` the walk picks up (`memory.ts`) goes into the
- * system prompt as standing instructions, and `.labunbun/output-styles` files
+ * system prompt as standing instructions, `.labunbun/output-styles` files
  * (`output-styles.ts`) replace the `# Output style` section once the user's own
- * settings name one. All four kinds load only after this directory has been
- * trusted once, each recorded separately, so a kind added later is not trusted
- * by a decision taken before it existed.
+ * settings name one, and `.labunbun/workflows` scripts (`workflow-definitions.ts`)
+ * are executable orchestration the Workflow tool will run. All five kinds load
+ * only after this directory has been trusted once, each recorded separately, so a
+ * kind added later is not trusted by a decision taken before it existed.
  *
  * Project-tier definitions now load only after this directory has been trusted
  * once, and the decision is remembered outside the working tree —
@@ -39,10 +40,10 @@ import { dirname, join, resolve } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
 
 /** The project tiers one trust decision covers, named as their directories are. */
-export type DefinitionKind = "agents" | "skills" | "memory" | "styles";
+export type DefinitionKind = "agents" | "skills" | "memory" | "styles" | "workflows";
 
 /** Fixed order, so repeated approvals write the same bytes. */
-const KINDS: DefinitionKind[] = ["agents", "skills", "memory", "styles"];
+const KINDS: DefinitionKind[] = ["agents", "skills", "memory", "styles", "workflows"];
 
 /**
  * The trust ledger, keyed by the project's directory name.
@@ -90,13 +91,21 @@ export function loadTrustedDefinitionKinds(cwd: string, home: string = homedir()
  * clause about them at all — and their confirmation says "restart", which an
  * absent tier has no business doing.
  */
-export function describeWithheld(kinds: { agents: number; skills: number; memory?: number; styles?: number }): string {
+export function describeWithheld(kinds: {
+	agents: number;
+	skills: number;
+	memory?: number;
+	styles?: number;
+	workflows?: number;
+}): string {
 	const counts = `${kinds.agents} agent definition${kinds.agents === 1 ? "" : "s"}, ${kinds.skills} skill${kinds.skills === 1 ? "" : "s"}`;
 	const memory = kinds.memory;
 	const styles = kinds.styles;
+	const workflows = kinds.workflows;
 	const parts = [counts];
 	if (memory !== undefined && memory !== 0) parts.push(`${memory} memory file${memory === 1 ? "" : "s"}`);
 	if (styles !== undefined && styles !== 0) parts.push(`${styles} output style${styles === 1 ? "" : "s"}`);
+	if (workflows !== undefined && workflows !== 0) parts.push(`${workflows} workflow${workflows === 1 ? "" : "s"}`);
 	return parts.join(", ");
 }
 
@@ -115,7 +124,7 @@ export function describeWithheld(kinds: { agents: number; skills: number; memory
  * directory, and when it is set the notice gains the scope sentence below.
  */
 export function withheldDefinitionNotice(
-	kinds: { agents: number; skills: number; memory?: number; styles?: number },
+	kinds: { agents: number; skills: number; memory?: number; styles?: number; workflows?: number },
 	audience: "repl" | "headless",
 	subdirectoryOfGitRoot?: string,
 ): string {

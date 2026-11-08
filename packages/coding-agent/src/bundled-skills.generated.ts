@@ -30,6 +30,8 @@ import f20 from "../../../.labunbun/skills/pr-body/SKILL.md" with { type: "file"
 import f21 from "../../../.labunbun/skills/simplify/SKILL.md" with { type: "file" };
 import f22 from "../../../.labunbun/skills/skill-writing/SKILL.md" with { type: "file" };
 import f23 from "../../../.labunbun/skills/verify/SKILL.md" with { type: "file" };
+import f24 from "../../../.labunbun/skills/workflow/SKILL.md" with { type: "file" };
+import f25 from "../../../.labunbun/skills/workflow/references/review-changes.js" with { type: "file" };
 import type { BundledSkillFile } from "./bundled-skills.ts";
 
 /** Every built-in skill file, keyed by its path under the skills root. */
@@ -58,4 +60,6 @@ export const BUNDLED_SKILL_FILES: ReadonlyArray<BundledSkillFile> = [
 	["simplify/SKILL.md", f21],
 	["skill-writing/SKILL.md", f22],
 	["verify/SKILL.md", f23],
+	["workflow/SKILL.md", f24],
+	["workflow/references/review-changes.js", f25],
 ];

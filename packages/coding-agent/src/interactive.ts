@@ -366,6 +366,8 @@ import {
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
 import { persistModelChoice, writeUserSettingsNestedPatch, writeUserSettingsPatch } from "./user-settings.ts";
 import { runWizard, shouldRunWizard } from "./wizard.ts";
+import { loadWorkflowDefinitions, type WorkflowDefinition, withheldProjectWorkflows } from "./workflow-definitions.ts";
+import { createWorkflowTool } from "./workflow-tool.ts";
 
 export interface InteractiveOptions {
 	modelRef?: string;
@@ -1419,6 +1421,55 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// so `/agents approve` has to record it or a repository's styles can never
 	// load — the loader would keep asking for a decision nothing can make.
 	const withheldStyles = withheldProjectOutputStyles(cwd, home);
+	// Saved workflows, loaded from the user tier and — only once trusted — the
+	// project's. The array is live: `/agents approve` pushes adopted project
+	// workflows into it, and the tool's definition getter reads the array, so an
+	// approval takes effect in the session that made it.
+	const workflowLoad = loadWorkflowDefinitions(cwd, home);
+	const workflowDefinitions = workflowLoad.workflows;
+	const withheldWorkflows = withheldProjectWorkflows(cwd, home);
+	/**
+	 * The Workflow tool, over the same fleet Task reaches: every script `agent()`
+	 * becomes a nested session through `subagentControl.spawn`, so the seat, the
+	 * budget gate, the permission funnel and the registry are shared rather than
+	 * copied. The adapter flattens the outcome the runner journals — a run that
+	 * ended for any reason other than `completed` is a failed call, even when it
+	 * left partial prose behind.
+	 */
+	const workflowTool = createWorkflowTool({
+		cwd,
+		home,
+		spawn: async (request) => {
+			const outcome = await subagentControl.spawn(
+				{ description: request.description, prompt: request.prompt, subagentType: request.subagentType },
+				{ cwd: request.cwd, signal: request.signal },
+				{
+					model: request.model,
+					cwd: request.cwd,
+					thinkingLevel: request.thinkingLevel,
+					outputSchema: request.outputSchema,
+				},
+			);
+			const failed = outcome.result.isError === true || outcome.reason !== "completed";
+			const error = outcome.result.isError
+				? outcome.result.content
+						.map((block) => (block.type === "text" ? block.text : ""))
+						.filter((text) => text !== "")
+						.join("\n")
+				: undefined;
+			return {
+				ok: !failed && outcome.structuredError === undefined,
+				report: outcome.report,
+				structured: outcome.structured,
+				structuredError: outcome.structuredError,
+				reason: outcome.reason,
+				error,
+			};
+		},
+		report: (text) => pushInfo(handle, text),
+		resolveModel,
+		definitions: () => workflowDefinitions,
+	});
 	const planCallbacks: PlanModeCallbacks = createPlanModeCallbacks(
 		() => sessionRef,
 		// The approval dialog is built here rather than handed the handle whole so
@@ -1494,6 +1545,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		skillTool,
 		...mcpConnections.flatMap((c) => c.tools),
 		...subagentTools,
+		workflowTool,
 		...planTools,
 		askUserTool,
 	];
@@ -2465,6 +2517,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				withheldSkills,
 				withheldMemory,
 				withheldStyles,
+				workflowDefinitions,
+				withheldWorkflows,
 				memoryFiles: memory.files,
 				subagents: subagentRegistry,
 				subagentControl,
@@ -2545,7 +2599,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// skill simply stops answering and nothing on screen says there was one. MCP has
 	// no equivalent line — a pending server is only visible under `/status` — which
 	// is a habit this starts rather than one it copies.
-	if (withheldAgents.length + withheldSkills.length + withheldMemory.length + withheldStyles.length > 0) {
+	if (
+		withheldAgents.length +
+			withheldSkills.length +
+			withheldMemory.length +
+			withheldStyles.length +
+			withheldWorkflows.length >
+		0
+	) {
 		pushInfo(
 			handle,
 			withheldDefinitionNotice(
@@ -2554,6 +2615,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					skills: withheldSkills.length,
 					memory: withheldMemory.length,
 					styles: withheldStyles.length,
+					workflows: withheldWorkflows.length,
 				},
 				"repl",
 				enclosingRepositoryRoot(cwd),
@@ -2563,6 +2625,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Held-back skill folders, one line each: the same "a definition that was not
 	// loaded looks identical from the prompt" reason as the withheld tier above.
 	for (const note of skillNotes) noteNotice("skill not loaded", `Skill not loaded: ${note}`);
+	// The same for workflow files: a script with a bad name or unreadable meta is
+	// not merely dormant — the name it was going to be called by does not exist.
+	for (const note of workflowLoad.notes) noteNotice("workflow not loaded", `Workflow not loaded: ${note}`);
 
 	// MCP config that could not be read, said at startup for the same reason: a
 	// `.mcp.json` with a typo used to read as "no servers configured", and the
@@ -3306,6 +3371,17 @@ interface AppCommandContext {
 	 */
 	withheldStyles?: string[];
 	/**
+	 * The live saved-workflow list the Workflow tool resolves names against, and
+	 * the project tier the trust gate is holding back. `/agents approve` pushes
+	 * the adopted ones into the live array, so a project workflow runs in the
+	 * session that approved it; the tool description's catalogue catches up on
+	 * the next start, like every other frozen prompt list.
+	 *
+	 * Optional for the hand-built-context reason above.
+	 */
+	workflowDefinitions?: WorkflowDefinition[];
+	withheldWorkflows?: WorkflowDefinition[];
+	/**
 	 * The memory files this session actually loaded (`loadMemoryFiles().files`),
 	 * for `/memory`'s no-editor answer, which lists what is in the prompt.
 	 *
@@ -3710,6 +3786,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// a project's styles back for the life of the checkout.
 				const pendingStyles = ctx.withheldStyles ?? [];
 				if (pendingStyles.length > 0) kinds.push("styles");
+				// Workflow scripts are executable, which is exactly why they sit
+				// behind the same decision — the question is one trust question about
+				// the checkout, not a second dialog about a file type.
+				const pendingWorkflows = ctx.withheldWorkflows ?? [];
+				if (pendingWorkflows.length > 0) kinds.push("workflows");
 				if (kinds.length === 0) {
 					pushInfo(ctx.handle, "Nothing pending: this project's definitions are already loaded.");
 					return true;
@@ -3734,6 +3815,19 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// stays put.
 				const memoryFiles = pendingMemory.splice(0, pendingMemory.length);
 				const styleFiles = pendingStyles.splice(0, pendingStyles.length);
+				const workflowFiles = pendingWorkflows.splice(0, pendingWorkflows.length);
+				// Workflows join the live list at once: a definition is read from disk
+				// at the call, so there is nothing frozen to wait for. A project file
+				// replaces a user file of the same name, exactly as the loader's
+				// precedence would on the next start — appending would leave the user
+				// copy first in the list and winning the lookup.
+				if (ctx.workflowDefinitions) {
+					for (const workflow of workflowFiles) {
+						const at = ctx.workflowDefinitions.findIndex((candidate) => candidate.name === workflow.name);
+						if (at >= 0) ctx.workflowDefinitions[at] = workflow;
+						else ctx.workflowDefinitions.push(workflow);
+					}
+				}
 				const restarts: string[] = [];
 				if (memoryFiles.length > 0) restarts.push("memory loads on the next start, since it is read at startup");
 				if (styleFiles.length > 0) {
@@ -3752,6 +3846,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						skills: adopted.length,
 						memory: memoryFiles.length,
 						styles: styleFiles.length,
+						workflows: workflowFiles.length,
 					})}${tail}.`,
 				);
 				return true;
@@ -3790,6 +3885,21 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const names = withheldStyles.map((file) => shortenHome(file, ctx.home)).join(", ");
 				lines.push(
 					`  ${withheldStyles.length} project output style${withheldStyles.length === 1 ? "" : "s"} not loaded: ${names} — /agents approve, then restart`,
+				);
+			}
+			// Saved workflows, loaded and withheld. Named for the same reason: a
+			// script the model can call by name is a definition this screen should
+			// show, and one held back is invisible until it is approved.
+			for (const workflow of ctx.workflowDefinitions ?? []) {
+				lines.push(
+					`  workflow ${workflow.name} [${workflow.source}]${workflow.description ? ` — ${workflow.description}` : ""}`,
+				);
+			}
+			const withheldWorkflows = ctx.withheldWorkflows ?? [];
+			if (withheldWorkflows.length > 0) {
+				const names = withheldWorkflows.map((workflow) => workflow.name).join(", ");
+				lines.push(
+					`  ${withheldWorkflows.length} project workflow${withheldWorkflows.length === 1 ? "" : "s"} not loaded: ${names} — /agents approve`,
 				);
 			}
 			pushInfo(ctx.handle, `Agent definitions:\n${lines.join("\n")}`);

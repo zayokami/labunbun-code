@@ -30,10 +30,12 @@ import { z } from "zod";
 import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
 import type { UsageSeat } from "./cost-tracker.ts";
 import type { RoleName } from "./model-roles.ts";
+import { supportsOutputSchema } from "./output-schema.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
 import { subagentSourceLabel } from "./subagent-commands.ts";
 import { SUBAGENT_END_KIND, SUBAGENT_START_KIND } from "./subagent-ledger.ts";
 import { MAX_RETAINED_SUBAGENTS, type SubagentHandle, SubagentRegistry } from "./subagent-registry.ts";
+import { parseJsonValue, structuredAnswerInstruction, validateWorkflowSchema } from "./workflow-schema.ts";
 
 export interface AgentDefinition {
 	agentType: string;
@@ -303,12 +305,56 @@ export interface SubagentSpawnScope {
 }
 
 /**
+ * Terms one caller wants for a single run that the model's Task call cannot
+ * express: the workflow runner picks a model per call, runs in a worktree, and
+ * asks for a JSON answer. Absent fields fall back to the usual precedence, so
+ * a workflow call with no options is exactly a Task call.
+ */
+export interface SubagentRunOptions {
+	/** A model chosen by the caller, ahead of the definition's model and the seats. */
+	model?: Model;
+	/** Where this run's session works; defaults to the scope's cwd. */
+	cwd?: string;
+	/** Appended after the definition's system prompt. */
+	systemPromptSuffix?: string;
+	/** A JSON Schema the final answer must match. */
+	outputSchema?: Record<string, unknown>;
+	/** A thinking level for this run, ahead of the session's reader. */
+	thinkingLevel?: ThinkingLevel;
+}
+
+/** The parts of a Task call a programmatic spawn speaks in. */
+export interface SubagentRunRequest {
+	description: string;
+	prompt: string;
+	subagentType?: string;
+	maxTurns?: number;
+}
+
+/**
+ * One programmatic run's full outcome. `result` is what a Task call would have
+ * returned; the rest is the material a workflow journal records — the report,
+ * the parsed answer when a schema was requested, and why the run ended.
+ */
+export interface SubagentRunResult {
+	result: ToolResult;
+	/** The final assistant text, before any structured-output parsing. */
+	report: string;
+	/** The validated answer when a schema was requested and satisfied. */
+	structured?: unknown;
+	/** Why the answer did not satisfy the schema, after the one retry. */
+	structuredError?: string;
+	reason?: AgentEndReason;
+	sidechainId?: string;
+}
+
+/**
  * What a person watching the fleet can do beyond reading the listing: end a
- * run and repeat one that ended badly.
+ * run, repeat one that ended badly, and run one the way a workflow needs.
  *
- * The mechanics are the tools' own — `stop` is the TaskStop halt, `retry` is
- * the Task spawn — because a control surface with its own copy of either is a
- * control surface that drifts from the thing it claims to do.
+ * The mechanics are the tools' own — `stop` is the TaskStop halt, `retry` and
+ * `spawn` are the Task spawn — because a control surface with its own copy of
+ * either is a control surface that drifts from the thing it claims to do.
  */
 export interface SubagentControl {
 	/**
@@ -327,6 +373,16 @@ export interface SubagentControl {
 		scope: SubagentSpawnScope,
 		onSpawned?: (handle: SubagentHandle) => void,
 	): Promise<ToolResult>;
+	/**
+	 * Run one subagent under caller-chosen terms and return the whole outcome,
+	 * not only the text a tool result would carry. This is the workflow runner's
+	 * way in: it needs the reason and the parsed answer for its journal.
+	 */
+	spawn(
+		request: SubagentRunRequest,
+		scope: SubagentSpawnScope,
+		options?: SubagentRunOptions,
+	): Promise<SubagentRunResult>;
 }
 
 export const GENERAL_PURPOSE: AgentDefinition = {
@@ -458,6 +514,19 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 	};
 
 	/**
+	 * Read a structured answer out of the final prose: parse, then check. Both
+	 * failures mean the same thing to the caller — the run produced no usable
+	 * object — and the message is worded for the retry that follows it.
+	 */
+	const readStructured = (schema: Record<string, unknown>, text: string): { value?: unknown; error?: string } => {
+		const parsed = parseJsonValue(text);
+		if ("error" in parsed && typeof parsed.error === "string") return { error: parsed.error };
+		const problems = validateWorkflowSchema(schema, (parsed as { value: unknown }).value);
+		if (problems.length > 0) return { error: problems.slice(0, 8).join("; ") };
+		return { value: (parsed as { value: unknown }).value };
+	};
+
+	/**
 	 * The line that makes a result addressable. A tool result is the only
 	 * channel the parent model reads — an id kept anywhere else would be an id
 	 * the model has never seen — so every result that ran or ended a subagent
@@ -505,16 +574,19 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		input: z.infer<typeof taskInputSchema>,
 		scope: SubagentSpawnScope,
 		onSpawned?: (handle: SubagentHandle) => void,
-	): Promise<ToolResult> => {
+		run?: SubagentRunOptions,
+	): Promise<SubagentRunResult> => {
+		/** A spawn that never became a handle: the caller gets the refusal, not a run. */
+		const refused = (message: string): SubagentRunResult => ({
+			result: { content: [textContent(message)], isError: true },
+			report: "",
+		});
 		const definitions = [GENERAL_PURPOSE, ...ctx.definitions()];
 		const requested = input.subagent_type ?? "general-purpose";
 		const definition = definitions.find((d) => d.agentType === requested);
 		if (!definition) {
 			const available = definitions.map((d) => d.agentType).join(", ");
-			return {
-				content: [textContent(`Unknown agent type: ${requested}. Available: ${available}`)],
-				isError: true,
-			};
+			return refused(`Unknown agent type: ${requested}. Available: ${available}`);
 		}
 
 		// A spawn always has a cancel to hand the nested run. A retry has no
@@ -549,23 +621,25 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// not resolve or had no key — so a misconfigured light seat is a warning
 		// at startup, not a line per spawn.
 		const light = ctx.lightModel?.();
-		const model = resolved ?? light ?? ctx.model();
+		// A workflow's per-call model outranks every default: it was chosen for
+		// this call, and silently running something else would make the script's
+		// `model` option a suggestion.
+		const model = run?.model ?? resolved ?? light ?? ctx.model();
 		// The label this run's usage is booked under: the kind says a subagent
 		// spent it, and the role names the seat only when the seat answered — a
-		// definition's own model and the parent's are not role seats.
-		const seat: UsageSeat = { kind: "subagent", role: !resolved && light ? "light" : undefined };
+		// definition's own model, a caller's choice and the parent's are not role
+		// seats.
+		const seat: UsageSeat = {
+			kind: "subagent",
+			role: !run?.model && !resolved && light ? "light" : undefined,
+		};
 		// The spending gate, before the run exists: a seat already over its
 		// ceiling must not send anything, and the refusal is a tool result
 		// because the model that ordered the work is the reader who has to do
 		// something else (a smaller task, or a budget it asks the user to raise).
 		if (seat.role) {
 			const refusal = ctx.budgetGate?.(seat.role);
-			if (refusal) {
-				return {
-					content: [textContent(`${refusal}\n\nNo subagent was started.`)],
-					isError: true,
-				};
-			}
+			if (refusal) return refused(`${refusal}\n\nNo subagent was started.`);
 		}
 
 		/** What the subagent did to its own context; lives on its handle so
@@ -588,21 +662,36 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			},
 		});
 
+		const runCwd = run?.cwd ?? scope.cwd;
+		const systemPrompt = [
+			ctx.systemPromptFor?.(definition, model) ?? agentSystemPrompt(definition),
+			run?.systemPromptSuffix,
+			// Appended even when the wire carries the schema natively: the request
+			// field says what the shape must be, and this says that the answer is
+			// data rather than a note to a person.
+			run?.outputSchema ? structuredAnswerInstruction(run.outputSchema) : undefined,
+		]
+			.filter((part): part is string => typeof part === "string" && part !== "")
+			.join("\n");
 		const subSession = new AgentSession({
 			model,
-			systemPrompt: ctx.systemPromptFor?.(definition, model) ?? agentSystemPrompt(definition),
+			systemPrompt,
 			tools,
 			maxTurns: input.max_turns ?? definition.maxTurns,
-			cwd: scope.cwd,
+			cwd: runCwd,
 			permissionMode,
 			sandbox,
 			network,
+			// The wire either has the field or it does not; a wire without it still
+			// gets the instruction above and the parse after the run.
+			outputSchema: run?.outputSchema && supportsOutputSchema(model.api) ? run.outputSchema : undefined,
 			deps: {
 				streamFn: ctx.streamFn,
 				// The parent's reader, not its current answer: a `/think` that lands
 				// while the subagent runs is seen by the subagent's next request,
-				// which is the same call-time shape the axes above travel by.
-				thinkingLevel: ctx.thinkingLevel,
+				// which is the same call-time shape the axes above travel by. A
+				// caller that named a level owns it for this run only.
+				thinkingLevel: run?.thinkingLevel ? () => run.thinkingLevel : ctx.thinkingLevel,
 				checkCompaction: subagentWiring.checkCompaction,
 				// Subagents inherit the parent's rules; an "ask" goes up to the
 				// session's own queue when the host wired the funnel, labeled with
@@ -615,7 +704,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 								mode: permCtx.mode,
 								sandbox: permCtx.sandbox,
 								rules: ctx.getPermissionRules?.() ?? [],
-								cwd: scope.cwd,
+								cwd: runCwd,
 								readOnlyToolNames,
 								yolo: ctx.yolo?.() ?? false,
 							});
@@ -684,8 +773,31 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// whatever the subagent managed before it died is still worth keeping.
 		const events: string[] = [];
 		let reason: AgentEndReason = "error";
+		let structured: unknown;
+		let structuredError: string | undefined;
 		try {
 			reason = await runPrompt(handle, input.prompt, signal, events);
+			if (run?.outputSchema && !signal.aborted) {
+				// One retry, with the validator's complaints in hand: a model that
+				// answered in prose or missed a required key can usually fix it when
+				// told what was wrong, and reporting `null` on the first miss would
+				// hide a correctable mistake. A second failure is reported, not
+				// retried again — the caller decided how much one answer is worth.
+				let attempt = readStructured(run.outputSchema, finalReport(subSession));
+				if (attempt.error !== undefined && !signal.aborted) {
+					const retryPrompt = [
+						`Your previous answer did not satisfy the required JSON schema: ${attempt.error}.`,
+						"Reply again with ONLY the JSON value that matches this schema — no prose, no Markdown fences:",
+						JSON.stringify(run.outputSchema),
+					].join("\n");
+					reason = await runPrompt(handle, retryPrompt, signal, events);
+					attempt = readStructured(run.outputSchema, finalReport(subSession));
+				}
+				if (!signal.aborted) {
+					if (attempt.error !== undefined) structuredError = attempt.error;
+					else structured = attempt.value;
+				}
+			}
 		} finally {
 			store?.appendCustom(SUBAGENT_END_KIND, {
 				sidechainId,
@@ -697,7 +809,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			});
 		}
 
-		const finalText = finalReport(subSession);
+		const report = finalReport(subSession);
 
 		// Interrupted subagents report the interruption, not a summary that
 		// happens to trail off mid-thought. The id line rides along so the
@@ -705,16 +817,28 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// messages, and SendMessage continues from them.
 		if (signal.aborted) {
 			return {
-				content: [textContent(`Tool execution aborted\n\n${idLine(sidechainId)}`)],
-				isError: true,
-				details: { sidechainId, agentType: definition.agentType, reason },
+				result: {
+					content: [textContent(`Tool execution aborted\n\n${idLine(sidechainId)}`)],
+					isError: true,
+					details: { sidechainId, agentType: definition.agentType, reason },
+				},
+				report,
+				reason,
+				sidechainId,
 			};
 		}
 
-		const summary = reason === "completed" ? finalText : `${finalText}\n\n[subagent ended: ${reason}]`;
+		const summary = reason === "completed" ? report : `${report}\n\n[subagent ended: ${reason}]`;
 		return {
-			content: [textContent(`${summary}\n\n${idLine(sidechainId)}`)],
-			details: { sidechainId, agentType: definition.agentType, reason },
+			result: {
+				content: [textContent(`${summary}\n\n${idLine(sidechainId)}`)],
+				details: { sidechainId, agentType: definition.agentType, reason },
+			},
+			report,
+			structured,
+			structuredError,
+			reason,
+			sidechainId,
 		};
 	};
 
@@ -733,7 +857,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			"- Multiple Task calls run concurrently when safe.\n" +
 			"- Every result ends with a [subagent id: …] line — the handle SendMessage and TaskStop take.",
 		isConcurrencySafe: () => true,
-		call: (input, toolCtx) => spawnSubagent(input, toolCtx),
+		call: async (input, toolCtx) => (await spawnSubagent(input, toolCtx)).result,
 	});
 
 	/**
@@ -912,18 +1036,32 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 	 */
 	const control: SubagentControl = {
 		stop: (handle) => halt(handle),
-		retry: (handle, scope, onSpawned) =>
+		retry: async (handle, scope, onSpawned) =>
+			(
+				await spawnSubagent(
+					{
+						// The label was folded at spawn time; as a fresh description it
+						// is still what the row says, which is what the person picked.
+						description: handle.title,
+						prompt: handle.prompt,
+						subagent_type: handle.agentType,
+						max_turns: handle.maxTurns,
+					},
+					scope,
+					onSpawned,
+				)
+			).result,
+		spawn: (request, scope, options) =>
 			spawnSubagent(
 				{
-					// The label was folded at spawn time; as a fresh description it
-					// is still what the row says, which is what the person picked.
-					description: handle.title,
-					prompt: handle.prompt,
-					subagent_type: handle.agentType,
-					max_turns: handle.maxTurns,
+					description: request.description,
+					prompt: request.prompt,
+					subagent_type: request.subagentType,
+					max_turns: request.maxTurns,
 				},
 				scope,
-				onSpawned,
+				undefined,
+				options,
 			),
 	};
 

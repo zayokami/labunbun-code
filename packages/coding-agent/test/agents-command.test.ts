@@ -26,6 +26,7 @@ import { loadOutputStyles, withheldProjectOutputStyles } from "../src/output-sty
 import { loadTrustedDefinitionKinds } from "../src/project-trust.ts";
 import { loadSkills, skillsAsCommands, withheldProjectSkills } from "../src/skills.ts";
 import { loadAgentDefinitions, withheldProjectAgents } from "../src/subagents.ts";
+import { loadWorkflowDefinitions, withheldProjectWorkflows } from "../src/workflow-definitions.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -196,6 +197,36 @@ describe("/agents", () => {
 		// And a second approval has nothing left to grant.
 		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
 		expect(h.lines()).toContain("Nothing pending");
+	});
+
+	test("approve loads workflows, and the project file takes the user file's place", () => {
+		const h = harness();
+		plant(
+			join(h.home, ".labunbun", "workflows", "shared.js"),
+			'export const meta = { name: "shared" };\nreturn "user";\n',
+		);
+		plant(
+			join(h.cwd, ".labunbun", "workflows", "shared.js"),
+			'export const meta = { name: "shared" };\nreturn "project";\n',
+		);
+		h.ctx.workflowDefinitions = loadWorkflowDefinitions(h.cwd, h.home).workflows;
+		h.ctx.withheldWorkflows = withheldProjectWorkflows(h.cwd, h.home);
+		// Before the decision only the user tier is live; the project file is pending.
+		expect(h.ctx.workflowDefinitions.map((workflow) => workflow.source)).toEqual(["user"]);
+		expect(h.ctx.withheldWorkflows).toHaveLength(1);
+
+		expect(handleAppCommand("/agents approve", h.ctx)).toBe(true);
+
+		expect(loadTrustedDefinitionKinds(h.cwd, h.home)).toEqual(new Set(["workflows"]));
+		expect(h.ctx.withheldWorkflows).toEqual([]);
+		// The project definition replaces the user one rather than joining it: the
+		// tool resolves a name with `find`, so an appended project file would sit
+		// behind the user copy and the approval would appear to do nothing.
+		const live = h.ctx.workflowDefinitions ?? [];
+		expect(live).toHaveLength(1);
+		expect(live[0].source).toBe("project");
+		expect(live[0].script).toContain('"project"');
+		expect(h.lines()).toContain("1 workflow now loaded");
 	});
 
 	test("approve with nothing pending says so and writes nothing", () => {

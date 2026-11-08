@@ -81,6 +81,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
+import { supportsOutputSchema } from "./output-schema.ts";
 import { loadOutputStylesWithNotes, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
 import { enclosingRepositoryRoot, withheldDefinitionNotice } from "./project-trust.ts";
 import { createRepoMapService, repoMapPromptSection } from "./repomap-wiring.ts";
@@ -117,6 +118,8 @@ import { agentSystemPrompt, createSubagentTools, loadAgentDefinitions, withheldP
 import { buildSubagentContext, buildSystemPrompt } from "./system-prompt.ts";
 import { bindTaskStore, saveTasks } from "./task-snapshot.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
+import { loadWorkflowDefinitions, withheldProjectWorkflows } from "./workflow-definitions.ts";
+import { createWorkflowTool } from "./workflow-tool.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";
 
@@ -239,18 +242,6 @@ function cacheResult(messages: AgentMessage[], tracker?: CacheTracker): CacheRes
 	};
 }
 
-/**
- * The wires that can carry a JSON Schema for the answer. The Gemini Code Assist
- * wire is a proprietary shape with no equivalent field, so a run on it refuses
- * the flag rather than sending a request that would silently ignore it.
- */
-const OUTPUT_SCHEMA_APIS = new Set([
-	"anthropic-messages",
-	"openai-completions",
-	"openai-responses",
-	"chatgpt-responses",
-]);
-
 /** Read `--output-schema`; the caller prints the error and returns its code. */
 function readOutputSchema(path: string | undefined): { schema?: Record<string, unknown>; error?: string } {
 	if (path === undefined) return {};
@@ -351,7 +342,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// Refused before the first request, not after a 400: the wire either has a
 	// field for the schema or it does not, and sending one that is ignored would
 	// hand the caller free-form text under a flag that promised a shape.
-	if (outputSchema && !OUTPUT_SCHEMA_APIS.has(model.api)) {
+	if (outputSchema && !supportsOutputSchema(model.api)) {
 		console.error(`--output-schema is not supported on the ${model.api} wire`);
 		return 2;
 	}
@@ -661,7 +652,20 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const withheldSkills = withheldProjectSkills(cwd, home);
 	const withheldMemory = withheldProjectMemoryFiles(cwd, home);
 	const withheldStyles = withheldProjectOutputStyles(cwd, home);
-	if (withheldAgents.length + withheldSkills.length + withheldMemory.length + withheldStyles.length > 0) {
+	// Saved workflows: the user tier always, the project tier only once trusted —
+	// a `-p` run cannot approve, so an untrusted project workflow is withheld and
+	// said so rather than silently absent.
+	const workflowLoad = loadWorkflowDefinitions(cwd, home);
+	const workflowDefinitions = workflowLoad.workflows;
+	const withheldWorkflows = withheldProjectWorkflows(cwd, home);
+	if (
+		withheldAgents.length +
+			withheldSkills.length +
+			withheldMemory.length +
+			withheldStyles.length +
+			withheldWorkflows.length >
+		0
+	) {
 		console.error(
 			withheldDefinitionNotice(
 				{
@@ -669,12 +673,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 					skills: withheldSkills.length,
 					memory: withheldMemory.length,
 					styles: withheldStyles.length,
+					workflows: withheldWorkflows.length,
 				},
 				"headless",
 				enclosingRepositoryRoot(cwd),
 			),
 		);
 	}
+	for (const note of workflowLoad.notes) console.error(`Workflows: ${note}`);
 	// Held-back skill folders (a name that fails validation): a scripted run has
 	// nowhere else to say so, and a skill the author believes is loaded is worse
 	// than no skill.
@@ -734,7 +740,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// Read at the call, like the REPL's: the definition list is a getter because a
 	// definition approved mid-session joins it, and the store because a sidechain
 	// belongs to whichever session is live.
-	const [taskTool, sendMessageTool, taskStopTool] = createSubagentTools({
+	const [taskTool, sendMessageTool, taskStopTool, subagentControl] = createSubagentTools({
 		streamFn,
 		model: () => model,
 		// `roles.light`, when one is configured: where subagents run unless their
@@ -807,7 +813,44 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		},
 	});
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
-	const allTools = [...tools, skillTool, ...mcpTools, ...subagentTools];
+	// The same adapter the REPL uses: a workflow's agent() is a nested session
+	// under the same seat and budget rules as a Task call, and anything short of
+	// a completed run is a failed call for the script.
+	const workflowTool = createWorkflowTool({
+		cwd,
+		home,
+		spawn: async (request) => {
+			const outcome = await subagentControl.spawn(
+				{ description: request.description, prompt: request.prompt, subagentType: request.subagentType },
+				{ cwd: request.cwd, signal: request.signal },
+				{
+					model: request.model,
+					cwd: request.cwd,
+					thinkingLevel: request.thinkingLevel,
+					outputSchema: request.outputSchema,
+				},
+			);
+			const failed = outcome.result.isError === true || outcome.reason !== "completed";
+			const error = outcome.result.isError
+				? outcome.result.content
+						.map((block) => (block.type === "text" ? block.text : ""))
+						.filter((text) => text !== "")
+						.join("\n")
+				: undefined;
+			return {
+				ok: !failed && outcome.structuredError === undefined,
+				report: outcome.report,
+				structured: outcome.structured,
+				structuredError: outcome.structuredError,
+				reason: outcome.reason,
+				error,
+			};
+		},
+		report: (text) => console.error(text),
+		resolveModel,
+		definitions: () => workflowDefinitions,
+	});
+	const allTools = [...tools, skillTool, ...mcpTools, ...subagentTools, workflowTool];
 	// The plan gate's read-only answer, from the tool objects themselves (see
 	// `collectReadOnlyToolNames`). A constant here: unlike the REPL, nothing
 	// appends tools to this session mid-run.

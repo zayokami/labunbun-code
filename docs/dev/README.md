@@ -27,6 +27,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [Session store](session-store.md): the JSONL session tree, its append-only form, branches, and compaction.
 - [Split panes](split-pane-design.md): whether two things can be shown at once — the design gate for a watch panel, view screens, and a full-screen workspace over the Static scrollback model.
 - [Tools](tools.md): the built-in tool set in `packages/tools/src` and the operations layer below it.
+- [Workflows](workflows.md): the script runtime over subagents — the vm sandbox, structured answers, the resume journal, and worktree isolation.
 - [YOLO mode](yolo-mode.md): the session-only override that turns off the classifier and approval prompts while keeping the sandbox — its confirmation phrase, its permission-engine order, and the checks that remain.
 
 Every document is in English. Each claim cites its source as `path:line`.
