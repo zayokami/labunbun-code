@@ -4,6 +4,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 
 - [Agent Client Protocol](acp.md): the editor-facing server over stdio — the frames it emits, the modes it advertises, the permission round trip, and what `session/load` replays.
 - [AI layer](ai-layer.md): the model registry, the prompt cache rules, and the wire adapters in `packages/ai`.
+- [Cell grid](cell-grid.md): the TypedArray double-buffered screen — cells, wide glyphs and clusters, the frame diff, the ANSI encoder, and the screen's lifecycle.
 - [ChatGPT subscription](chatgpt-subscription.md): the app-side sign-in for a ChatGPT subscription — the credential store, the two login shapes, and where the app wires them.
 - [Checkpoint ledger](checkpoint-ledger.md): the record of what the agent did — the entry one finished tool call leaves, the file snapshots `/rewind` restores from, and the recovery line a resumed session prints.
 - [Claude subscription](claude-subscription.md): the app-side sign-in for a Claude subscription — the credential store, the login flow, and where the app wires them.

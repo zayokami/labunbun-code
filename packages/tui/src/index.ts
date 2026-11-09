@@ -107,6 +107,24 @@ export {
 	ruleSpecifierFor,
 } from "./permission-options.ts";
 export { applyFileCompletion, currentAtWord, filterFiles } from "./prompt-files.ts";
+export {
+	CellBuffer,
+	CellGrid,
+	type CellStyle,
+	type Color,
+	type CursorPosition,
+	codePointWidth,
+	diffBuffers,
+	displayWidth,
+	encodeFrame,
+	type FrameOp,
+	type FrameOptions,
+	graphemeWidth,
+	type ScreenStream,
+	StyleTable,
+	TerminalScreen,
+	type TerminalScreenOptions,
+} from "./render/index.ts";
 export { createStore, type Store, useStore } from "./store.ts";
 export {
 	AUTO_THEME_NAME,

@@ -7,7 +7,8 @@
 		".": "./src/index.ts",
 		"./conpty": "./src/conpty.ts",
 		"./format": "./src/format.ts",
-		"./permission-options": "./src/permission-options.ts"
+		"./permission-options": "./src/permission-options.ts",
+		"./render": "./src/render/index.ts"
 	},
 	"dependencies": {
 		"@labunbun/agent": "workspace:*",
