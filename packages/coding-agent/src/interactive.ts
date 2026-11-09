@@ -2216,8 +2216,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		},
 		setStatusCard: (card) => handle?.setStatusCard({ title: card.title, details: card.details }),
 		// The same store the board tools (and so every member) already write
-		// through — status reads the work, not a copy of it.
-		taskBoard: () => taskStore.summary(),
+		// through — status reads the work, not a copy of it. `list()` rather than
+		// `summary()`: the readiness line needs `blockedBy`, which the strip's
+		// narrower rows drop.
+		taskBoard: () => taskStore.list(),
 		// The dispatcher routes over that same board; with it connected the band
 		// defaults to task-scoped worker sessions.
 		taskStore,
@@ -2226,6 +2228,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		maxTurns: settings.beetle?.maxTurns,
 		maxCostUSD: settings.beetle?.maxCostUSD,
 		stallNoticeMinutes: settings.beetle?.stallNoticeMinutes,
+		maxFixRounds: settings.beetle?.maxFixRounds,
+		taskCardChars: settings.beetle?.taskCardChars,
+		errorSummaryChars: settings.beetle?.errorSummaryChars,
 	});
 
 	attachSessionListeners(session);

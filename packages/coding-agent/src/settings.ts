@@ -388,7 +388,7 @@ export const SettingsSchema = z.object({
 			local: RoleEntrySchema.optional(),
 		})
 		.optional(),
-	/** The /beetle band: which model each of the four members runs. */
+	/** The /beetle band: models, worker lifecycle, budgets and blackboard bounds. */
 	beetle: z
 		.object({
 			models: z.record(z.string(), z.string()).optional(),
@@ -401,6 +401,12 @@ export const SettingsSchema = z.object({
 			maxTurns: z.number().int().positive().optional(),
 			maxCostUSD: z.number().positive().optional(),
 			stallNoticeMinutes: z.number().int().nonnegative().optional(),
+			/** Repair rounds a failing build/verify gets before the dispatcher escalates it. */
+			maxFixRounds: z.number().int().positive().optional(),
+			/** Bound on a rendered task card, in characters. */
+			taskCardChars: z.number().int().positive().optional(),
+			/** Bound on a failing run's summary on the board, in characters. */
+			errorSummaryChars: z.number().int().positive().optional(),
 		})
 		.optional(),
 	pricing: z.record(z.string(), ModelPricingSchema).optional(),

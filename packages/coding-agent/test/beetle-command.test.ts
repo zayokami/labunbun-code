@@ -31,6 +31,8 @@ import {
 	boardLine,
 	createBeetleSurface,
 	createToolChangeLatch,
+	readinessLine,
+	seatsLine,
 	stallNoticeMsFrom,
 } from "../src/beetle-commands.ts";
 import { readBeetleState, writeBeetleState } from "../src/beetle-state.ts";
@@ -453,12 +455,12 @@ describe("starting a band", () => {
 		harness.surface.start("status me");
 		// Poll until the members' one-step scripts have finished: 0 running is the
 		// only deterministic summary, and it is reached within a few ticks. The
-		// lifetime line and the board line trail the tally, so the tally is
-		// third-to-last.
+		// lifetime line, the seat/readiness lines and the board line trail the
+		// tally, so the tally is fifth-to-last.
 		for (let i = 0; i < 50; i++) {
 			await tick();
 			harness.surface.status();
-			if ((harness.notices.at(-3) ?? "").startsWith("Band: 0/4 running")) break;
+			if ((harness.notices.at(-5) ?? "").startsWith("Band: 0/4 running")) break;
 		}
 		expect(harness.cards.at(-1)?.title).toBe("Beetle band");
 		expect(harness.cards.at(-1)?.details.map(([label]) => label)).toEqual([
@@ -470,16 +472,18 @@ describe("starting a band", () => {
 		// One briefing turn each, faux rows have no price: the tail is exact (the
 		// model name leads the row and lastActivity may trail it).
 		expect(harness.cards.at(-1)?.details[0]?.[1]).toMatch(/ · idle · 1 turns · \$0\.0000 unpriced( · .+)?$/);
-		expect(harness.notices.at(-3)).toBe("Band: 0/4 running · 4 turns · $0.0000");
+		expect(harness.notices.at(-5)).toBe("Band: 0/4 running · 4 turns · $0.0000");
 		// This band counted toward `bands` at its start; nothing has folded yet.
-		expect(harness.notices.at(-2)).toBe("Lifetime: 1 band · 0 turns · $0.0000");
+		expect(harness.notices.at(-4)).toBe("Lifetime: 1 band · 0 turns · $0.0000");
+		expect(harness.notices.at(-3)).toBe("Seats: john idle · paul idle · george idle · ringo idle");
+		expect(harness.notices.at(-2)).toBe("Readiness: nothing pending.");
 		expect(harness.notices.at(-1)).toBe("Board: no tasks yet.");
 	});
 
-	test("status adds the board summary as its last line", async () => {
+	test("status adds the seat, readiness and board summaries as its last lines", async () => {
 		const harness = makeHarness();
 		harness.surface.start("board test");
-		// The board line needs a band (status reads the work alongside the band);
+		// The board lines need a band (status reads the work alongside the band);
 		// poll past the first start, then seed and read.
 		for (let i = 0; i < 50; i++) {
 			await tick();
@@ -492,6 +496,9 @@ describe("starting a band", () => {
 			{ id: "3", subject: "Ship it", status: "completed", owner: "ringo" },
 		);
 		harness.surface.status();
+		expect(harness.notices.at(-3)).toBe("Seats: john idle · paul #1 · george idle · ringo idle");
+		// The pending row has no owner, so the dispatcher cannot claim it yet.
+		expect(harness.notices.at(-2)).toBe("Readiness: 0 ready · 0 blocked · 1 unassigned");
 		expect(harness.notices.at(-1)).toBe(
 			"Board: 3 tasks · in_progress: #1 Wire the bridge (paul) · 1 pending · 1 completed",
 		);
@@ -613,6 +620,48 @@ describe("boardLine", () => {
 		],
 	] as Array<[string, BoardTask[], string]>)("renders %s", (_label, tasks, expected) => {
 		expect(boardLine(tasks)).toBe(expected);
+	});
+});
+
+describe("the seat and readiness lines", () => {
+	test("seats names the task each member holds, and idle for the rest", () => {
+		expect(
+			seatsLine([
+				{ id: "1", subject: "Drums", status: "in_progress", owner: "ringo" },
+				{ id: "2", subject: "Bass", status: "in_progress", owner: "paul" },
+				{ id: "3", subject: "Done", status: "completed", owner: "john" },
+				{ id: "4", subject: "Later", status: "pending", owner: "george" },
+			]),
+		).toBe("Seats: john idle · paul #2 · george idle · ringo #1");
+		expect(seatsLine([])).toBe("Seats: john idle · paul idle · george idle · ringo idle");
+	});
+
+	test("readiness counts what the dispatcher could claim, apart from what it cannot", () => {
+		const board: BoardTask[] = [
+			{ id: "1", subject: "Done", status: "completed" },
+			// Ready: a seat owner and every dependency completed.
+			{ id: "2", subject: "Next", status: "pending", owner: "paul", blockedBy: ["1"] },
+			// Blocked: the dependency is still open.
+			{ id: "3", subject: "After", status: "pending", owner: "george", blockedBy: ["2"] },
+			// A dangling dependency is not satisfied either.
+			{ id: "4", subject: "Lost", status: "pending", owner: "ringo", blockedBy: ["99"] },
+			// No seat owner: written, held by nobody.
+			{ id: "5", subject: "Unowned", status: "pending" },
+			{ id: "6", subject: "Stranger", status: "pending", owner: "main" },
+			{ id: "7", subject: "Also ready", status: "pending", owner: "john" },
+		];
+		expect(readinessLine(board)).toBe("Readiness: 2 ready (#2, #7) · 2 blocked · 2 unassigned");
+		expect(readinessLine([{ id: "1", subject: "Done", status: "completed" }])).toBe("Readiness: nothing pending.");
+	});
+
+	test("a long ready list is previewed, not printed whole", () => {
+		const board: BoardTask[] = ["1", "2", "3", "4"].map((id) => ({
+			id,
+			subject: `Task ${id}`,
+			status: "pending" as const,
+			owner: "paul",
+		}));
+		expect(readinessLine(board)).toBe("Readiness: 4 ready (#1, #2, #3, …) · 0 blocked · 0 unassigned");
 	});
 });
 

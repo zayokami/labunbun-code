@@ -15,6 +15,7 @@ import type { Model, StreamFn, ThinkingLevel } from "@labunbun/ai";
 import type { TaskStore } from "@labunbun/tools";
 import {
 	BAND_LINE_PREVIEW_CHARS,
+	BEETLE_MEMBERS,
 	BeetleBand,
 	type BeetleContext,
 	type BeetleMember,
@@ -50,6 +51,8 @@ export interface BoardTask {
 	subject: string;
 	status: "pending" | "in_progress" | "completed";
 	owner?: string;
+	/** Read by the readiness line; absent reads as no dependencies. */
+	blockedBy?: string[];
 }
 
 /**
@@ -67,6 +70,42 @@ export function boardLine(tasks: BoardTask[]): string {
 	parts.push(`${tasks.filter((task) => task.status === "pending").length} pending`);
 	parts.push(`${tasks.filter((task) => task.status === "completed").length} completed`);
 	return `Board: ${parts.join(" · ")}`;
+}
+
+/**
+ * The status card's per-seat line: the task each member currently holds. The
+ * board's `owner` is the same fact the dispatcher claimed on, so reading the
+ * work is enough — no dispatcher access needed.
+ */
+export function seatsLine(tasks: BoardTask[]): string {
+	const parts = BEETLE_MEMBERS.map((seat) => {
+		const active = tasks.find((task) => task.status === "in_progress" && task.owner === seat);
+		return `${seat} ${active ? `#${active.id}` : "idle"}`;
+	});
+	return `Seats: ${parts.join(" · ")}`;
+}
+
+/**
+ * The status card's readiness line, counted the way the dispatcher counts:
+ * ready is pending, owned by a seat, and every dependency completed. A pending
+ * task without a seat owner is unassigned — written by John, held by nobody —
+ * and the dispatcher will not claim it until the owner changes.
+ */
+export function readinessLine(tasks: BoardTask[]): string {
+	const completed = new Set(tasks.filter((task) => task.status === "completed").map((task) => task.id));
+	const seats = new Set<string>(BEETLE_MEMBERS);
+	const pending = tasks.filter((task) => task.status === "pending");
+	if (pending.length === 0) return "Readiness: nothing pending.";
+	const unassigned = pending.filter((task) => task.owner === undefined || !seats.has(task.owner));
+	const unassignedIds = new Set(unassigned.map((task) => task.id));
+	const ready = pending.filter(
+		(task) => !unassignedIds.has(task.id) && (task.blockedBy ?? []).every((id) => completed.has(id)),
+	);
+	const blocked = pending.length - ready.length - unassigned.length;
+	const preview = ready.slice(0, 3).map((task) => `#${task.id}`);
+	const names = ready.length > preview.length ? `${preview.join(", ")}, …` : preview.join(", ");
+	const head = `Readiness: ${ready.length} ready${names ? ` (${names})` : ""}`;
+	return `${head} · ${blocked} blocked · ${unassigned.length} unassigned`;
 }
 
 export interface BeetleSurfaceDeps {
@@ -138,6 +177,12 @@ export interface BeetleSurfaceDeps {
 	maxCostUSD?: number;
 	/** Quiet-watchdog threshold in minutes (settings.beetle.stallNoticeMinutes). */
 	stallNoticeMinutes?: number;
+	/** Repair rounds before escalation (settings.beetle.maxFixRounds); undefined = 3. */
+	maxFixRounds?: number;
+	/** Bound on a rendered task card (settings.beetle.taskCardChars); undefined = 4000. */
+	taskCardChars?: number;
+	/** Bound on a failing run's summary (settings.beetle.errorSummaryChars); undefined = 1200. */
+	errorSummaryChars?: number;
 }
 
 export interface BeetleSurface {
@@ -343,6 +388,9 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			maxTurns: deps.maxTurns,
 			maxCostUSD: deps.maxCostUSD,
 			stallNoticeMs: stallNoticeMsFrom(deps.stallNoticeMinutes),
+			maxFixRounds: deps.maxFixRounds,
+			taskCardChars: deps.taskCardChars,
+			errorSummaryChars: deps.errorSummaryChars,
 			onNotice: deps.notify,
 			report: deps.notify,
 			// Every disband path — the user's /beetle off, the budget ceiling —
@@ -501,11 +549,16 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 					`Lifetime: ${state.lifetime.bands} band${state.lifetime.bands === 1 ? "" : "s"} · ${state.lifetime.turns} turns · $${state.lifetime.costUSD.toFixed(4)}`,
 				);
 			}
-			// The board last: the tally line is about the band, the board line is
+			// The board last: the tally line is about the band, the board lines are
 			// about the work — and the two read together are what "how is it going"
-			// means. Absent when no board is wired (a test surface, headless).
+			// means. Per-seat and readiness come first so the board summary closes
+			// the card. Absent when no board is wired (a test surface, headless).
 			const board = deps.taskBoard?.();
-			if (board) deps.notify(boardLine(board));
+			if (board) {
+				deps.notify(seatsLine(board));
+				deps.notify(readinessLine(board));
+				deps.notify(boardLine(board));
+			}
 		},
 
 		handleMention(text) {

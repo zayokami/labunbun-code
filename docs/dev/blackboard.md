@@ -127,6 +127,18 @@ pending ──deps satisfied──▶ in_progress ──▶ completed
 
 The worker copy of the tool is built with a one-value target enum, and the delivery path counts calls against the sender's current task. The second call in one task is refused with a receipt that says to put the question on the board or record a blocked verdict. Because John has no send tool, a clarification cannot grow into a reply chain. The host keeps `deliver()` for the human's one-way commands.
 
+## `/beetle status`
+
+The human's window on the board without reading the transcript. After the band tally it prints three lines:
+
+```
+Seats: john #4 · paul #6 · george idle · ringo idle
+Readiness: 2 ready (#7, #9) · 1 blocked · 0 unassigned
+Board: 9 tasks · in_progress: #4 implement: blackboard dispatcher (john), #6 ... · 3 pending · 4 completed
+```
+
+Each line is a pure function over the same store the dispatcher routes over — `seatsLine`, `readinessLine`, `boardLine` in `beetle-commands.ts`. No dispatcher access is needed: `owner` and `blockedBy` are already on the board, and readiness is counted the dispatcher's way (pending, a seat owner, every dependency completed). A pending task with no seat owner is counted as unassigned: it is written but nobody will be woken for it.
+
 ## Settings
 
 | key | default | meaning |
@@ -138,8 +150,7 @@ The worker copy of the tool is built with a one-value target enum, and the deliv
 
 ## Implementation status
 
-Phase 0 through Phase 3 are landed; Phase 4 (the remaining settings keys and
-the status lines) is the design the page is built toward.
+Phase 0 through Phase 4 are landed.
 
 - **Landed:** the task record and its snapshot acceptance, change-carrying
   subscriptions, the dispatcher and task card, task-scoped worker sessions
@@ -153,10 +164,9 @@ the status lines) is the design the page is built toward.
   (`implement` completions with no verifier get one), file-conflict claim
   serialisation, crash recovery on band start, and the restricted worker
   `TaskCreate` (fix/verify/research under a named parent, three per parent).
-  The card's budget and the error-summary budget are band options
-  (`taskCardChars`, `errorSummaryChars`), not settings keys yet.
-- **Not yet:** the remaining settings keys (`beetle.maxFixRounds` is a band
-  option, `maxFixRounds`, not a settings key) and the status lines (Phase 4).
+  Phase 4 makes `beetle.maxFixRounds`, `beetle.taskCardChars` and
+  `beetle.errorSummaryChars` real settings keys and adds the seat, readiness
+  and board lines to `/beetle status`.
 - **Compatibility:** a band constructed with no `taskStore` has nothing to
   dispatch over, so its context is `"session"` — the long-lived band this page
   replaces. The app always connects the board, so its default is `"task"`.
@@ -177,6 +187,7 @@ Landed:
 - `packages/coding-agent/test/task-snapshot.test.ts`: an old snapshot restores with the new fields defaulted; a malformed optional field is refused, not half-read.
 - `packages/coding-agent/test/blackboard.test.ts`: ready/claim ordering, dependency gates, one task per seat, wake dedupe by `rev`, terminal release, resumed `in_progress` tasks, dispose; `pathsConflict`/`filesConflict` and claim serialisation on overlapping files; the continuation ceiling (one notice, no wake); one fix for a failed verify, its error pheromone and re-armed failure; fix completion marking `fixedBy` and re-claiming the verifier; no second fix while one is active; the fixer fallback; escalation at the ceiling; the automatic verifier created once and skipped when a verifier already exists.
 - `packages/coding-agent/test/beetle.test.ts`: a start becomes one lead task owned by John; a worker's first request carries its card and nothing from a prior task; a completed task destroys the session; workers address John only, once per task; John has no send tool; the human channels still deliver; a board edit under a finished run wakes the worker with the edited card; a declared command's result becomes a run and a clean verify closes the task; a board left in progress is recovered and claimed; a worker's `TaskCreate` admits fix/verify/research under a parent, three per parent, while John keeps the full tool.
-- `packages/coding-agent/test/beetle-command.test.ts`: on the board path the main session gets no `BandMessage` and the band writes no tool-block change, while `/beetle say` and `@john` still reach a seat; an explicit `"session"` context keeps the old tool and the old briefings.
+- `packages/coding-agent/test/beetle-command.test.ts`: on the board path the main session gets no `BandMessage` and the band writes no tool-block change, while `/beetle say` and `@john` still reach a seat; an explicit `"session"` context keeps the old tool and the old briefings; `/beetle status` prints the seat, readiness and board lines, and `readinessLine` counts ready/blocked/unassigned the dispatcher's way.
 - `packages/coding-agent/test/beetle-pheromone.test.ts`: the exit code behind a spill header; only declared commands become evidence; the summary is bounded and keeps the pointer; the run list is bounded; latest-run-per-command verdicts; a clean verify closes the task; a failure writes the pheromone and leaves it open; a completed task ignores late results.
+- `packages/coding-agent/test/settings.test.ts`: the `beetle` block carries `maxFixRounds`, `taskCardChars` and `errorSummaryChars`; unset stays unset, and zero, negatives or fractions are refused at load.
 

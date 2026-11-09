@@ -204,6 +204,24 @@ describe("SettingsSchema", () => {
 		expect(SettingsSchema.safeParse({ beetle: { stallNoticeMinutes: 2.5 } }).success).toBe(false);
 	});
 
+	test("a beetle block can carry the blackboard budget keys", () => {
+		const parsed = SettingsSchema.parse({ beetle: { maxFixRounds: 2, taskCardChars: 3000, errorSummaryChars: 900 } });
+		expect(parsed.beetle?.maxFixRounds).toBe(2);
+		expect(parsed.beetle?.taskCardChars).toBe(3000);
+		expect(parsed.beetle?.errorSummaryChars).toBe(900);
+		// Unset is the band's own default, not a zero that would refuse every wake.
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.maxFixRounds).toBeUndefined();
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.taskCardChars).toBeUndefined();
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.errorSummaryChars).toBeUndefined();
+		// All three are counts: zero and fractions are caught rather than reaching
+		// the dispatcher as a card that cannot exist or a loop with no rounds.
+		for (const key of ["maxFixRounds", "taskCardChars", "errorSummaryChars"]) {
+			expect(SettingsSchema.safeParse({ beetle: { [key]: 0 } }).success).toBe(false);
+			expect(SettingsSchema.safeParse({ beetle: { [key]: 1.5 } }).success).toBe(false);
+			expect(SettingsSchema.safeParse({ beetle: { [key]: -1 } }).success).toBe(false);
+		}
+	});
+
 	test("prices can be declared for a whole catalog, per provider or as an override", () => {
 		const parsed = SettingsSchema.parse({
 			providers: {
