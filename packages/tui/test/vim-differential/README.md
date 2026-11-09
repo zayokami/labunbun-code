@@ -27,11 +27,11 @@ engine. **A pending operator** is not compared either: a sequence ending on `d`
 leaves the two editors in different internal states that identical text and cursor
 cannot distinguish, so those sequences are dropped rather than compared.
 
-## Five places the instrument will lie to you
+## Six places the instrument will lie to you
 
-All five of these produced a clean, confident, wrong answer first — a green run
+All six of these produced a clean, confident, wrong answer first — a green run
 that was reporting the harness's own bug as the engine's. They are written down
-because the next person will reach for the same five shortcuts.
+because the next person will reach for the same six shortcuts.
 
 **`|` is a screen column, not a character offset.** It counts a double-width
 character twice and puts the caret between the two halves of a narrow multibyte
@@ -55,6 +55,22 @@ every result a comparison of two different key sequences, so both spellings live
 in `harness.mjs` and `TERMINAL_SEQUENCES` is derived from `TERMINAL_KEYS` rather
 than written out again — a case that picks the wrong bytes fails by reporting a
 disagreement between two editors that were never sent the same keys.
+
+**A terminal key is only a key if the termcap says so.** `vim -s` replays a byte
+stream, and vim turns `\x1b[C` into Right only through its terminal capabilities.
+This machine's console vim builds its default termcap from console key events and
+has **no ANSI sequences in it at all**, so every arrow, `<End>`, `<Del>` and
+`<BS>` row was really measuring vim reading `ESC`, `[`, `C`. That was the source
+of the whole first batch of terminal-key DIFFs: the engine was right and the
+instrument replayed three characters. `-T xterm` supplies the codes those
+sequences name and is the one usable built-in entry in this build, so every
+`runVim` passes it. The price is that xterm's termcap calls `^?` *Delete*
+(`t_kD=^?`) and gives Backspace `^H`, while the REPL's Ink parser calls `^?`
+backspace and spells Delete `\x1b[3~`; `runVim` therefore writes
+`:let &t_kb = nr2char(127)` and `:let &t_kD = "\e[3~"` at the top of the keys
+script, before the case, so the bytes in a case are the keys the REPL actually
+received. It goes in the script rather than `--cmd` because the Windows `vim.bat`
+wrapper refuses an argument carrying `&`, `?`, `<` or `>`.
 
 **A sequence that ends in insert mode has no comparable caret.** A change
 operator ends in insert, where this engine's caret is the *insertion point* and
@@ -159,8 +175,8 @@ was right.
 Buffers are named (`A`…`E`, then `LATIN1`, `SCRIPTS`, `EMOJI_THREE`, `BLANK_LINE`
 and so on) where several cases share one. Escape is `"\x1b"`, and the terminal
 keys are the byte sequences in `TERMINAL_KEYS` — `"\r"` for Enter, `"\x7f"` for
-backspace, `"\x1b[3~"` for delete, `"\x1b[4~"` for End, `"\x1b[A"`…`"\x1b[D"` for
-the arrows.
+backspace, `"\x1b[3~"` for delete, `"\x1b[4~"` for End, `"\x1b[H"` for Home, and
+`"\x1b[A"`…`"\x1b[D"` for the arrows.
 
 **`"\r"` is the one that has to be in `TERMINAL_KEYS`.** A search is typed into a
 line and run with Enter, so a case that spells `\r` as anything else feeds the
@@ -173,7 +189,10 @@ A new key belongs in `fuzz.mjs`'s `KEYS` as well, and that is not optional
 bookkeeping: `<End>` and the arrows were added to the list for the coverage and
 within one run each turned out to be a motion vim runs and the engine did not —
 `d<End>` was `d$` and dropped the operator entirely. A key the fuzzer cannot send
-is a key nothing is checking.
+is a key nothing is checking. `<Home>` was the next one: NORMAL knew it, Visual
+and the operator-pending path did not, so `v<Home>`, `V<Home>` and `d<Home>` were
+three keys the fuzzer could not send and nothing was checking. All three are in
+`CASES` now.
 
 ## `+` and `-`, and the line that is nothing but blanks
 
@@ -784,6 +803,30 @@ step, on no step, on the starting line, and on the first step. No case in `CASES
 changed: 947 were green before this round and 947 were green after it, which says
 the old behaviour was not pinned anywhere.
 
+## Terminal keys: the dialect, and `$` inside a selection
+
+Vim does not have arrow keys; it has commands, and the terminal capability is what
+turns one into the other. Pinning `-T xterm` made that mapping real for the first
+time, and with it the keys that had been invisible or half-implemented:
+
+- `<End>` is `$`, `<Home>` is `0`, the arrows are `h` `j` `k` `l`, `<BS>` is `h`
+  with a wrap at a line start, and `<Del>` is not a motion at all. A pending
+  operator takes the command, so `d<Home>` is `d0`, `d<End>` is `d$` (counts
+  included), and `<Del>` after a `d` abandons the operator without touching the
+  buffer.
+- NORMAL and the operator path knew most of these. **Visual did not know `<End>` or
+  `<Home>` at all**, and the operator path dropped `<Home>`: the key failed every
+  `switch` and the command vanished, which is a silent no-op rather than a beep.
+  `v<End>`, `V<End>`, `v<Home>` and `d<Home>` are in `CASES` now.
+- **Visual `$` is `MAXCOL`, count and all.** The motion moves to the last character
+  of the line, but the selection keeps the line break past it — that is why
+  `v<End>d` joins the next line up instead of leaving a blank one, and why
+  `v<End>yp` pastes a linewise register. A count walks lines first, so `v2<End>` on
+  a two-line buffer reaches the end of the second line, and `v2<End>d` deletes both
+  lines' text and the break between them. The engine used to take the bare
+  movement, which left `v<End>` on the selection's first character and dropped the
+  count, so both the caret and the deleted text were wrong.
+
 ## What the fuzzer refuses to compare
 
 `fuzz.mjs` draws 1–3 keys from `KEYS` and drops the sequences whose keys the two
@@ -853,17 +896,84 @@ an `a`, one of the twelve characters the engine's `#applyTextObject` names a ran
 with, and up to one ordinary key on either side. The keys on either side are the
 point — `di"j` for where the caret lands, `yi"g g P` for what a range yank leaves in
 the register, `2di"` for whether the count reaches the object, `di".` for whether the
-redo replays it. **164 of the 575 checked sequences now carry a text object**, against
+redo replays it. **167 of the 579 checked sequences now carry a text object**, against
 0 before, and the summary line reports that number so the draw can be judged on what
 it actually produced rather than on what it was meant to. (The total was 583 before
 the admission walk replaced the lookback rules — it admits patterns, `r<CR>` and
 latch-editing keys it used to drop, and drops the arrow keys inside a line that it
-used to compare.)
+used to compare. `<Home>` was added afterwards and is the difference between that
+575 and the 579 above.)
 
 Everything else the fuzzer finds is compared, and it earned its keep on its first
 run in this round: `^ j` on `"abc\ndef"` at 1, out of 900 drawn sequences, was the
 one disagreement, and it was a real defect (`^` moved the caret without moving
 the wanted column with it, so the `j` landed beside it). Mutant `S37`.
+
+## Put over a selection, and where an undo lands
+
+Two Visual behaviours were measured against vim in this round and are now pinned
+by `CASES` rather than by prose alone.
+
+**`p` and `P` in Visual mode are a delete followed by a put.** `nv_put_opt`
+(normal.c:7333-7425) deletes the selection into the unnamed register first, then
+puts what the register held *before* that delete, so `p` swaps a word with a word
+instead of pasting the deletion. The register is not wasted: `p` leaves the
+deleted text in it (a second `p` pastes the old selection back), while `P` deletes
+into the black hole and keeps the text it put. The put half follows `do_put`'s
+Visual rules (register.c:1897-1930): a linewise selection takes whole lines — a
+characterwise register is split at its own breaks, and a trailing break is an
+empty line — while a characterwise selection opens its line for a linewise
+register and writes a characterwise one at the caret, after it when the delete
+stepped back off the selection. A count repeats the register, an empty register
+still deletes the selection, and the pair is one `setAll` and one undo step. The
+redo is the delete half, not the put: `nv_operator` overwrites the `p` the command
+started with, so `.` deletes the same shape again (measured on vim 9.1:
+`yljvlp.` on `"ab\ncd\nEF"` leaves `"ab\nEF"`).
+
+**An undo restores the caret where the change began.** A host snapshots the caret
+at `setAll`, so the snapshot is only right if the engine stands the caret where
+vim's undo header will restore it before writing. Vim saves `curwin->w_cursor`
+when the change first reaches the undo header (undo.c:592), and by then
+`do_pending_operator` has pulled the cursor to `oap->start` — the head of the
+region the operator is about to change (ops.c:3798-3838). The rules that follow
+are all in `CASES`:
+
+- A backward operator lands on the line it came down from (`db`, `dh`, `X`,
+  `diw`), and `dk`/`dj` on the motion's own landing.
+- A Visual delete lands on the head of the selection: the earlier end for a
+  characterwise one; for a linewise one, the anchor's line head when drawn
+  downward and the caret's own column when drawn upward (`oap->start` zeroes the
+  column only for the anchor, ops.c:3791-3795).
+- `dd`'s one-line form zeroes the column (`nv_lineop` runs `beginline(BL_SOL)`,
+  normal.c:6482-6496); a counted `dd` keeps the operator's column.
+- `cc` is the other way round: one line goes to its first non-blank
+  (`beginline(BL_WHITE)`), while a counted `cc` goes to the line below
+  `oap->start` at the operator's column — `op_change`'s MLINE branch deletes the
+  block's tail first, and that save carries the lower caret (ops.c:813-823).
+- Shifts (`>>`, `>j`), joins (`J`, `gJ`), case maps (`gUU`, `gUiw`) and linewise
+  text objects (`dip`, `di{`) keep the operator's own start.
+
+### Three things about undo this instrument cannot judge
+
+- **Ctrl+R is not in `TERMINAL_KEYS`.** `\x12` reaches the engine as a bare key
+  it does not map, so a redo never runs on this side and a `u`-then-`\x12` row
+  compares a redo with a no-op. Redo is measured through `.` (the redo the engine
+  owns) and pinned in `vim-engine.test.ts`; a `\x12` case here would be invalid.
+- **Scripted vim merges every change into one undo block.** `vim -s` replays a
+  byte stream, so the main loop never waits for input and never calls `u_sync`
+  between commands. One `u` therefore undoes *every* change in the case, not the
+  last one: `jlxiZ<Esc>u` restores the original buffer where an interactive vim
+  would leave `"ab\nc\nEF"`. A case may put `u` after exactly one changing
+  command, or use it to compare the full restore; two changes followed by one `u`
+  is an artifact of the instrument, not a divergence.
+- **Vim records an undo entry for a shift that changes nothing.** `<` on
+  unindented lines writes no text but still opens a header, so `GlVk<u` lands the
+  caret back on the selection's head (vim @4) while the engine's no-op shift is
+  only a caret move (ours @3). This is deliberate: `#shiftLines` does not call
+  `setAll` when the text is byte-identical, because a snapshot that changed
+  nothing would clear the host's redo stack (`vim-engine.test.ts`: "an edit that
+  changes nothing records nothing"). It is the one measured undo-cursor difference
+  left, and it is the engine's rule rather than a missing translation.
 
 ## Known gaps
 

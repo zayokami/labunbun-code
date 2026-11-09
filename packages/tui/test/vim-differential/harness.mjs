@@ -86,7 +86,14 @@ export function runVim(text, cursor, kseq) {
 	const byteCol = Buffer.byteLength(before.slice(before.lastIndexOf("\n") + 1), "utf8") + 1;
 	writeFileSync(
 		keys,
-		`:call cursor(${line}, ${byteCol})\r${kseq.join("")}` +
+		// The two keycodes the REPL and the xterm termcap spell differently. The
+		// REPL's Backspace byte is `^?` and its Delete is `\e[3~`; xterm's termcap
+		// says the opposite (`t_kb=^H`, `t_kD=^?`). Redefine both before the case,
+		// so the bytes replayed below are the keys the REPL actually received. It
+		// goes in the script rather than `--cmd` because the Windows `vim.bat`
+		// wrapper refuses an argument carrying `&`, `?`, `<` or `>`.
+		`:let &t_kb = nr2char(127)\r:let &t_kD = "\\e[3~"\r` +
+			`:call cursor(${line}, ${byteCol})\r${kseq.join("")}` +
 			// `col('.')` is a byte column and the comparison is in the offsets a
 			// JavaScript string is indexed by, so vim is asked for the *prefix*
 			// rather than for a count: `strpart()` takes bytes, and the string that
@@ -103,7 +110,31 @@ export function runVim(text, cursor, kseq) {
 	try {
 		execFileSync(
 			"vim",
-			["-u", "NONE", "-N", "-i", "NONE", "-n", "--not-a-term", "--cmd", "set encoding=utf-8", "-s", keys, inFile],
+			[
+				"-u",
+				"NONE",
+				"-N",
+				"-i",
+				"NONE",
+				"-n",
+				// The terminal dialect has to be pinned, or a key that is not a
+				// printable character never becomes a key at all. A `-s` script is a
+				// byte stream, and vim only turns `\x1b[C` into Right if its termcap
+				// says that is the Right code. On this machine's console vim the
+				// default termcap has no ANSI sequences (the console delivers key
+				// events, not bytes), so every arrow, End, Delete and Backspace row
+				// was measuring vim reading `ESC [ C` as Escape, `[`, `C`. `-T xterm`
+				// supplies the codes those sequences name, on every build that has
+				// the built-in xterm entry.
+				"-T",
+				"xterm",
+				"--not-a-term",
+				"--cmd",
+				"set encoding=utf-8",
+				"-s",
+				keys,
+				inFile,
+			],
 			{ stdio: ["ignore", "pipe", "pipe"], timeout: VIM_TIMEOUT_MS },
 		);
 	} catch {
@@ -129,12 +160,19 @@ export function runVim(text, cursor, kseq) {
  * Both spellings live here rather than in the case files, because a case names a
  * key once and getting the two apart wrong makes every result a comparison of
  * two different key sequences.
+ *
+ * Backspace is `^?` (0x7f), the byte almost every terminal sends for it and the
+ * one Ink's parser resolves to `backspace`. Vim's built-in xterm termcap calls
+ * that byte *Delete* (`t_kD=^?`) and gives Backspace `^H`, so `runVim` redefines
+ * the two codes in the keys script: a row must compare the REPL's Backspace with
+ * vim's Backspace, not with the key the termcap happened to put on that byte.
  */
 const TERMINAL_KEYS = {
 	"\r": { return: true },
 	"\x7f": { backspace: true },
 	"\x1b[3~": { delete: true },
 	"\x1b[4~": { end: true },
+	"\x1b[H": { home: true },
 	"\x1b[A": { upArrow: true },
 	"\x1b[B": { downArrow: true },
 	"\x1b[C": { rightArrow: true },

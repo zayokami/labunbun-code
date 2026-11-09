@@ -719,6 +719,24 @@ function linewiseLanding(text: string, removeFrom: number): number {
 	return settleCursor(text, motionFirstNonBlank(text, lineStart(text, Math.min(removeFrom, text.length))));
 }
 
+/**
+ * A register's text as whole lines. A linewise register taken from the end of a
+ * buffer that had no final break holds no break at all; putting it as a line
+ * needs the one it was missing.
+ */
+function withTrailingBreak(text: string): string {
+	return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+/**
+ * The same lines without the break that terminates the last one — how a linewise
+ * block ends when it has to become the buffer's last line, which is a line of
+ * text and not a break.
+ */
+function withoutTrailingBreak(text: string): string {
+	return text.endsWith("\n") ? text.slice(0, -1) : text;
+}
+
 /** `~` over a range: swap the case of every cased character, leave the rest. */
 function swapCase(segment: string): string {
 	return segment
@@ -2448,8 +2466,16 @@ export class VimEngine {
 	 * fell through would have deleted to the next `g`.
 	 */
 	#pendingObject: { operator: Operator; count: number; include: boolean; explicit: boolean } | null = null;
-	/** Visual mode has one `g` command (`gJ`), so it needs its own latch. */
+	/** Visual mode has two `g` commands (`gJ` and `gg`), so it needs its own latch. */
 	#visualPendingG = false;
+	/**
+	 * The count typed before that `g`, kept for `gg`: `{n}gg` is line n, and the
+	 * second key is where the motion runs. `#takeCount` has already spent the
+	 * buffer by the time the latch is set, so the two values have to be carried
+	 * across the key boundary.
+	 */
+	#visualGCount = 1;
+	#visualGExplicit = false;
 	/**
 	 * Visual `r` takes the character to write over the selection with, and the latch
 	 * has to be its own: `#pendingChar` is read in NORMAL only, so a `r` typed with
@@ -2525,6 +2551,15 @@ export class VimEngine {
 	 * where `v2ld` at the end of a two-character line takes it.
 	 */
 	#visualPastEnd = false;
+	/**
+	 * The same reach on the selection's other end. It is normally false — the
+	 * anchor is a plain position and no motion moves it — but `o` swaps the ends,
+	 * and with them the reach: after `v$od` the line break is still deleted,
+	 * because vim's VIsual corner is the column past the line's last character and
+	 * `v_swap_corners` (`normal.c:4974-5018`) moves that position, not a flag, to
+	 * the other end.
+	 */
+	#anchorPastEnd = false;
 
 	/**
 	 * The keys of the command being typed, and whether it has changed the buffer
@@ -2722,6 +2757,8 @@ export class VimEngine {
 		this.#pendingG = null;
 		this.#pendingObject = null;
 		this.#visualPendingG = false;
+		this.#visualGCount = 1;
+		this.#visualGExplicit = false;
 		this.#visualPendingR = false;
 		this.#prefixPending = false;
 		this.#inputPending = false;
@@ -2898,10 +2935,11 @@ export class VimEngine {
 			}
 			// The terminal movement keys are vim's own motions, so after an operator
 			// they are the ones their letters name: `d<Left>` is `dh`, `d<Down>` is the
-			// linewise `dj`, `d<End>` is `d$` — each with the count, as `2d<Right>` and
-			// `d2<Right>` both show. They have to be named here rather than left to
-			// fall through to the character path below, where an empty `input` is no
-			// motion at all and the operator is silently dropped.
+			// linewise `dj`, `d<Home>` is `d0` and `d<End>` is `d$` — each with the
+			// count, as `2d<Right>` and `d2<Right>` both show. They have to be named
+			// here rather than left to fall through to the character path below, where
+			// an empty `input` is no motion at all and the operator is silently
+			// dropped. `<Home>` was the one missing from this list.
 			const terminalMotion = key.leftArrow
 				? "h"
 				: key.rightArrow
@@ -2910,9 +2948,11 @@ export class VimEngine {
 						? "k"
 						: key.downArrow
 							? "j"
-							: key.end
-								? "$"
-								: null;
+							: key.home
+								? "0"
+								: key.end
+									? "$"
+									: null;
 			if (terminalMotion !== null) {
 				this.#pending = null;
 				this.#applyOperator(operator, terminalMotion, count * this.#takeCount());
@@ -2922,8 +2962,12 @@ export class VimEngine {
 				this.#pending = null;
 				const effective = count * this.#takeCount();
 				// `>>` shifts that many lines; `dd` deletes them; `guu` maps them.
-				if (operator === ">" || operator === "<") this.#shiftLines(effective, operator === ">");
-				else if (isCaseOperator(operator)) this.#caseLines(caseKindOf(operator), effective);
+				if (operator === ">" || operator === "<") {
+					const at = this.#ops.getCursor();
+					// nv_lineop's beginline leaves a one-line shift's undo caret on the
+					// line head; a count keeps it on the operator's own position.
+					this.#shiftLines(effective, operator === ">", 1, at, effective > 1 ? at : lineStart(this.#ops.getText(), at));
+				} else if (isCaseOperator(operator)) this.#caseLines(caseKindOf(operator), effective);
 				else this.#applyLinewise(operator, effective);
 				return true;
 			}
@@ -3740,6 +3784,9 @@ export class VimEngine {
 			if (start >= pos) return;
 			this.#register = { text: text.slice(start, pos), linewise: false };
 			const out = text.slice(0, start) + text.slice(pos);
+			// `X` changes text that begins behind the caret, and vim's undo records
+			// the head of the change, not the caret it deleted back from.
+			this.#undoAt(start);
 			this.#ops.setAll(out, settleCursor(out, start));
 			this.#wantHere();
 		}
@@ -3845,7 +3892,7 @@ export class VimEngine {
 	 * (vim's 'formatoptions' `m` rule — no space before a multi-byte character —
 	 * is off in vim's own defaults, so it is not reproduced here.)
 	 */
-	#joinLines(count: number, noSpace = false, from = this.#ops.getCursor()): void {
+	#joinLines(count: number, noSpace = false, from = this.#ops.getCursor(), undoCaret = from): void {
 		const text = this.#ops.getText();
 		let out = text;
 		const line = lineOf(text, from);
@@ -3877,6 +3924,7 @@ export class VimEngine {
 		}
 		// One command, one snapshot: writing per join would cost one `u` each.
 		if (out === text) return;
+		this.#undoAt(undoCaret);
 		this.#ops.setAll(out, settleCursor(out, joinAt));
 		this.#wantHere();
 	}
@@ -4070,7 +4118,7 @@ export class VimEngine {
 				// only ever saw `ml_get_curline()` — so the span is that line whatever
 				// the range is, and an empty pair shifts the line it stands on rather
 				// than the one before it.
-				this.#shiftLines(1, operator === ">", 1, nthLineStart(text, lineOf(text, quote.start)));
+				this.#shiftLines(1, operator === ">", 1, nthLineStart(text, lineOf(text, quote.start)), quote.start);
 				return;
 			}
 			// A pair with nothing between the quotes is a range of no width, which
@@ -4111,12 +4159,12 @@ export class VimEngine {
 				// `op_shift` indents the line the start is on. `>i(` on `())` puts a
 				// tab in front of the `(` that holds the empty pair.
 				if (block.empty) {
-					this.#shiftLines(1, operator === ">", 1, nthLineStart(text, lineOf(text, block.start)));
+					this.#shiftLines(1, operator === ">", 1, nthLineStart(text, lineOf(text, block.start)), block.start);
 					return;
 				}
 				const firstLine = block.linewise ? block.firstLine : lineOf(text, block.start);
 				const lastLine = block.linewise ? block.lastLine : lineOf(text, Math.max(block.start, block.end - 1));
-				this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine));
+				this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine), block.start);
 				return;
 			}
 			// A pair with nothing left inside it is not a FAIL. `decl` walks the end
@@ -4144,7 +4192,7 @@ export class VimEngine {
 			// `  a` back as a line, not as text.
 			if (block.linewise) {
 				const { start, end, removeFrom } = lineRange(text, block.firstLine, block.lastLine);
-				this.#runLinewise(operator, start, end, removeFrom);
+				this.#runLinewise(operator, start, end, removeFrom, undefined, block.start);
 				if (operator === "y") this.#ops.setCursor(nthLineStart(text, block.firstLine));
 				return;
 			}
@@ -4155,7 +4203,7 @@ export class VimEngine {
 			const endPos = block.end - (block.inclusive ? 1 : 0);
 			if (operator === "d" && deleteGoesLinewise(text, block.start, endPos, block.inclusive)) {
 				const { start, end, removeFrom } = lineRange(text, lineOf(text, block.start), lineOf(text, endPos));
-				this.#runLinewise(operator, start, end, removeFrom);
+				this.#runLinewise(operator, start, end, removeFrom, undefined, block.start);
 				return;
 			}
 			this.#runOperator(operator, block.start, block.end, block.inclusive);
@@ -4180,7 +4228,7 @@ export class VimEngine {
 			// out from a motion's two ends — here they are already known.
 			const firstLine = lineOf(text, found.start);
 			const lastLine = lineOf(text, Math.max(found.start, found.end - 1));
-			this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine));
+			this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine), found.start);
 			return;
 		}
 		if (isCaseOperator(operator)) {
@@ -4195,7 +4243,7 @@ export class VimEngine {
 				lineOf(text, found.start),
 				lineOf(text, Math.max(found.start, found.end - 1)),
 			);
-			this.#runLinewise(operator, start, end, removeFrom);
+			this.#runLinewise(operator, start, end, removeFrom, undefined, found.start);
 			return;
 		}
 		this.#runOperator(operator, found.start, found.end, true);
@@ -4223,7 +4271,8 @@ export class VimEngine {
 				this.#caseRange(caseKindOf(operator), start, end, Math.min(span.landing, from));
 				return;
 			}
-			this.#runLinewise(operator, start, end, removeFrom, span.landing);
+			const operatorFrom = this.#ops.getCursor();
+			this.#runLinewise(operator, start, end, removeFrom, span.landing, Math.min(operatorFrom, span.landing));
 			return;
 		}
 
@@ -4271,7 +4320,7 @@ export class VimEngine {
 					this.#caseRange(caseKindOf(operator), start, end, range.start);
 					return;
 				}
-				this.#runLinewise(operator, start, end, removeFrom);
+				this.#runLinewise(operator, start, end, removeFrom, undefined, range.start);
 				return;
 			}
 			range = { start: range.start, end: prevChar(text, range.end), inclusive: false };
@@ -4283,7 +4332,7 @@ export class VimEngine {
 			const endPos = range.inclusive ? prevChar(text, range.end) : range.end;
 			if (deleteGoesLinewise(text, range.start, endPos, range.inclusive)) {
 				const { start, end, removeFrom } = lineRange(text, lineOf(text, range.start), lineOf(text, endPos));
-				this.#runLinewise("d", start, end, removeFrom);
+				this.#runLinewise("d", start, end, removeFrom, undefined, range.start);
 				return;
 			}
 		}
@@ -4369,7 +4418,13 @@ export class VimEngine {
 		const span = this.#lineSpan(motion, count, countExplicit);
 		if (span === false) return;
 		if (span) {
-			this.#shiftLines(span.lastLine - span.firstLine + 1, right, 1, nthLineStart(text, span.firstLine));
+			this.#shiftLines(
+				span.lastLine - span.firstLine + 1,
+				right,
+				1,
+				nthLineStart(text, span.firstLine),
+				Math.min(from, span.landing),
+			);
 			return;
 		}
 		const range = this.#motionRange(motion, count, findChar);
@@ -4387,7 +4442,7 @@ export class VimEngine {
 		const cursorLine = lineOf(text, from);
 		const firstLine = Math.min(cursorLine, landingLine);
 		const lastLine = Math.max(cursorLine, landingLine);
-		this.#shiftLines(lastLine - firstLine + 1, right, 1, nthLineStart(text, firstLine));
+		this.#shiftLines(lastLine - firstLine + 1, right, 1, nthLineStart(text, firstLine), Math.min(from, landingAt));
 	}
 
 	/**
@@ -4403,7 +4458,7 @@ export class VimEngine {
 	 * An empty line has no indent to shift and is left alone (vim skips it), and
 	 * the caret ends on the first non-blank of the first line of the range.
 	 */
-	#shiftLines(count: number, right: boolean, amount = 1, from = this.#ops.getCursor()): void {
+	#shiftLines(count: number, right: boolean, amount = 1, from = this.#ops.getCursor(), undoCaret = from): void {
 		const text = this.#ops.getText();
 		const firstLine = lineOf(text, from);
 		const lastLine = Math.min(firstLine + Math.max(1, count) - 1, lineCount(text) - 1);
@@ -4423,8 +4478,10 @@ export class VimEngine {
 		const landing = settleCursor(out, motionFirstNonBlank(out, nthLineStart(out, firstLine)));
 		// One command, one snapshot — and a shift that changed nothing (an
 		// unindented line under `<<`) is still a caret move, not an undo step.
-		if (out !== text) this.#ops.setAll(out, landing);
-		else this.#ops.setCursor(landing);
+		if (out !== text) {
+			this.#undoAt(undoCaret);
+			this.#ops.setAll(out, landing);
+		} else this.#ops.setCursor(landing);
 		// op_shift ends with beginline(BL_SOL|BL_FIX): a move, so MAXCOL is gone.
 		this.#wantHere();
 	}
@@ -4637,12 +4694,22 @@ export class VimEngine {
 		// (`cw` on "foo bar" leaves "foo " with the caret after the space, column 5).
 		// A delete settles onto a real character instead, where NORMAL mode can hold
 		// the caret.
-		if (out !== text) this.#ops.setAll(out, operator === "c" ? start : settleCursor(out, start));
+		if (out !== text) {
+			this.#undoAt(start);
+			this.#ops.setAll(out, operator === "c" ? start : settleCursor(out, start));
+		}
 		if (operator === "c") this.#enterInsert();
 		else this.#wantHere();
 	}
 
-	#runLinewise(operator: "d" | "c" | "y", start: number, end: number, removeFrom = start, landing?: number): void {
+	#runLinewise(
+		operator: "d" | "c" | "y",
+		start: number,
+		end: number,
+		removeFrom = start,
+		landing?: number,
+		undoCaret = start,
+	): void {
 		const text = this.#ops.getText();
 		this.#register = { text: text.slice(start, end), linewise: true };
 		if (operator === "y") {
@@ -4678,6 +4745,7 @@ export class VimEngine {
 		// line changes no characters and still has to leave the caret standing
 		// where the typing goes, which is `ci(` on `f(\n\n)`.
 		if (out !== text || operator === "c") {
+			this.#undoAt(undoCaret);
 			this.#ops.setAll(out, operator === "c" ? insertCaret : linewiseLanding(out, removeFrom));
 		}
 		if (operator === "c") this.#enterInsert();
@@ -4689,15 +4757,16 @@ export class VimEngine {
 	 * visual-line selection (`Vc`). The block gives way to one empty line and the
 	 * insert starts on it.
 	 */
-	#changeLines(firstLine: number, lastLine: number): void {
+	#changeLines(firstLine: number, lastLine: number, undoCaret?: number): void {
 		const text = this.#ops.getText();
 		const { start, end, removeFrom } = lineRange(text, firstLine, Math.min(lineCount(text) - 1, lastLine));
-		this.#runLinewise("c", start, end, removeFrom);
+		this.#runLinewise("c", start, end, removeFrom, undefined, undoCaret);
 	}
 
 	#applyLinewise(operator: "d" | "c" | "y", count: number): void {
 		const text = this.#ops.getText();
-		const startLine = lineOf(text, this.#ops.getCursor());
+		const from = this.#ops.getCursor();
+		const startLine = lineOf(text, from);
 		// `2dd` with nothing under the caret but its own line takes nothing at all:
 		// vim refuses the count rather than falling back to the one line it could
 		// have taken. `2dj` from the same place is a different command, and that one
@@ -4705,7 +4774,22 @@ export class VimEngine {
 		if (count > 1 && startLine === lineCount(text) - 1) return;
 		const endLine = Math.min(lineCount(text) - 1, startLine + count - 1);
 		const { start, end, removeFrom } = lineRange(text, startLine, endLine);
-		this.#runLinewise(operator, start, end, removeFrom);
+		// nv_dd's nv_lineop runs `cursor_down(count - 1)` and then `beginline`
+		// (normal.c:6482-6496) before do_pending_operator pulls the caret back to
+		// `oap->start` only when that moved behind it — so the undo caret is the
+		// line head for one line, and the operator's own position for a longer
+		// count. A change's beginline stops at the first non-blank instead
+		// (BL_WHITE), and `cc` over several lines deletes the block's tail before
+		// its first undo check, putting that check one line below the start.
+		let undoCaret = start;
+		if (operator === "d") undoCaret = count > 1 ? from : lineStart(text, from);
+		else if (operator === "c") {
+			if (count > 1) {
+				const next = nthLineStart(text, startLine + 1);
+				undoCaret = Math.min(next + (from - lineStart(text, from)), lineEndExclusive(text, next));
+			} else undoCaret = Math.min(from, motionFirstNonBlank(text, nthLineStart(text, startLine)));
+		}
+		this.#runLinewise(operator, start, end, removeFrom, undefined, undoCaret);
 	}
 
 	/**
@@ -4729,8 +4813,12 @@ export class VimEngine {
 		// form already follows: a token's own letters are its format, and casing
 		// them would leave the payload behind them unreachable at submit.
 		const mapped = mapOutsidePasteTokens(text, start, stop, (run) => mapCase(run, kind));
-		if (mapped !== segment) this.#ops.setAll(text.slice(0, start) + mapped + text.slice(stop), landing);
-		else this.#ops.setCursor(landing);
+		if (mapped !== segment) {
+			// op_tilde saves for undo with the caret where do_pending_operator left
+			// it — the operator's start, already folded into `landing`.
+			this.#undoAt(landing);
+			this.#ops.setAll(text.slice(0, start) + mapped + text.slice(stop), landing);
+		} else this.#ops.setCursor(landing);
 		this.#wantHere();
 	}
 
@@ -5035,6 +5123,46 @@ export class VimEngine {
 		run();
 	}
 
+	/**
+	 * Stand the host's caret where vim's undo will restore it, immediately before
+	 * a write.
+	 *
+	 * A host records its undo snapshot at `setAll`, and the snapshot carries the
+	 * caret the host had at that moment. Vim saves `curwin->w_cursor` when the
+	 * change first reaches the undo header (undo.c:592), and by then
+	 * do_pending_operator has pulled the cursor to `oap->start`, the head of the
+	 * region the operator is about to change (ops.c:3798-3838). Undoing a change
+	 * therefore lands the caret where the change began, not where the command
+	 * left it: a backward delete puts it back on the line it came down from, and
+	 * a Visual change on the anchor. Nothing reads the caret between this call
+	 * and the `setAll` that overwrites it, so the final caret is unaffected.
+	 */
+	#undoAt(pos: number): void {
+		this.#ops.setCursor(pos);
+	}
+
+	/**
+	 * Where an undo of a Visual change restores the caret: the head of the
+	 * selection.
+	 *
+	 * A characterwise selection starts at the earlier of its two ends. A linewise
+	 * one is vim's `oap->start`, whose column is zeroed only for the *anchor*
+	 * (ops.c:3791-3795); when the selection was drawn upward the anchor is the
+	 * higher end, do_pending_operator keeps the caret as the start instead, and
+	 * its column comes back with it (measured: `Vk` from the second character of
+	 * a line lands the undone caret on that column, not on the line head).
+	 */
+	#selectionUndoCaret(): number {
+		const text = this.#ops.getText();
+		const caret = this.#ops.getCursor();
+		if (this.mode !== "visual-line") return Math.min(this.#anchor, caret);
+		const anchorLine = lineOf(text, this.#anchor);
+		const caretLine = lineOf(text, caret);
+		if (anchorLine < caretLine) return lineStart(text, this.#anchor);
+		if (anchorLine > caretLine) return caret;
+		return lineStart(text, caret);
+	}
+
 	// -- visual mode ----------------------------------------------------------
 
 	#startVisual(mode: "visual" | "visual-line", count = 1): void {
@@ -5055,6 +5183,7 @@ export class VimEngine {
 			// armed in NORMAL mode is not read as "past the line end" by the selection
 			// it begins (`$vd` deletes one character, `v$d` takes the line break).
 			this.#visualPastEnd = false;
+			this.#anchorPastEnd = false;
 		}
 		this.mode = mode;
 		this.#syncSelection();
@@ -5084,9 +5213,10 @@ export class VimEngine {
 			// end contributes the character it stands on — or, when it stands past
 			// the line's last character, the line break after it. The two ranges are
 			// unioned, which is what makes `vl` at a line end (`[last, break)`, the
-			// anchor still contributing its own character) join two lines.
-			const from = this.#endpoint(a, false);
-			const to = this.#endpoint(c, true);
+			// anchor still contributing its own character) join two lines. The
+			// reach is per end because `o` can swap it onto the anchor.
+			const from = this.#endpoint(a, this.#anchorPastEnd);
+			const to = this.#endpoint(c, this.#visualPastEnd);
 			this.selection = {
 				start: Math.min(from.lo, to.lo),
 				end: Math.min(text.length, Math.max(from.hi, to.hi)),
@@ -5097,15 +5227,16 @@ export class VimEngine {
 	/**
 	 * The half-open range one end of a charwise selection covers: the character it
 	 * stands on, or the line break after it when it stands past the line's last
-	 * character. `moving` marks the end a motion drove — the wanted column, and with
-	 * it the reach past the line, belongs to that end alone. The anchor is a plain
-	 * position, which is why `vld` on a line's last character takes the break (the
-	 * caret's range is `[break, break + 1)` and the anchor still contributes the
-	 * character it stands on) while a motion-less `vd` there does not.
+	 * character. `reach` marks the end that has that past-the-column state — the
+	 * wanted column belongs to that end alone. The anchor normally has none, which
+	 * is why `vld` on a line's last character takes the break (the caret's range is
+	 * `[break, break + 1)` and the anchor still contributes the character it stands
+	 * on) while a motion-less `vd` there does not; `o` is what can move the reach
+	 * onto the anchor.
 	 */
-	#endpoint(pos: number, moving: boolean): { lo: number; hi: number } {
+	#endpoint(pos: number, reach: boolean): { lo: number; hi: number } {
 		const text = this.#ops.getText();
-		if (this.#pastLineEnd(pos, moving)) {
+		if (this.#pastLineEnd(pos, reach)) {
 			const lo = lineEndExclusive(text, pos);
 			return { lo, hi: lo + 1 };
 		}
@@ -5119,12 +5250,12 @@ export class VimEngine {
 	 * stand on a line break), which is why this has to be a question about the
 	 * wanted column rather than about the caret alone.
 	 */
-	#pastLineEnd(pos: number, moving: boolean): boolean {
+	#pastLineEnd(pos: number, reach: boolean): boolean {
 		const text = this.#ops.getText();
 		// A caret standing on a line break has no character of its own there. That is
 		// geometry, not a wanted column: an empty line, where the break is the line.
 		if (text[pos] === "\n") return true;
-		if (!moving || !this.#visualPastEnd) return false;
+		if (!reach) return false;
 		// Only the line's last character can have a column past it, and only a line
 		// with a break after it can give that break up.
 		return pos === lineLastChar(text, pos) && lineEndExclusive(text, pos) < text.length;
@@ -5219,6 +5350,18 @@ export class VimEngine {
 			else if (input === "u") this.#overSelection("u", () => this.#caseSelection("lower"));
 			else if (input === "U") this.#overSelection("U", () => this.#caseSelection("upper"));
 			else if (input === "~") this.#overSelection("~", () => this.#caseSelection("toggle"));
+			else if (input === "g") {
+				// `gg` is a motion here as it is in NORMAL, and the count is the line
+				// to go to — `v2gg` from the last line selects up to the second one.
+				// The latch is two keys deep, so the count was taken by the first `g`
+				// and is carried in #visualGCount.
+				const text = this.#ops.getText();
+				const line = this.#visualGExplicit ? Math.min(this.#visualGCount, lineCount(text)) - 1 : 0;
+				this.#visualPastEnd = false;
+				this.#ops.setCursor(motionBeginline(text, nthLineStart(text, line)));
+				this.#syncSelection();
+				this.#wantHere();
+			}
 			return true;
 		}
 
@@ -5232,6 +5375,7 @@ export class VimEngine {
 			this.#countBuffer = this.#countBuffer.slice(0, -1);
 			return true;
 		}
+		const explicitCount = this.#countBuffer !== "";
 		const count = this.#takeCount();
 		const text = this.#ops.getText();
 
@@ -5250,6 +5394,24 @@ export class VimEngine {
 		if (key.delete) {
 			// The Delete key is `x` in visual mode: it cuts the selection outright.
 			this.#overSelection("d", () => this.#deleteSelection());
+			return true;
+		}
+		// `<Home>` and `<End>` are `0` and `$` here, the same commands they are in
+		// NORMAL: vim binds K_HOME and K_END to nv_beginline and nv_dollar for every
+		// mode, and the count rides along (`v2<End>` is `v2$`, end of the next
+		// line). They were the one pair of terminal motions NORMAL knew and Visual
+		// did not, so `v<End>d` selected nothing and this file's own fuzzer could
+		// not see it — `<End>` only became a real key to the harness once the
+		// terminal dialect was pinned, and the fuzzer had no `<Home>` at all.
+		if (key.home) {
+			this.#visualPastEnd = false;
+			this.#ops.setCursor(lineStart(text, this.#ops.getCursor()));
+			this.#syncSelection();
+			this.#wantHere();
+			return true;
+		}
+		if (key.end) {
+			this.#visualDollar(count);
 			return true;
 		}
 
@@ -5310,21 +5472,31 @@ export class VimEngine {
 				return true;
 			}
 			case "$":
-				this.#curswant = MAXCOL; // `v$j` comes back to the end of line 2
-				this.#visualPastEnd = true;
-				this.#ops.setCursor(lineLastChar(text, this.#ops.getCursor()));
-				this.#syncSelection();
+				this.#visualDollar(count);
 				return true;
-			case "G":
+			case "G": {
+				// `{n}G` is line n, a bare `G` the last line, and both land on the
+				// first non-blank, as they do in NORMAL. The old arm always took the
+				// last line, so `v2Gd` selected down to the end of the buffer.
+				const line = explicitCount ? Math.min(count, lineCount(text)) - 1 : lineCount(text) - 1;
 				this.#visualPastEnd = false;
-				this.#ops.setCursor(motionBeginline(text, nthLineStart(text, lineCount(text) - 1)));
+				this.#ops.setCursor(motionBeginline(text, nthLineStart(text, line)));
 				this.#syncSelection();
 				this.#wantHere();
 				return true;
+			}
 			case "o": {
+				// Both the corner and its reach move: `v_swap_corners` swaps the
+				// positions and then sets `w_set_curswant`, so the wanted column is
+				// recomputed from the caret on the next key rather than carried over
+				// (`v$oj` steps to column 0 of the next line, not to its end).
 				const swap = this.#anchor;
+				const swapPastEnd = this.#anchorPastEnd;
 				this.#anchor = this.#ops.getCursor();
+				this.#anchorPastEnd = this.#visualPastEnd;
 				this.#ops.setCursor(swap);
+				this.#visualPastEnd = swapPastEnd;
+				this.#curswant = null;
 				this.#syncSelection();
 				return true;
 			}
@@ -5339,6 +5511,8 @@ export class VimEngine {
 				return true;
 			case "g":
 				this.#visualPendingG = true;
+				this.#visualGCount = count;
+				this.#visualGExplicit = explicitCount;
 				return true;
 			case "r":
 				// v_visop's replace: one character, written over the whole selection.
@@ -5352,6 +5526,11 @@ export class VimEngine {
 				return true;
 			case "y":
 				this.#overSelection("y", () => this.#yankSelection());
+				return true;
+			case "p":
+			case "P":
+				// The redo is the delete half, not the put: see #putSelection.
+				this.#overSelection("d", () => this.#putSelection(count, input === "P"));
 				return true;
 			case "c":
 			case "s":
@@ -5403,7 +5582,8 @@ export class VimEngine {
 		const anchorLine = lineOf(text, this.#anchor);
 		const cursorLine = lineOf(text, this.#ops.getCursor());
 		const lines = Math.abs(anchorLine - cursorLine) + 1;
-		this.#joinLines(lines, noSpace, nthLineStart(text, Math.min(anchorLine, cursorLine)));
+		const undo = this.#selectionUndoCaret();
+		this.#joinLines(lines, noSpace, nthLineStart(text, Math.min(anchorLine, cursorLine)), undo);
 		this.#exitVisual(this.#ops.getCursor());
 	}
 
@@ -5419,19 +5599,11 @@ export class VimEngine {
 		const anchorLine = lineOf(text, this.#anchor);
 		const cursorLine = lineOf(text, this.#ops.getCursor());
 		const first = Math.min(anchorLine, cursorLine);
-		this.#shiftLines(Math.abs(anchorLine - cursorLine) + 1, right, amount, nthLineStart(text, first));
+		const undo = this.#selectionUndoCaret();
+		this.#shiftLines(Math.abs(anchorLine - cursorLine) + 1, right, amount, nthLineStart(text, first), undo);
 		this.#exitVisual(this.#ops.getCursor());
 	}
 
-	/**
-	 * A horizontal move inside a selection, and the one thing it decides for it: an
-	 * `l` that ran out of characters reaches a column past the line's last one, so
-	 * the selection takes the line break (`vld` at a line end joins the two lines,
-	 * while a `vl` that merely arrived on that character does not). A backward step
-	 * spends that reach first — `v$h` puts the selection's end back on the line's
-	 * last character without moving the caret, so a second `h` is the one that steps
-	 * (`'>` moves from column len+1 to column len, the caret stays; probed on 9.1).
-	 */
 	/**
 	 * A `j`/`k` (or an arrow) inside a selection: the wanted column decides the
 	 * reach as well as the landing. A column the landed line can fill is a plain
@@ -5449,6 +5621,30 @@ export class VimEngine {
 		this.#syncSelection();
 	}
 
+	/**
+	 * `$` and `<End>` inside a selection: NORMAL's counted {@link #dollar} — count
+	 * 1 is this line's last character, count n the end of the line n−1 below — and
+	 * then the two things a selection adds to it. The wanted column stays MAXCOL,
+	 * so a following `j` comes back to the end of whatever line it lands on
+	 * (`v$j`), and the reach past the end is armed, so the selection takes the
+	 * line break it ends on (`v$d` on `"abcdef"` takes the line; `v$` then `j` onto
+	 * a shorter line takes that line's break too).
+	 */
+	#visualDollar(count: number): void {
+		this.#dollar(count);
+		this.#visualPastEnd = true;
+		this.#syncSelection();
+	}
+
+	/**
+	 * A horizontal move inside a selection, and the one thing it decides for it: an
+	 * `l` that ran out of characters reaches a column past the line's last one, so
+	 * the selection takes the line break (`vld` at a line end joins the two lines,
+	 * while a `vl` that merely arrived on that character does not). A backward step
+	 * spends that reach first — `v$h` puts the selection's end back on the line's
+	 * last character without moving the caret, so a second `h` is the one that steps
+	 * (`'>` moves from column len+1 to column len, the caret stays; probed on 9.1).
+	 */
 	#moveVisualHorizontal(delta: number): void {
 		const text = this.#ops.getText();
 		const from = this.#ops.getCursor();
@@ -5576,6 +5772,7 @@ export class VimEngine {
 			this.#exitVisual(start);
 			return;
 		}
+		const undo = this.#selectionUndoCaret();
 		this.#register = { text: text.slice(start, end), linewise: this.mode === "visual-line" };
 		const cut = this.#selectionCut(start, end, text);
 		const out = text.slice(0, cut.start) + text.slice(cut.end);
@@ -5583,6 +5780,7 @@ export class VimEngine {
 		// the line the removed block collapsed onto (`V<Del>` on the last line of
 		// "a\nbc\ndef" ends on the 'b', with no line left below it).
 		const caret = this.mode === "visual-line" ? linewiseLanding(out, cut.start) : settleCursor(out, cut.start);
+		this.#undoAt(undo);
 		this.#ops.setAll(out, caret);
 		this.#exitVisual(caret);
 	}
@@ -5610,6 +5808,113 @@ export class VimEngine {
 	}
 
 	/**
+	 * Visual `p`/`P`: the selection is replaced by the register.
+	 *
+	 * `nv_put_opt` (normal.c:7333-7425) does it in two halves. First it deletes the
+	 * selection — exactly the delete `d` would make, into the unnamed register —
+	 * then it puts what the register held *before* that delete, so a `p` over a word
+	 * with a word in the register swaps them rather than pasting the deletion. The
+	 * delete's register write is not wasted either: a `p` leaves the deleted text in
+	 * the unnamed register (a normal `p` after it pastes the old selection), while
+	 * `P` deletes into the black hole and keeps the register it put (measured on vim
+	 * 9.1: `yljvlp` then `p` gives "ab\nacd\nEF", the same with `P` gives
+	 * "ab\naa\nEF").
+	 *
+	 * The put then follows the visual rules of `do_put` (register.c:1897-1930): a
+	 * visual-line selection puts whole lines — a characterwise register is split at
+	 * its own breaks into them, and a trailing break leaves an empty line, so
+	 * `v$y` of "ab\n" put with `Vp` is "ab" plus an empty line — while a
+	 * characterwise selection takes a linewise register by splitting the line open
+	 * at the caret ("p" or "P" in Visual mode: split the lines to put the text in
+	 * between). A characterwise register is written at the caret, after it when the
+	 * delete left the caret one character before the selection (`vhlp` with a
+	 * character under the caret).
+	 *
+	 * The delete is the redo, and vim keeps exactly that half: the `d` that
+	 * `nv_operator` prepares overwrites the `p` the command started with, so `.`
+	 * deletes the same shape again instead of putting (measured: `yljvlp.` on
+	 * "ab\ncd\nEF" leaves "ab\nEF", not the visual put a second time). The whole
+	 * pair is one `setAll`, so it is one undo step, and it counts as a change even
+	 * when it writes the selection back over itself (`ylvp.` then deletes the "a"
+	 * again on vim 9.1).
+	 */
+	#putSelection(count: number, keepRegister: boolean): void {
+		if (!this.selection) return;
+		const text = this.#ops.getText();
+		const { start, end } = this.selection;
+		const undo = this.#selectionUndoCaret();
+		const deleted = { text: text.slice(start, end), linewise: this.mode === "visual-line" };
+		const saved = this.#register;
+		const cut = this.#selectionCut(start, end, text);
+		const out = text.slice(0, cut.start) + text.slice(cut.end);
+		// Where the delete leaves the caret, by the same rules #deleteSelection uses.
+		const caret = this.mode === "visual-line" ? linewiseLanding(out, cut.start) : settleCursor(out, cut.start);
+		// `dir` starts backward and turns forward when the caret ended up before the
+		// selection. For a charwise selection that is a delete that stepped back off
+		// the selection's start; linewise, it is a block taken from the end of the
+		// buffer, which leaves the caret on the line above it (normal.c:7405-7411).
+		const forward = this.mode === "visual-line" ? lineOf(out, caret) < lineOf(text, start) : caret < start;
+
+		let result: string;
+		let landing: number;
+		if (this.mode === "visual-line") {
+			// PUT_LINE: the register goes in as whole lines, whatever it holds.
+			if (!saved.linewise && saved.text === "") {
+				// An empty characterwise register puts nothing at all; do_put reports
+				// "Nothing in register" for its zero lines.
+				result = out;
+				landing = caret;
+			} else {
+				// A linewise register already names whole lines. A characterwise one is
+				// split at its breaks as it stands — a trailing break is an empty line,
+				// which is why `v$y` of "ab\n" put with `Vp` is "ab" and then a blank.
+				const block = (saved.linewise ? withTrailingBreak(saved.text) : `${saved.text}\n`).repeat(count);
+				if (out === "") {
+					// An emptied buffer has no line to anchor the first break to: the
+					// register's last line simply becomes the only one ("ab", not "ab\n").
+					result = withoutTrailingBreak(block);
+					landing = motionBeginline(result, 0);
+				} else if (forward) {
+					// Forward puts after the caret's line; that is only the buffer end here,
+					// and the block's own last break is the new last line's, so it goes.
+					result = `${out}\n${withoutTrailingBreak(block)}`;
+					landing = motionBeginline(result, out.length + 1);
+				} else {
+					const at = lineStart(out, caret);
+					result = out.slice(0, at) + block + out.slice(at);
+					landing = motionBeginline(result, at);
+				}
+			}
+		} else if (saved.linewise) {
+			// PUT_LINE_SPLIT: open the caret's line and put the register's lines in
+			// between, as `do_put` does before it turns the put forward.
+			const at = forward ? this.#afterCaret(out, caret) : caret;
+			const block = withTrailingBreak(saved.text).repeat(count);
+			result = `${out.slice(0, at)}\n${block}${out.slice(at)}`;
+			// The first line put in is the one after the split-open caret line.
+			landing = motionBeginline(result, at + 1);
+		} else if (saved.text === "") {
+			// Nothing to write, but the selection was still cut.
+			result = out;
+			landing = caret;
+		} else {
+			// MCHAR: inserted at the caret, after it when the put runs forward. The
+			// caret ends on the last character put in — or on the first when the text
+			// spans lines, which is where vim's multi-line put leaves it.
+			const at = forward ? this.#afterCaret(out, caret) : caret;
+			const inserted = saved.text.repeat(count);
+			result = out.slice(0, at) + inserted + out.slice(at);
+			landing = snapToChar(result, saved.text.includes("\n") ? at : Math.max(at, at + inserted.length - 1));
+		}
+
+		// A `p` leaves the deleted text in the register, a `P` the text it put.
+		this.#register = keepRegister ? saved : deleted;
+		this.#undoAt(undo);
+		this.#ops.setAll(result, landing);
+		this.#exitVisual(landing);
+	}
+
+	/**
 	 * v_visop's uppercase rule: the same selection ends, taken linewise. Used by
 	 * the visual `C`/`S`/`D`/`X`/`Y` forms, which vim turns into their lowercase
 	 * operator over whole lines.
@@ -5624,14 +5929,30 @@ export class VimEngine {
 		if (!this.selection) return;
 		const { start, end } = this.selection;
 		const text = this.#ops.getText();
+		const caret = this.#ops.getCursor();
 		if (this.mode === "visual-line") {
 			// `Vc` is `cc` over the selected lines, not a delete: the block gives way
 			// to one empty line the insert starts on, exactly as #runLinewise does it
 			// (probed on vim 9.1 — a middle-line `Vc` leaves "a\n\ndef", a `V<Del>`
 			// leaves "a\ndef").
+			const anchorLine = lineOf(text, this.#anchor);
+			const caretLine = lineOf(text, caret);
+			// A linewise change keeps its first line and deletes the rest before its
+			// first undo check, which vim runs with the cursor on the *second* line of
+			// the block (ops.c:813-823): that position is the undo caret, so a
+			// one-line `Vc` undoes to the line head and a longer one to the same place
+			// one line down — at the caret's own column when the selection was drawn
+			// upward, at column 0 when it was drawn down.
+			let undo: number;
+			if (anchorLine === caretLine) undo = lineStart(text, caret);
+			else {
+				const next = nthLineStart(text, Math.min(anchorLine, caretLine) + 1);
+				const col = anchorLine < caretLine ? 0 : caret - lineStart(text, caret);
+				undo = Math.min(next + col, lineEndExclusive(text, next));
+			}
 			const firstLine = lineOf(text, start);
 			this.#exitVisual(start, false);
-			this.#changeLines(firstLine, lineOf(text, Math.max(start, end - 1)));
+			this.#changeLines(firstLine, lineOf(text, Math.max(start, end - 1)), undo);
 			return;
 		}
 		this.#register = { text: text.slice(start, end), linewise: false };
@@ -5639,6 +5960,7 @@ export class VimEngine {
 			const out = text.slice(0, start) + text.slice(end);
 			// The insert stands at the cut point, exactly as it does for the operator
 			// forms (see #runOperator) — even when that point is the buffer end.
+			this.#undoAt(Math.min(this.#anchor, caret));
 			this.#ops.setAll(out, start);
 			this.#exitVisual(start);
 		} else {
@@ -5666,6 +5988,7 @@ export class VimEngine {
 		if (!this.selection) return;
 		const { start, end } = this.selection;
 		const text = this.#ops.getText();
+		const undo = this.#selectionUndoCaret();
 		const written = mapOutsidePasteTokens(text, start, end, (run) =>
 			Array.from(run, (one) => (one === "\n" ? one : char)).join(""),
 		);
@@ -5675,6 +5998,7 @@ export class VimEngine {
 		// next line). The token rule above is what keeps a pasted payload intact,
 		// and it needs no guard of its own: a selection that is one token writes the
 		// token back unchanged and is a change all the same.
+		this.#undoAt(undo);
 		this.#ops.setAll(text.slice(0, start) + written + text.slice(end), start);
 		this.#exitVisual(start);
 	}
@@ -5684,6 +6008,7 @@ export class VimEngine {
 		if (!this.selection) return;
 		const text = this.#ops.getText();
 		const { start, end } = this.selection;
+		const undo = this.#selectionUndoCaret();
 		const segment = text.slice(start, end);
 		// A paste token inside the selection keeps its spelling: a token's own
 		// letters are its format, and uppercasing any of them makes the payload
@@ -5691,7 +6016,10 @@ export class VimEngine {
 		const swapped = mapOutsidePasteTokens(text, start, end, (run) => mapCase(run, kind));
 		// A selection with no cased characters changes nothing: exit visual without
 		// recording an edit that did not happen.
-		if (swapped !== segment) this.#ops.setAll(text.slice(0, start) + swapped + text.slice(end), start);
+		if (swapped !== segment) {
+			this.#undoAt(undo);
+			this.#ops.setAll(text.slice(0, start) + swapped + text.slice(end), start);
+		}
 		this.#exitVisual(start);
 	}
 }

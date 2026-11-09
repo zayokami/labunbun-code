@@ -7,7 +7,8 @@
  * seed so a mismatch is reproducible from the line it prints.
  *
  * The key set is the one the comparison is meaningful for: backspace, delete,
- * `<End>` and the arrows, the motions around them, the operators, and a count.
+ * `<Home>`, `<End>` and the arrows, the motions around them, the operators, and
+ * a count.
  * Sequences ending on a half-typed operator are dropped rather than compared,
  * because the two editors would be sitting in different pending states that a
  * buffer-and-cursor comparison cannot see — a difference there is a limitation of
@@ -49,6 +50,11 @@ const KEYS = {
 	// operator instead — every one of these keys was in the set for a batch before
 	// it found that.
 	END: ["", { end: true }],
+	// `<Home>`, for the same reason and one more: NORMAL knew it, Visual and the
+	// operator-pending path did not, so `v<Home>` and `d<Home>` were keys this
+	// fuzzer could not send and nothing was checking. Both are fixed now, and
+	// this entry is what holds them.
+	HOME: ["", { home: true }],
 	UP: ["", { upArrow: true }],
 	DOWN: ["", { downArrow: true }],
 	RIGHT: ["", { rightArrow: true }],
@@ -290,7 +296,7 @@ function uncomparable(seq) {
 }
 
 /** The keys that move vim's command line, kept out of the `/` and `?` states above. */
-const ARROW_KEYS = new Set(["UP", "DOWN", "LEFT", "RIGHT", "END"]);
+const ARROW_KEYS = new Set(["UP", "DOWN", "LEFT", "RIGHT", "HOME", "END"]);
 
 /** The operators in the set above. `>` and `<` are not: they are shift keys, and nothing else. */
 const OPERATORS = new Set(["d", "y"]);

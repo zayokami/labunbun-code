@@ -480,6 +480,35 @@ const CASES = [
 	[["d", "2", "\x7f"], "abcdefgh", 5],
 	[["y", "\x7f"], "ab\ncdef\ngh", 3],
 	[["d", "\x1b[3~"], "abcdef", 3],
+	// `<Home>` was the one terminal key the operator path and the Visual modes did
+	// not know. An operator dropped it without touching the buffer, and a Visual
+	// selection ignored it, so the caret stayed where the selection began. In
+	// vim the key is `0` under an operator and `nv_beginline` in every mode.
+	[["\x1b[H"], "ab\ncdef", 4],
+	[["d", "\x1b[H"], "abcdef", 3],
+	[["c", "\x1b[H", "Z", "\x1b"], "abcdef", 3],
+	[["2", "d", "\x1b[H"], "ab\ncdef\nghi", 5],
+	// `0` is the line's first column, not its first non-blank: on an indented
+	// second line `d<Home>` keeps the indent, where `^` would keep the blanks in
+	// front of the caret's own line and nothing else.
+	[["d", "\x1b[H"], "  ab\n  cd", 8],
+	[["v", "\x1b[H", "d"], "  ab\n  cd", 8],
+	[["v", "\x1b[H"], "ab\ncdef", 6],
+	[["v", "\x1b[H", "d"], "ab\ncdef", 6],
+	[["V", "\x1b[H", "d"], "ab\ncdef", 6],
+	// Visual `$` reaches MAXCOL like the NORMAL motion does, count and all, and
+	// the selection keeps the line break past the last character: `v<End>d` joins
+	// the next line up instead of leaving a blank one. The engine took the bare
+	// movement (`v<End>` never moved) and ignored the count on the selection.
+	[["v", "\x1b[4~"], "ab\ncdef\ngh", 0],
+	[["v", "\x1b[4~", "d"], "ab\ncdef\ngh", 0],
+	[["v", "\x1b[4~", "x"], "ab\ncdef\ngh", 0],
+	[["v", "\x1b[4~", "y", "p"], "ab\ncdef\ngh", 0],
+	[["v", "\x1b[4~", "d"], "ab\ncdef\ngh", 4],
+	[["V", "\x1b[4~", "d"], "ab\ncdef\ngh", 0],
+	[["v", "2", "\x1b[4~", "d"], "ab\ncdef\ngh", 0],
+	[["v", "2", "\x1b[4~"], "abc", 1],
+	[["v", "\x1b[4~", "j", "d"], "ab\ncdef\ngh", 0],
 	// visual-line delete on the last line
 	[["V", "d"], D, 5],
 	[["V", "d"], D, 7],
@@ -2040,6 +2069,77 @@ const CASES = [
 	[["g", "U", "w", "u"], "AbC", 0],
 	[["g", "u", "g", "u", "u"], "AbC\ndeF", 0],
 	[["g", "U", "U", "g", "U", "U", "u", "u"], "Ab\ncd", 0],
+
+	// --- put over a selection ------------------------------------------------
+	// `p`/`P` in Visual mode is nv_put_opt: delete the selection into the unnamed
+	// register, then put what the register held *before* that delete. The delete
+	// is the redo, and the pair is one undo step (see #putSelection).
+	[["y", "l", "j", "v", "l", "p"], "ab\ncd\nEF", 0],
+	[["y", "l", "j", "v", "l", "P"], "ab\ncd\nEF", 0],
+	// A p leaves the deletion in the register, a P keeps the text it put.
+	[["y", "l", "j", "v", "l", "p", "p"], "ab\ncd\nEF", 0],
+	[["y", "l", "j", "v", "l", "P", "p"], "ab\ncd\nEF", 0],
+	// A linewise register opens the selected line: the register's lines go in as
+	// lines, not as characters at the caret.
+	[["y", "y", "j", "v", "l", "p"], "ab\ncd\nEF", 0],
+	[["y", "l", "v", "j", "p"], "ab\ncd\nEF", 0],
+	// A characterwise register into a linewise selection is split at its breaks,
+	// and a trailing break is an empty line.
+	[["y", "l", "j", "V", "p"], "ab\ncd\nEF", 0],
+	[["y", "y", "j", "V", "p"], "ab\ncd\nEF", 0],
+	// A count repeats the register and the caret lands on the last character put.
+	[["y", "l", "j", "v", "l", "2", "p"], "ab\ncd\nEF", 0],
+	// An empty register puts nothing but the selection still goes.
+	[["v", "\x1b[4~", "p"], "ab\ncd\nEF", 0],
+	[["V", "p"], "ab\ncd\nEF", 0],
+	[["v", "l", "p"], "ab\ncd\nEF", 0],
+	[["v", "p"], "", 0],
+	[["V", "p"], "", 0],
+	// The redo is the delete half, not the put (measured, vim 9.1).
+	[["y", "l", "j", "v", "l", "p", "."], "ab\ncd\nEF", 0],
+
+	// --- where an undo leaves the caret --------------------------------------
+	// A host snapshots the caret at `setAll`, so the engine has to stand it where
+	// vim's uh_cursor will be before writing (undo.c:592, ops.c:3798-3838). Every
+	// cursor below is vim 9.1's answer; the comments say which rule it is.
+	//
+	// A backward operator goes back to the line it came down from.
+	[["d", "b", "u"], "ab\ncd\nEF", 4],
+	[["d", "h", "u"], "ab\ncd\nEF", 4],
+	[["X", "u"], "ab\ncd\nEF", 4],
+	[["d", "i", "w", "u"], "ab\ncd\nEF", 4],
+	[["j", "l", "d", "k", "u"], "foo bar\nbaz qux\nend", 0],
+	// A visual delete lands on the head of the selection: the earlier end for a
+	// characterwise one, the anchor's line head for a linewise one.
+	[["G", "l", "V", "k", "d", "u"], "ab\ncd\nEF", 0],
+	[["G", "l", "v", "k", "x", "u"], "ab\ncd\nEF", 0],
+	[["l", "V", "j", "d", "u"], "ab\ncd\nEF", 6],
+	// dd's one-line form zeroes the column; a count keeps the operator's own.
+	[["j", "l", "d", "d", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "2", "d", "d", "u"], "foo bar\nbaz qux\nend", 0],
+	// A linewise motion past several lines keeps the motion's landing column.
+	[["j", "l", "d", "j", "u"], "foo bar\nbaz qux\nend", 0],
+	[["G", "d", "g", "g", "u"], "foo bar\nbaz qux\nend", 6],
+	// A one-line shift goes to the line head; a counted one stays put.
+	[["j", "l", ">", ">", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", ">", "j", "u"], "foo bar\nbaz qux\nend", 0],
+	// Joins, case maps and linewise text objects keep the operator's start.
+	[["j", "l", "J", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "g", "J", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "g", "U", "U", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "g", "U", "i", "w", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "d", "i", "p", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "d", "i", "{", "u"], "foo {\n  bar\n  baz\n}", 0],
+	// cc's one-line form goes to its first non-blank; a counted cc to the line
+	// below at the operator's column (op_change's MLINE branch deletes the tail
+	// first, ops.c:813-823).
+	[["j", "l", "c", "c", "\x1b", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "2", "c", "c", "\x1b", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "V", "j", "c", "\x1b", "u"], "foo bar\nbaz qux\nend", 0],
+	[["j", "l", "V", "k", "c", "\x1b", "u"], "foo bar\nbaz qux\nend", 0],
+	// A Visual put is the same shape as any other Visual change.
+	[["y", "l", "j", "v", "l", "p", "u"], "ab\ncd\nEF", 0],
+	[["y", "y", "j", "V", "p", "u"], "ab\ncd\nEF", 0],
 
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the

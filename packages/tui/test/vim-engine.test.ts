@@ -533,6 +533,46 @@ describe("visual mode", () => {
 		expect(e.engine.selection).toBeNull();
 		expect(e.state.text).toBe("data");
 	});
+
+	test("Home and End are 0 and $ in a selection, and a count reaches the line below", () => {
+		const e = editor("ab\ncdef\ngh", 0);
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("", e.key({ end: true }));
+		expect(e.state.cursor).toBe(1); // 'b', the line's last character
+		// A `$` at the end of a line reaches past it: vim's `v$d` takes the line
+		// break too, which is why it joins the next line up rather than leaving a
+		// blank one.
+		expect(e.engine.selection).toEqual({ start: 0, end: 3 });
+
+		// `2<End>` is `2$`: the end of the next line, and the delete takes the
+		// selection's trailing line break with it.
+		const counted = editor("ab\ncdef\ngh", 0);
+		counted.engine.handleKey("v", counted.key());
+		counted.engine.handleKey("2", counted.key());
+		counted.engine.handleKey("", counted.key({ end: true }));
+		expect(counted.state.cursor).toBe(6); // 'f'
+		counted.engine.handleKey("d", counted.key());
+		expect(counted.state.text).toBe("gh");
+
+		const home = editor("  hi\nthere", 8);
+		home.engine.handleKey("v", home.key());
+		home.engine.handleKey("", home.key({ home: true }));
+		expect(home.state.cursor).toBe(5); // the start of "there"
+	});
+
+	test("an operator takes Home and End as the motions they name", () => {
+		const e = editor("abcdef", 3);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("", e.key({ home: true }));
+		expect(e.state.text).toBe("def");
+		expect(e.state.cursor).toBe(0);
+
+		const end = editor("abcdef", 2);
+		end.engine.handleKey("d", end.key());
+		end.engine.handleKey("", end.key({ end: true }));
+		expect(end.state.text).toBe("ab");
+		expect(end.state.cursor).toBe(1);
+	});
 });
 
 describe("host integration contract", () => {
@@ -2197,6 +2237,89 @@ describe("one command is one undo step", () => {
 	});
 });
 
+/**
+ * Vim records the caret in the undo snapshot when the change reaches its undo
+ * header, and by then do_pending_operator has pulled the cursor to the start of
+ * the region the operator is about to change (undo.c:592, ops.c:3798-3838). A
+ * host that snapshots at `setAll` reproduces that only if the engine stands the
+ * caret there before writing, which is what `#undoAt` does.
+ *
+ * Every cursor below is vim 9.1's own answer to the same keys, read off a
+ * differential probe rather than derived from the engine.
+ */
+describe("an undo restores the caret where the change began", () => {
+	const L = "ab\ncd\nEF"; // the lines start at 0, 3 and 6
+	const M = "foo bar\nbaz qux\nend"; // the lines start at 0, 8 and 16
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) e.engine.handleKey(k, e.key());
+		return { text: e.state.text, cursor: e.state.cursor };
+	};
+
+	test("a backward operator keeps the line it came down from", () => {
+		expect(run(L, 4, "d", "b", "u")).toEqual({ text: L, cursor: 3 });
+		expect(run(L, 4, "d", "h", "u")).toEqual({ text: L, cursor: 3 });
+		expect(run(L, 4, "X", "u")).toEqual({ text: L, cursor: 3 });
+		expect(run(L, 0, "j", "l", "d", "i", "w", "u")).toEqual({ text: L, cursor: 3 });
+		expect(run(M, 0, "j", "l", "d", "k", "u")).toEqual({ text: M, cursor: 1 });
+	});
+
+	test("a Visual delete lands on the head of the selection", () => {
+		// Charwise, drawn upward: the earlier end.
+		expect(run(L, 0, "G", "l", "V", "k", "d", "u")).toEqual({ text: L, cursor: 4 });
+		expect(run(L, 0, "G", "l", "v", "k", "x", "u")).toEqual({ text: L, cursor: 4 });
+		// Linewise, drawn down from a column: the anchor's line head.
+		expect(run(L, 6, "l", "V", "j", "d", "u")).toEqual({ text: L, cursor: 6 });
+	});
+
+	test("a Visual change undoes to the line after a multi-line start", () => {
+		// op_change deletes the block's tail first, and that save carries the caret
+		// one line below oap->start at the anchor's column (ops.c:813-823). Esc
+		// right away keeps the change to one write, so one u is enough; typing
+		// would add the host's per-keystroke undo entries in front of it.
+		const change = (...keys: string[]) => {
+			const e = editor(M, 0);
+			for (const k of keys) e.engine.handleKey(k, e.key());
+			e.engine.handleKey("", e.key({ escape: true }));
+			e.engine.handleKey("u", e.key());
+			return e.state;
+		};
+		expect(change("j", "l", "V", "j", "c")).toEqual({ text: M, cursor: 16 });
+		expect(change("j", "l", "V", "k", "c")).toEqual({ text: M, cursor: 9 });
+	});
+
+	test("dd keeps the line head; a counted dd keeps the operator's column", () => {
+		expect(run(M, 0, "j", "l", "d", "d", "u")).toEqual({ text: M, cursor: 8 });
+		expect(run(M, 0, "j", "l", "2", "d", "d", "u")).toEqual({ text: M, cursor: 9 });
+		// cc is the other way round: one line goes to its first non-blank, a counted
+		// cc to the next line at the operator's column.
+		const change = (...keys: string[]) => {
+			const e = editor(M, 0);
+			for (const k of keys) e.engine.handleKey(k, e.key());
+			e.engine.handleKey("", e.key({ escape: true }));
+			e.engine.handleKey("u", e.key());
+			return e.state;
+		};
+		expect(change("j", "l", "c", "c")).toEqual({ text: M, cursor: 8 });
+		expect(change("j", "l", "2", "c", "c")).toEqual({ text: M, cursor: 17 });
+	});
+
+	test("shifts, joins and case operators undo to the operator's own start", () => {
+		expect(run(M, 0, "j", "l", ">", ">", "u")).toEqual({ text: M, cursor: 8 });
+		expect(run(M, 0, "j", "l", ">", "j", "u")).toEqual({ text: M, cursor: 9 });
+		expect(run(M, 0, "j", "l", "J", "u")).toEqual({ text: M, cursor: 9 });
+		expect(run(M, 0, "j", "l", "g", "J", "u")).toEqual({ text: M, cursor: 9 });
+		expect(run(M, 0, "j", "l", "g", "U", "U", "u")).toEqual({ text: M, cursor: 8 });
+		expect(run(M, 0, "j", "l", "g", "U", "i", "w", "u")).toEqual({ text: M, cursor: 8 });
+	});
+
+	test("linewise text objects undo to the object's start", () => {
+		expect(run(M, 0, "j", "l", "d", "i", "p", "u")).toEqual({ text: M, cursor: 0 });
+		const braces = "foo {\n  bar\n  baz\n}";
+		expect(run(braces, 0, "j", "l", "d", "i", "{", "u")).toEqual({ text: braces, cursor: 6 });
+	});
+});
+
 describe("visual mode polish", () => {
 	test("v and V share one anchor", () => {
 		const e = editor("one\ntwo\nthree", 0);
@@ -2236,6 +2359,73 @@ describe("visual mode polish", () => {
 		e.engine.handleKey("p", e.key());
 		expect(e.state.text).toBe("abcd efghabcd");
 		expect(e.state.cursor).toBe(12); // 'd' of the pasted run
+	});
+});
+
+/**
+ * `p` and `P` over a selection are vim's nv_put_opt: the selection is deleted
+ * into the unnamed register first, then the register's *old* contents are put
+ * in its place, so a `p` swaps a word with a word rather than pasting the
+ * deletion (normal.c:7333-7425). The put half follows do_put's Visual rules:
+ * a linewise selection takes a linewise register as whole lines, splitting a
+ * characterwise one at its breaks, while a characterwise selection opens its
+ * line for a linewise register and writes a characterwise one at the caret.
+ * Every text and caret below is vim 9.1's answer to the same keys (differential
+ * probe on "ab\ncd\nEF").
+ */
+describe("put over a selection", () => {
+	const N = "ab\ncd\nEF";
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) e.engine.handleKey(k, e.key());
+		return { text: e.state.text, cursor: e.state.cursor };
+	};
+
+	test("p replaces the selection with the register and leaves the deletion in it", () => {
+		expect(run(N, 0, "y", "l", "j", "v", "l", "p")).toEqual({ text: "ab\na\nEF", cursor: 3 });
+		// The second p pastes what the first one deleted: the register swap.
+		expect(run(N, 0, "y", "l", "j", "v", "l", "p", "p")).toEqual({ text: "ab\nacd\nEF", cursor: 5 });
+	});
+
+	test("P puts the same text and keeps the register it put", () => {
+		expect(run(N, 0, "y", "l", "j", "v", "l", "P")).toEqual({ text: "ab\na\nEF", cursor: 3 });
+		expect(run(N, 0, "y", "l", "j", "v", "l", "P", "p")).toEqual({ text: "ab\naa\nEF", cursor: 4 });
+	});
+
+	test("a count repeats the register, and lands on the last character put", () => {
+		expect(run(N, 0, "y", "l", "j", "v", "l", "2", "p")).toEqual({ text: "ab\naa\nEF", cursor: 4 });
+	});
+
+	test("a linewise register opens a characterwise selection", () => {
+		expect(run(N, 0, "y", "y", "j", "v", "l", "p")).toEqual({ text: "ab\n\nab\n\nEF", cursor: 4 });
+		expect(run(N, 0, "y", "l", "v", "j", "p")).toEqual({ text: "ad\nEF", cursor: 0 });
+	});
+
+	test("a linewise selection puts whole lines, whatever the register holds", () => {
+		expect(run(N, 0, "y", "l", "j", "V", "p")).toEqual({ text: "ab\na\nEF", cursor: 3 });
+		expect(run(N, 0, "y", "y", "j", "V", "p")).toEqual({ text: "ab\nab\nEF", cursor: 3 });
+	});
+
+	test("an empty register still deletes the selection", () => {
+		const e = editor(N, 0);
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("", e.key({ end: true }));
+		e.engine.handleKey("p", e.key());
+		expect(e.state.text).toBe("cd\nEF"); // the selection took the line break
+		expect(e.state.cursor).toBe(0);
+
+		expect(run("", 0, "V", "p")).toEqual({ text: "", cursor: 0 });
+		expect(run("", 0, "v", "p")).toEqual({ text: "", cursor: 0 });
+	});
+
+	test("the delete half is the redo, and the pair is one undo step", () => {
+		expect(run(N, 0, "y", "l", "j", "v", "l", "p", ".")).toEqual({ text: "ab\nEF", cursor: 3 });
+
+		const e = editor(N, 0);
+		for (const k of ["y", "l", "j", "v", "l", "p"]) e.engine.handleKey(k, e.key());
+		expect(e.writes()).toBe(1);
+		e.engine.handleKey("u", e.key());
+		expect(e.state).toEqual({ text: N, cursor: 3 }); // the head of the selection
 	});
 });
 
