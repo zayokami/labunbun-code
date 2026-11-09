@@ -11,13 +11,13 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
+		"@agentclientprotocol/sdk": "^2.4.0",
 		"@labunbun/agent": "workspace:*",
 		"@labunbun/ai": "workspace:*",
 		"@labunbun/gamepad": "workspace:*",
 		"@labunbun/mcp": "workspace:*",
 		"@labunbun/tools": "workspace:*",
 		"@labunbun/tui": "workspace:*",
-		"@zed-industries/agent-client-protocol": "0.4.5",
 		"zod": "^4.4.3"
 	},
 	"license": "MIT"

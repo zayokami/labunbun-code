@@ -4220,7 +4220,7 @@ export class VimEngine {
 				// it back to the operator's start otherwise, the same rule the yank
 				// branch of `#runLinewise` follows.
 				const from = this.#ops.getCursor();
-				this.#caseRange(caseKindOf(operator), start, end, span.landing < from ? span.landing : from);
+				this.#caseRange(caseKindOf(operator), start, end, Math.min(span.landing, from));
 				return;
 			}
 			this.#runLinewise(operator, start, end, removeFrom, span.landing);
@@ -4652,7 +4652,7 @@ export class VimEngine {
 			// motion left it past the start). `yy` has no motion of its own, so the
 			// caret does not move at all.
 			const cur = this.#ops.getCursor();
-			if (landing !== undefined) this.#ops.setCursor(landing < cur ? landing : cur);
+			if (landing !== undefined) this.#ops.setCursor(Math.min(landing, cur));
 			this.#wantHere();
 			return;
 		}

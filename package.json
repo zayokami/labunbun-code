@@ -21,8 +21,8 @@
 		"release:package": "bun run scripts/package-release.ts"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.9",
-		"@types/bun": "^1.3.0",
+		"@biomejs/biome": "^2.6.6",
+		"@types/bun": "^1.4.4",
 		"typescript": "^6.0.3"
 	},
 	"license": "MIT",

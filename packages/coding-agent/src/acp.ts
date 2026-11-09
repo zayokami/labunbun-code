@@ -42,6 +42,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import * as acp from "@agentclientprotocol/sdk";
 import {
 	type AgentEndReason,
 	type AgentEvent,
@@ -82,7 +83,6 @@ import {
 	TaskStore,
 } from "@labunbun/tools";
 import { permissionOptions, ruleSpecifierFor } from "@labunbun/tui/permission-options";
-import * as acp from "@zed-industries/agent-client-protocol";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
 import {
@@ -616,8 +616,14 @@ interface ResumedSession {
 	messages: AgentMessage[];
 }
 
-class AcpAgent implements acp.Agent {
-	#conn: acp.AgentSideConnection | undefined;
+class AcpAgent {
+	/**
+	 * The client context of the open connection, used by the event and
+	 * permission paths that run outside an inbound request handler. The handler
+	 * wrappers in `runAcp` attach it from `onConnect`, before the first message
+	 * is dispatched.
+	 */
+	#conn: acp.AgentContext | undefined;
 	readonly #options: AcpOptions;
 	readonly #sessions = new Map<string, LiveSession>();
 
@@ -626,7 +632,7 @@ class AcpAgent implements acp.Agent {
 	}
 
 	/** The connection arrives from the factory, which needs the agent first. */
-	attach(conn: acp.AgentSideConnection): void {
+	attach(conn: acp.AgentContext): void {
 		this.#conn = conn;
 	}
 
@@ -803,7 +809,7 @@ class AcpAgent implements acp.Agent {
 
 	/** One `session/update` notification. */
 	async #update(sessionId: string, update: SessionUpdate): Promise<void> {
-		await this.#conn?.sessionUpdate({ sessionId, update });
+		await this.#conn?.notify(acp.methods.client.session.update, { sessionId, update });
 	}
 
 	#onEvent(live: LiveSession, event: AgentEvent): void {
@@ -862,7 +868,7 @@ class AcpAgent implements acp.Agent {
 		if (!conn) {
 			return { behavior: "deny", message: `Permission required and no client is connected (${toolName})` };
 		}
-		const answer = conn.requestPermission({
+		const answer = conn.request(acp.methods.client.session.requestPermission, {
 			sessionId,
 			toolCall: {
 				toolCallId: takeAnnouncedCallId(permissions, toolName),
@@ -1466,10 +1472,23 @@ export async function runAcp(options: AcpOptions = {}): Promise<number> {
 	const fromClient = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 	const stream = acp.ndJsonStream(toClient, fromClient);
 	const agent = new AcpAgent(options);
-	new acp.AgentSideConnection((conn) => {
-		agent.attach(conn);
-		return agent;
-	}, stream);
+	// The app API routes each method to a handler instead of calling methods on
+	// an interface object. `onConnect` runs before the first inbound message, so
+	// the out-of-request paths (`#onEvent`, `#canUseTool`) have their client
+	// context by the time a turn can reach them.
+	acp
+		.agent({ name: "labunbun" })
+		.onConnect((connection) => {
+			agent.attach(connection.client);
+		})
+		.onRequest(acp.methods.agent.initialize, ({ params }) => agent.initialize(params))
+		.onRequest(acp.methods.agent.authenticate, ({ params }) => agent.authenticate(params))
+		.onRequest(acp.methods.agent.session.new, ({ params }) => agent.newSession(params))
+		.onRequest(acp.methods.agent.session.load, ({ params }) => agent.loadSession(params))
+		.onRequest(acp.methods.agent.session.setMode, ({ params }) => agent.setSessionMode(params))
+		.onRequest(acp.methods.agent.session.prompt, ({ params }) => agent.prompt(params))
+		.onNotification(acp.methods.agent.session.cancel, ({ params }) => agent.cancel(params))
+		.connect(stream);
 	await waitForInputEnd();
 	await agent.shutdown();
 	return 0;

@@ -26,21 +26,19 @@ const ITEMS = [{ label: "dark" }, { label: "light" }, { label: "auto" }];
 /** Records writes and never blocks, standing in for a TTY stdout. */
 const quietStdout = () => ({ isTTY: true, write: () => true }) as unknown as NodeJS.WriteStream;
 
+function Recorder({ onInput }: { onInput: (input: string) => void }) {
+	useInput(onInput);
+	return <Text> </Text>;
+}
+
 function mount() {
 	const typed: string[] = [];
 	const highlights: number[] = [];
 
-	function Recorder() {
-		useInput((input) => {
-			typed.push(input);
-		});
-		return <Text> </Text>;
-	}
-
 	const { stdin, lastFrame, unmount } = render(
 		(
 			<ThemeContext.Provider value={DARK_THEME}>
-				<Recorder />
+				<Recorder onInput={(input) => typed.push(input)} />
 				<ListPickerDialog
 					title="Theme"
 					items={ITEMS}

@@ -45,6 +45,18 @@ import { TerminalTitle } from "./TerminalTitle.tsx";
 import { jumpWatchSelection, nextWatchSelection, WatchPanel, type WatchSelection } from "./WatchPanel.tsx";
 import { WelcomeBanner } from "./WelcomeBanner.tsx";
 
+/**
+ * Whether Ink's stdout is a terminal.
+ *
+ * Ink 8 types the render target as `NodeJS.WritableStream`, which does not
+ * declare `isTTY` even though the real `process.stdout` carries it. The check is
+ * on the stream Ink was given, not on `process.stdout`: a test or embedder can
+ * render to a different one.
+ */
+function isTTYStream(stream: NodeJS.WritableStream): boolean {
+	return (stream as { isTTY?: boolean }).isTTY === true;
+}
+
 /** Verdict from the app layer's prompt gate (UserPromptSubmit hooks). */
 export interface PromptSubmitVerdict {
 	block?: boolean;
@@ -436,7 +448,7 @@ export function REPL({
 	// the oldest live rows are the ones clipped, never the prompt or a dialog's
 	// buttons. The non-TTY fallback leaves tests and pipes uncapped.
 	const { rows: windowRows, columns: windowColumns } = useWindowSize();
-	const frameCap = stdout.isTTY && windowRows > 1 ? windowRows - 1 : undefined;
+	const frameCap = isTTYStream(stdout) && windowRows > 1 ? windowRows - 1 : undefined;
 	// A dialog is the user deciding, not the model working. The clock stops while
 	// one is open, so a turn that spent two minutes waiting on an approval does
 	// not go on to report those two minutes as its own work.
@@ -941,7 +953,7 @@ export function REPL({
 			// holding a frame it believes is on screen, and the frame that follows
 			// is byte-identical to the last one — so it skips the write and the
 			// clear is all the user sees.
-			if (stdout.isTTY) writeStdout(clearScreenSequence());
+			if (isTTYStream(stdout)) writeStdout(clearScreenSequence());
 			// The reprint that follows happens under the palette in effect —
 			// normally the committed one, but the picker can be previewing one —
 			// so the stamp of what the sealed rows were printed with moves with
@@ -1089,7 +1101,7 @@ export function REPL({
 			case "clear":
 				// □ is Ctrl+L, character for character — including the reason it goes
 				// through ink's writer rather than `process.stdout`.
-				if (stdout.isTTY) writeStdout(clearScreenSequence());
+				if (isTTYStream(stdout)) writeStdout(clearScreenSequence());
 				store.set((s) => ({ ...s, paint: s.paint + 1 }));
 				return true;
 			case "cancel":

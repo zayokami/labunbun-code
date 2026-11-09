@@ -6,7 +6,7 @@ ACP is the Agent Client Protocol: an editor (Zed is the client this exists for) 
 
 ## The wire and its methods
 
-`runAcp` (`acp.ts:1353-1365`) wraps `process.stdout`/`stdin` as web streams, hands them to the protocol library's `ndJsonStream` (`@zed-industries/agent-client-protocol`), and constructs the `AgentSideConnection`. It serves until stdin ends — the client's way of ending the session (`:1368-1373`) — then closes out every open session with a `mission` close-out note and runs the pending `SessionEnd` hooks (`:882-902`), and returns 0.
+`runAcp` (`acp.ts:1470-1495`) wraps `process.stdout`/`stdin` as web streams, hands them to the protocol library's `ndJsonStream` (`@agentclientprotocol/sdk`), and registers the agent's methods on the SDK's app builder — `acp.agent().onRequest(...).onNotification(...)` — which connects the stream. The handlers route to the same `AcpAgent` class; `onConnect` hands it the client context that the out-of-request paths (`#onEvent`, `#canUseTool`) use. It serves until stdin ends — the client's way of ending the session (`:1497-1503`) — then closes out every open session with a `mission` close-out note and runs the pending `SessionEnd` hooks (`:955-978`), and returns 0.
 
 The implemented method set is the mandatory half of the agent side plus `session/set_mode` (`acp.ts:11-21`):
 
