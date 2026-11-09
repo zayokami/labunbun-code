@@ -1803,6 +1803,9 @@ describe("the blackboard band", () => {
 	});
 
 	test("a task John creates wakes its owner with a card, and completion destroys the session", async () => {
+		// `research`, not `implement`: completing an implement task would also
+		// create the automatic verifier, and its id would drift the scripted
+		// TaskUpdate below onto the wrong task. The verify task has its own test.
 		const { band, store, faux } = makeBoardBand({
 			script: {
 				john: [
@@ -1814,7 +1817,7 @@ describe("the blackboard band", () => {
 									subject: "write the parser",
 									description: "Implement the parser.",
 									owner: "paul",
-									kind: "implement",
+									kind: "research",
 									acceptance: "the suite passes",
 								},
 							},
@@ -1829,7 +1832,7 @@ describe("the blackboard band", () => {
 									subject: "write the lexer",
 									description: "Implement the lexer.",
 									owner: "paul",
-									kind: "implement",
+									kind: "research",
 									acceptance: "lexer tests pass",
 								},
 							},
@@ -1993,6 +1996,77 @@ describe("the blackboard band", () => {
 		expect(task?.runs).toHaveLength(1);
 		expect(task?.runs?.[0]).toMatchObject({ command: "bun test", exitCode: 0, by: "george" });
 		await until(() => band.memberSession("george") === undefined, 5_000);
+		band.off();
+	});
+
+	test("a board left in progress by a stopped band is returned to pending and claimed", async () => {
+		const store = new TaskStore();
+		const stale = store.create("half done", "d", undefined, "paul", [], { kind: "research" });
+		store.update(stale.id, { status: "in_progress" });
+		const { band, faux, notices } = makeBoardBand({
+			store,
+			script: {
+				john: [{ text: "idle" }],
+				paul: [{ text: "picked it up" }],
+				george: [{ text: "idle" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+
+		// The band that claimed it is gone: no session exists between tasks, so
+		// leaving it in progress would strand it where no seat can take it.
+		expect(store.get("1")).toMatchObject({ status: "pending", attempts: 1 });
+		expect(notices.some((line) => line.includes("returned to pending"))).toBe(true);
+		// The dispatcher's first pass claims it like any other ready task.
+		await until(() => faux.calls("paul").length === 1);
+		expect(faux.calls("paul")[0]).toContain("half done");
+		band.off();
+	});
+
+	test("a worker's TaskCreate admits derived work only, at most three per parent", async () => {
+		const store = new TaskStore();
+		const { band } = makeBoardBand({
+			store,
+			script: {
+				john: [{ text: "idle" }],
+				paul: [{ text: "idle" }],
+				george: [{ text: "verifying" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+		store.create("the parent task", "d", undefined, "george", [], { kind: "research" });
+		await until(() => band.memberSession("george") !== undefined);
+		const create = toolNamed(sessionOf(band, "george"), "TaskCreate");
+
+		// The schema is the guidance: routing (`implement`) and a missing parent
+		// do not validate for a worker.
+		expect(
+			create.inputSchema.safeParse({ subject: "x", description: "d", kind: "implement", parent: "1" }).success,
+		).toBe(false);
+		expect(create.inputSchema.safeParse({ subject: "x", description: "d", kind: "fix" }).success).toBe(false);
+
+		// The call-time refusal is the backstop for a model that sends it anyway.
+		const ghost = await create.call({ subject: "fix it", description: "d", kind: "fix", parent: "99" }, callCtx());
+		expect(ghost.isError).toBe(true);
+
+		for (let index = 0; index < 3; index++) {
+			const made = await create.call(
+				{ subject: `fix ${index}`, description: "d", kind: "fix", parent: "1" },
+				callCtx(),
+			);
+			expect(made.isError).toBeFalsy();
+		}
+		const fourth = await create.call({ subject: "one more", description: "d", kind: "fix", parent: "1" }, callCtx());
+		expect(fourth.isError).toBe(true);
+		expect(text(fourth)).toContain("the limit is 3");
+
+		const derived = store.list().filter((task) => task.parent === "1");
+		expect(derived).toHaveLength(3);
+		expect(derived.every((task) => task.createdBy === "george" && task.owner === "george")).toBe(true);
+
+		// John keeps the full board tool: the split is his to route.
+		const johnCreate = toolNamed(sessionOf(band, "john"), "TaskCreate");
+		expect(johnCreate.inputSchema.safeParse({ subject: "x", description: "d", kind: "implement" }).success).toBe(true);
 		band.off();
 	});
 

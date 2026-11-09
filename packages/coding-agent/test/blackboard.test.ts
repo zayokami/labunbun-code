@@ -13,7 +13,9 @@ import {
 	BlackboardDispatcher,
 	DEFAULT_TASK_CARD_CHARS,
 	depsMet,
+	filesConflict,
 	isReady,
+	pathsConflict,
 	readyTasks,
 	renderTaskCard,
 } from "../src/blackboard.ts";
@@ -28,7 +30,7 @@ interface Woken {
 	card: string;
 }
 
-function fixture(store: TaskStore) {
+function fixture(store: TaskStore, options: { maxAttempts?: number; fixer?: string; verifier?: string } = {}) {
 	const wakes: Woken[] = [];
 	const released: string[] = [];
 	const notices: string[] = [];
@@ -40,6 +42,7 @@ function fixture(store: TaskStore) {
 		wake: (seat, card, task) => wakes.push({ seat, taskId: task.id, card }),
 		release: (seat, task) => released.push(`${seat}:${task.id}`),
 		notice: (line) => notices.push(line),
+		...options,
 	});
 	return { dispatcher, wakes, released, notices, busy };
 }
@@ -95,6 +98,22 @@ describe("the pure rules", () => {
 		expect(card.length).toBeLessThan(600);
 		expect(card).toContain("[truncated");
 	});
+
+	test("two tasks conflict when any of their paths is equal to or contains another", () => {
+		expect(pathsConflict("packages/a.ts", "packages/a.ts")).toBe(true);
+		expect(pathsConflict("packages\\a.ts", "packages/a.ts")).toBe(true);
+		expect(pathsConflict("packages/", "packages/a.ts")).toBe(true);
+		expect(pathsConflict("packages", "packages/a.ts")).toBe(true);
+		expect(pathsConflict("packages/a.ts", "packages/b.ts")).toBe(false);
+		// A prefix is not a containment: `packages-old` is a different directory.
+		expect(pathsConflict("packages-old/a.ts", "packages/a.ts")).toBe(false);
+
+		expect(filesConflict(["packages/a.ts"], ["packages/b.ts", "packages/a.ts"])).toBe(true);
+		expect(filesConflict(["packages/"], ["packages/a.ts"])).toBe(true);
+		// A task that names no files conflicts with nothing.
+		expect(filesConflict(undefined, ["packages/a.ts"])).toBe(false);
+		expect(filesConflict([], [])).toBe(false);
+	});
 });
 
 describe("the dispatcher", () => {
@@ -131,7 +150,9 @@ describe("the dispatcher", () => {
 	test("a dependency gates the claim until it completes", async () => {
 		const store = new TaskStore();
 		const { dispatcher, wakes } = fixture(store);
-		store.create("first", "d", undefined, "paul", [], { kind: "implement" });
+		// `research`, not `implement`: completing an implement task here would
+		// also spawn the automatic verifier, and this test is about the gate.
+		store.create("first", "d", undefined, "paul", [], { kind: "research" });
 		store.create("second", "d", undefined, "ringo", ["1"], { kind: "build" });
 		await settle();
 		expect(wakes.map((wake) => wake.taskId)).toEqual(["1"]);
@@ -183,7 +204,9 @@ describe("the dispatcher", () => {
 	test("a terminal task releases its seat, and the next task starts a fresh wake", async () => {
 		const store = new TaskStore();
 		const { dispatcher, wakes, released } = fixture(store);
-		store.create("first", "d", undefined, "paul", [], { kind: "implement" });
+		// `research` keeps the automatic verifier out of this test: the claim is
+		// the subject, not the verify task completing an implement task spawns.
+		store.create("first", "d", undefined, "paul", [], { kind: "research" });
 		await settle();
 		store.update("1", { status: "completed" });
 		await settle();
@@ -214,5 +237,208 @@ describe("the dispatcher", () => {
 		store.create("after", "d", undefined, "paul");
 		await settle();
 		expect(wakes).toEqual([]);
+	});
+
+	test("two tasks that touch the same files are not claimed together", async () => {
+		const store = new TaskStore();
+		const { dispatcher, wakes } = fixture(store);
+		store.create("touches the tree", "d", undefined, "paul", [], { kind: "research", files: ["packages/a.ts"] });
+		store.create("touches the file", "d", undefined, "george", [], { kind: "research", files: ["packages\\a.ts"] });
+		await settle();
+		expect(wakes.map((wake) => wake.taskId)).toEqual(["1"]);
+		expect(store.get("2")?.status).toBe("pending");
+
+		store.update("1", { status: "completed" });
+		await settle();
+		expect(wakes.map((wake) => wake.taskId)).toEqual(["1", "2"]);
+		dispatcher.dispose();
+	});
+
+	test("tasks that touch different files are claimed together", async () => {
+		const store = new TaskStore();
+		const { dispatcher, wakes } = fixture(store);
+		store.create("a", "d", undefined, "paul", [], { kind: "research", files: ["packages/a.ts"] });
+		store.create("b", "d", undefined, "george", [], { kind: "research", files: ["packages/b.ts"] });
+		await settle();
+		expect(wakes.map((wake) => wake.taskId)).toEqual(["1", "2"]);
+		dispatcher.dispose();
+	});
+
+	test("a continuation past the attempt ceiling is noticed once and not woken", async () => {
+		const store = new TaskStore();
+		const { dispatcher, wakes, notices } = fixture(store, { maxAttempts: 3 });
+		store.create("stuck", "d", undefined, "paul", [], { kind: "implement", attempts: 3 });
+		await settle();
+		expect(wakes).toHaveLength(1);
+
+		store.update("1", { acceptance: "first edit" });
+		await settle();
+		expect(wakes).toHaveLength(1);
+		expect(notices.filter((line) => line.includes("has used 3 attempt(s)"))).toHaveLength(1);
+
+		// A later edit does not re-report: the task stays open, once noticed.
+		store.update("1", { acceptance: "second edit" });
+		await settle();
+		expect(wakes).toHaveLength(1);
+		expect(notices.filter((line) => line.includes("has used 3 attempt(s)"))).toHaveLength(1);
+		dispatcher.dispose();
+	});
+});
+
+describe("the repair loop", () => {
+	/**
+	 * A verify task whose implement dependency has completed and whose
+	 * deterministic verdict is already `failed` — the state the pheromone
+	 * recorder leaves behind. The dispatcher never claimed anything yet, so the
+	 * first pass sees the failure cold.
+	 */
+	function failedVerify(store: TaskStore, attempts?: number) {
+		const implement = store.create("write the parser", "d", undefined, "paul", [], { kind: "implement" });
+		const verify = store.create("verify the parser", "d", undefined, "george", [implement.id], {
+			kind: "verify",
+			commands: ["bun test"],
+			acceptance: "the suite passes",
+			files: ["packages/parser.ts"],
+		});
+		store.update(implement.id, { status: "completed" });
+		store.update(verify.id, {
+			status: "in_progress",
+			verdict: "failed",
+			errorSummary: "[exit code: 1] boom",
+			...(attempts === undefined ? {} : { attempts }),
+		});
+		return { implement, verify };
+	}
+
+	test("a failed verify creates one fix for the implementer and re-arms the failure", async () => {
+		const store = new TaskStore();
+		const { dispatcher, wakes, notices } = fixture(store);
+		failedVerify(store);
+		await settle();
+
+		const fix = store.get("3");
+		expect(fix).toMatchObject({
+			kind: "fix",
+			owner: "paul",
+			fixes: "2",
+			attempts: 1,
+			errorSummary: "[exit code: 1] boom",
+			acceptance: "the suite passes",
+		});
+		expect(fix?.files).toEqual(["packages/parser.ts"]);
+		// The failure is re-armed under its repair, and the stale verdict is gone
+		// so the next pass cannot answer the same failure a second time.
+		expect(store.get("2")).toMatchObject({ status: "pending", attempts: 1 });
+		expect(store.get("2")?.verdict).toBeUndefined();
+		expect(store.get("2")?.blockedBy).toContain("3");
+		expect(wakes.map((wake) => wake.taskId)).toEqual(["3"]);
+		expect(notices.some((line) => line.includes("fix #3 created for Paul"))).toBe(true);
+		dispatcher.dispose();
+	});
+
+	test("a completed fix marks the repaired task and re-claims its verifier", async () => {
+		const store = new TaskStore();
+		const { dispatcher, wakes } = fixture(store);
+		failedVerify(store);
+		await settle();
+
+		store.update("3", { status: "completed" });
+		await settle();
+
+		expect(store.get("2")?.fixedBy).toBe("3");
+		expect(store.get("2")).toMatchObject({ status: "in_progress" });
+		expect(wakes.map((wake) => [wake.seat, wake.taskId])).toEqual([
+			["paul", "3"],
+			["george", "2"],
+		]);
+		// The second claim is a fresh card that names the repair.
+		expect(wakes[1]?.card).toContain("Repaired by #3");
+		dispatcher.dispose();
+	});
+
+	test("a failure with one active fix gets no second fix", async () => {
+		const store = new TaskStore();
+		const { dispatcher } = fixture(store);
+		failedVerify(store);
+		await settle();
+		expect(store.list()).toHaveLength(3);
+
+		// The same failure reported again (a worker setting the verdict by hand)
+		// while the fix is still open: the board already answered it.
+		store.update("2", { verdict: "failed" });
+		await settle();
+		expect(store.list()).toHaveLength(3);
+		dispatcher.dispose();
+	});
+
+	test("a failure with no identifiable implementer goes to the fixer", async () => {
+		const store = new TaskStore();
+		const { dispatcher } = fixture(store, { fixer: "ringo" });
+		store.create("check the build", "d", undefined, "george", [], { kind: "verify", commands: ["bun test"] });
+		store.update("1", { status: "in_progress", verdict: "failed" });
+		await settle();
+		expect(store.get("2")).toMatchObject({ kind: "fix", owner: "ringo", fixes: "1" });
+		dispatcher.dispose();
+	});
+
+	test("at the attempt ceiling the failure becomes one escalation for John", async () => {
+		const store = new TaskStore();
+		const { dispatcher, notices } = fixture(store, { maxAttempts: 2 });
+		failedVerify(store, 2);
+		await settle();
+
+		const escalation = store.get("3");
+		expect(escalation).toMatchObject({ kind: "escalate", owner: "john", parent: "2", createdBy: "dispatcher" });
+		// John is a seat, so the escalation is claimed in the same pass.
+		expect(escalation?.status).toBe("in_progress");
+		expect(store.get("2")).toMatchObject({ status: "pending", attempts: 2 });
+		expect(store.get("2")?.verdict).toBeUndefined();
+		expect(store.get("2")?.blockedBy).toContain("3");
+		expect(notices.some((line) => line.includes("escalation #3 is John's"))).toBe(true);
+		dispatcher.dispose();
+	});
+
+	test("a completed implement task with no verifier gets exactly one", async () => {
+		const store = new TaskStore();
+		const { dispatcher, notices } = fixture(store);
+		store.create("write the parser", "d", undefined, "paul", [], {
+			kind: "implement",
+			acceptance: "the suite passes",
+			files: ["packages/parser.ts"],
+			commands: ["bun test"],
+		});
+		store.update("1", { status: "completed" });
+		await settle();
+
+		const verify = store.get("2");
+		expect(verify).toMatchObject({
+			kind: "verify",
+			owner: "george",
+			status: "in_progress",
+			acceptance: "the suite passes",
+			commands: ["bun test"],
+			parent: "1",
+			createdBy: "dispatcher",
+		});
+		expect(verify?.blockedBy).toEqual(["1"]);
+		expect(verify?.files).toEqual(["packages/parser.ts"]);
+		expect(notices.some((line) => line.includes("completed unverified"))).toBe(true);
+
+		// Another pass finds the verifier and writes nothing.
+		dispatcher.kick();
+		await settle();
+		expect(store.list()).toHaveLength(2);
+		dispatcher.dispose();
+	});
+
+	test("an implement task that already has a verifier is left alone", async () => {
+		const store = new TaskStore();
+		const { dispatcher } = fixture(store);
+		store.create("write the parser", "d", undefined, "paul", [], { kind: "implement" });
+		store.create("check the parser", "d", undefined, "ringo", ["1"], { kind: "build" });
+		store.update("1", { status: "completed" });
+		await settle();
+		expect(store.list().map((task) => task.kind)).toEqual(["implement", "build"]);
+		dispatcher.dispose();
 	});
 });

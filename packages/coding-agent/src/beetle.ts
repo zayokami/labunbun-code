@@ -368,6 +368,75 @@ export function createBandMessageTool(
 	});
 }
 
+/**
+ * The worker's TaskCreate: a derived task — `fix`, `verify` or `research` —
+ * that names its parent, at most {@link MAX_DERIVED_TASKS} per parent per
+ * worker.
+ *
+ * The stock tool is replaced rather than filtered at call time because the
+ * schema is what tells the model the shape: a worker offered the full form
+ * writes an `implement` task for Paul, which is the relay this band replaces.
+ * The call-time refusal is the backstop for a model that ignores the schema.
+ */
+export function createWorkerTaskCreateTool(store: TaskStore, seat: BeetleMember): AnyTool {
+	const owners = [...BEETLE_MEMBERS] as [BeetleMember, ...BeetleMember[]];
+	return buildTool({
+		name: "TaskCreate",
+		description:
+			`Create a derived task on the shared board: kind ${WORKER_TASK_KINDS.join(" | ")}, parent required. ` +
+			`At most ${MAX_DERIVED_TASKS} derived tasks per parent, per worker. Use it for a repair or a check ` +
+			"your seat cannot do itself; routing new work stays with John.",
+		inputSchema: z.object({
+			subject: z.string().describe("Brief imperative title, e.g. 'Fix the parser edge case'"),
+			description: z.string().describe("What needs to be done, with enough context to act on"),
+			activeForm: z.string().optional().describe("Present-continuous form shown while running"),
+			owner: z.enum(owners).optional().describe("Who is on the hook; defaults to you"),
+			blockedBy: z.array(z.string()).optional().describe("Task ids that must complete before this one"),
+			kind: z.enum(WORKER_TASK_KINDS).describe("What the task is for"),
+			acceptance: z.string().optional().describe("What done looks like, in terms a verifier can check"),
+			files: z.array(z.string()).optional().describe("Files or areas this task touches"),
+			commands: z.array(z.string()).optional().describe("On a verify task, the commands whose exit codes decide"),
+			parent: z.string().describe("The task this one derives from"),
+		}),
+		isConcurrencySafe: () => false,
+		call: async (input) => {
+			if (!store.get(input.parent)) {
+				return {
+					content: [textContent(`Task #${input.parent} not found — a derived task must name its parent`)],
+					isError: true,
+				};
+			}
+			const derived = store.list().filter((task) => task.createdBy === seat && task.parent === input.parent);
+			if (derived.length >= MAX_DERIVED_TASKS) {
+				return {
+					content: [
+						textContent(
+							`Refused: ${seat} already derived ${derived.length} tasks from #${input.parent} — the limit is ${MAX_DERIVED_TASKS}. Put the rest in your report to John.`,
+						),
+					],
+					isError: true,
+				};
+			}
+			const task = store.create(
+				input.subject,
+				input.description,
+				input.activeForm,
+				input.owner ?? seat,
+				input.blockedBy,
+				{
+					kind: input.kind,
+					acceptance: input.acceptance,
+					files: input.files,
+					commands: input.commands,
+					parent: input.parent,
+					createdBy: seat,
+				},
+			);
+			return { content: [textContent(`Created task #${task.id}: ${task.subject}`)] };
+		},
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Delivery
 // ---------------------------------------------------------------------------
@@ -500,6 +569,17 @@ interface MemberRuntime {
  */
 export const READ_SEAT_TOOL_NAMES = ["Bash", "Glob", "Grep", "Read"] as const;
 
+/**
+ * The task kinds a worker may derive on the board: a repair, a check, or
+ * research. Planning, splitting and routing stay with John — a worker that could
+ * write an `implement` task for a peer would be the message relay again, with
+ * the dispatcher as its postman.
+ */
+export const WORKER_TASK_KINDS = ["fix", "verify", "research"] as const;
+
+/** Derived tasks a worker may register for one parent task. */
+export const MAX_DERIVED_TASKS = 3;
+
 /** A live member silent this long gets one notice (the settings key reads in minutes). */
 const DEFAULT_STALL_NOTICE_MS = 300_000;
 
@@ -526,6 +606,8 @@ export interface BeetleBandOptions {
 	taskCardChars?: number;
 	/** Bound on the failing run's cut inside a card; `beetle.errorSummaryChars`. */
 	errorSummaryChars?: number;
+	/** Repair rounds per task before the dispatcher escalates it; `beetle.maxFixRounds`. */
+	maxFixRounds?: number;
 	/** The same session stream the main conversation uses. */
 	streamFn: StreamFn;
 	/** The worker tool table (the one subagents draw from). */
@@ -621,6 +703,10 @@ export class BeetleBand {
 		for (const name of BEETLE_MEMBERS) {
 			this.#members.set(name, this.#runtime(name));
 		}
+		// A board can outlive its band. An `in_progress` task owned by a member
+		// then has no session behind it — sessions are created at the claim — so
+		// it goes back to pending, with one more attempt, before anyone is woken.
+		if (this.#context === "task" && options.taskStore) this.#recoverBoard(options.taskStore);
 		if (this.#context === "task") {
 			// John keeps the lead's conversation for the band's lifetime; the
 			// workers start when the board hands them a task.
@@ -643,6 +729,7 @@ export class BeetleBand {
 				notice: (line) => this.#options.onNotice?.(line),
 				charBudget: options.taskCardChars,
 				errorChars: options.errorSummaryChars,
+				maxAttempts: options.maxFixRounds,
 			});
 			// The environment speaks through the seat's own tool events. The
 			// recorder writes a declared command's result to the task — a store
@@ -1019,6 +1106,27 @@ export class BeetleBand {
 	}
 
 	/**
+	 * Return a previous band's in-flight tasks to the board's pool.
+	 *
+	 * A task-scoped worker session exists only while its task is in progress, so
+	 * an `in_progress` task at band start has no session behind it: the band that
+	 * claimed it is gone. Leaving it in progress would strand the work — no seat
+	 * is running it, and the claim rule refuses to hand it to anyone else. It
+	 * goes back to pending with one more attempt, and the dispatcher claims it
+	 * fresh like any other ready task.
+	 */
+	#recoverBoard(store: TaskStore): void {
+		for (const task of store.list()) {
+			if (task.status !== "in_progress") continue;
+			if (!task.owner || !(BEETLE_MEMBERS as readonly string[]).includes(task.owner)) continue;
+			store.update(task.id, { status: "pending", attempts: (task.attempts ?? 0) + 1 });
+			this.#options.onNotice?.(
+				`[blackboard] #${task.id} ${task.subject} was in progress when its band stopped — returned to pending.`,
+			);
+		}
+	}
+
+	/**
 	 * The member's session, created on first use. On the board path this is the
 	 * task boundary: a worker has none between tasks, and gets a fresh one —
 	 * system prompt, tools, empty transcript — when the dispatcher hands it a
@@ -1188,8 +1296,18 @@ export class BeetleBand {
 			// enforces the rest (one per task, no peer traffic) rather than relying
 			// on the enum: a schema is guidance, a refusal is a fact.
 			if (name === "john") return kept;
+			// George and Ringo may register derived work, not route it: their
+			// TaskCreate admits only fix/verify/research under a named parent.
+			// Paul and John keep the full board tool.
+			const table =
+				name === "george" || name === "ringo"
+					? [
+							...kept.filter((tool) => tool.name !== "TaskCreate"),
+							createWorkerTaskCreateTool(this.#options.taskStore as TaskStore, name),
+						]
+					: kept;
 			return [
-				...kept,
+				...table,
 				createBandMessageTool((to, message, opts) => this.deliver({ kind: "member", name }, to, message, opts), false, [
 					"john",
 				]),

@@ -68,6 +68,7 @@ The dispatcher is a state machine over the board, not an agent. It renders strin
 - **crash recovery**: on band start, an `in_progress` task whose owner has no live session is returned to `pending` with `attempts` incremented, so a restarted band resumes the board instead of forgetting it.
 - **completion**: `completed` is a fact the writer records, not one the dispatcher invents. The deterministic exception is a `build`/`verify` task whose declared commands all ran: the recorder writes the verdict and closes it.
 - **verification**: an `implement` task that completes with no `verify`/`build` task naming it in `blockedBy` gets one created, owner George by default. It is created once; a task that already has a verifier is left alone.
+- **derived work**: George and Ringo may write `fix`, `verify` or `research` tasks under a named parent, at most three per parent per worker. John and Paul keep the full `TaskCreate`; routing new work is the lead's job.
 
 ## The task card
 
@@ -106,8 +107,8 @@ pending ──deps satisfied──▶ in_progress ──▶ completed
                                   │
                                   ├─(build/verify exit != 0)──▶ failed
                                   │                              │
-                                  │        dispatcher creates one fix task (owner: paul,
-                                  │        fixes: #verify, errorSummary inherited)
+                                  │        dispatcher creates one fix task (owner: the implementer,
+                                  │        else paul; fixes: #verify, errorSummary inherited)
                                   │                              │
                                   │        fix completed ──▶ verify `fixedBy`, dependents unblock
                                   │                              │
@@ -137,8 +138,8 @@ The worker copy of the tool is built with a one-value target enum, and the deliv
 
 ## Implementation status
 
-Phase 0, Phase 1 and Phase 2 are landed; the rest of this page is the design
-they are built toward.
+Phase 0 through Phase 3 are landed; Phase 4 (the remaining settings keys and
+the status lines) is the design the page is built toward.
 
 - **Landed:** the task record and its snapshot acceptance, change-carrying
   subscriptions, the dispatcher and task card, task-scoped worker sessions
@@ -147,11 +148,15 @@ they are built toward.
   verdicts: a declared command's result becomes a bounded `TaskRun` on the task,
   and a `build`/`verify` task closes itself once every latest run exits zero;
   a failing run writes `verdict: "failed"` and the error summary and leaves the
-  task open. The card's budget and the error-summary budget are band options
+  task open. Phase 3 adds the fix loop (one fix for the implementer, the
+  attempt ceiling, one escalation to John at it), the automatic verifier
+  (`implement` completions with no verifier get one), file-conflict claim
+  serialisation, crash recovery on band start, and the restricted worker
+  `TaskCreate` (fix/verify/research under a named parent, three per parent).
+  The card's budget and the error-summary budget are band options
   (`taskCardChars`, `errorSummaryChars`), not settings keys yet.
-- **Not yet:** the fix loop, automatic verifier, file-conflict serialisation,
-  the worker `TaskCreate` limits and crash recovery (Phase 3); the remaining
-  settings keys and the status lines (Phase 4).
+- **Not yet:** the remaining settings keys (`beetle.maxFixRounds` is a band
+  option, `maxFixRounds`, not a settings key) and the status lines (Phase 4).
 - **Compatibility:** a band constructed with no `taskStore` has nothing to
   dispatch over, so its context is `"session"` — the long-lived band this page
   replaces. The app always connects the board, so its default is `"task"`.
@@ -161,20 +166,17 @@ they are built toward.
 - **Phase 0** — the task record, change-carrying subscriptions, snapshot acceptance, tool schemas. No behavior change.
 - **Phase 1** — the dispatcher, task cards, task-scoped sessions, and the restricted `BandMessage`. This is the phase that removes the handoff requests.
 - **Phase 2** — the pheromone recorder and deterministic verdicts.
-- **Phase 3** — the fix loop, the automatic verifier, file-conflict serialisation and crash recovery.
+- **Phase 3** — the fix loop, the automatic verifier, file-conflict serialisation, crash recovery and the worker `TaskCreate` limits.
 - **Phase 4** — settings, `/beetle status`, and this page's implementation notes.
 
 ## Tests that hold these claims
 
 Landed:
 
-- `packages/tools/test/tasks.test.ts`: the new fields round-trip; `rev`/`updatedAt` move on update; the change record names the previous task.
+- `packages/tools/test/tasks.test.ts`: the new fields round-trip; `rev`/`updatedAt` move on update; a `null` verdict clears it; the change record names the previous task.
 - `packages/coding-agent/test/task-snapshot.test.ts`: an old snapshot restores with the new fields defaulted; a malformed optional field is refused, not half-read.
-- `packages/coding-agent/test/blackboard.test.ts`: ready/claim ordering, dependency gates, one task per seat, wake dedupe by `rev`, terminal release, resumed `in_progress` tasks, and dispose.
-- `packages/coding-agent/test/beetle.test.ts`: a start becomes one lead task owned by John; a worker's first request carries its card and nothing from a prior task; a completed task destroys the session; workers address John only, once per task; John has no send tool; the human channels still deliver; a board edit under a finished run wakes the worker with the edited card; a declared command's result becomes a run and a clean verify closes the task.
+- `packages/coding-agent/test/blackboard.test.ts`: ready/claim ordering, dependency gates, one task per seat, wake dedupe by `rev`, terminal release, resumed `in_progress` tasks, dispose; `pathsConflict`/`filesConflict` and claim serialisation on overlapping files; the continuation ceiling (one notice, no wake); one fix for a failed verify, its error pheromone and re-armed failure; fix completion marking `fixedBy` and re-claiming the verifier; no second fix while one is active; the fixer fallback; escalation at the ceiling; the automatic verifier created once and skipped when a verifier already exists.
+- `packages/coding-agent/test/beetle.test.ts`: a start becomes one lead task owned by John; a worker's first request carries its card and nothing from a prior task; a completed task destroys the session; workers address John only, once per task; John has no send tool; the human channels still deliver; a board edit under a finished run wakes the worker with the edited card; a declared command's result becomes a run and a clean verify closes the task; a board left in progress is recovered and claimed; a worker's `TaskCreate` admits fix/verify/research under a parent, three per parent, while John keeps the full tool.
 - `packages/coding-agent/test/beetle-command.test.ts`: on the board path the main session gets no `BandMessage` and the band writes no tool-block change, while `/beetle say` and `@john` still reach a seat; an explicit `"session"` context keeps the old tool and the old briefings.
 - `packages/coding-agent/test/beetle-pheromone.test.ts`: the exit code behind a spill header; only declared commands become evidence; the summary is bounded and keeps the pointer; the run list is bounded; latest-run-per-command verdicts; a clean verify closes the task; a failure writes the pheromone and leaves it open; a completed task ignores late results.
-
-Planned, one file per phase: the rest of `blackboard.test.ts` — the fix loop
-and the automatic verifier.
 

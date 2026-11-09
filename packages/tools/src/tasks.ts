@@ -178,7 +178,6 @@ export class TaskStore {
 				| "commands"
 				| "runs"
 				| "errorSummary"
-				| "verdict"
 				| "attempts"
 				| "fixes"
 				| "fixedBy"
@@ -188,6 +187,11 @@ export class TaskStore {
 		> & {
 			addBlockedBy?: string[];
 			removeBlockedBy?: string[];
+			/**
+			 * `null` clears the verdict — the failing state was consumed by a fix
+			 * or an escalation and the next run has not decided yet.
+			 */
+			verdict?: TaskVerdict | null;
 		},
 	): AgentTask | undefined {
 		const task = this.#tasks.get(id);
@@ -206,7 +210,8 @@ export class TaskStore {
 		if (patch.commands !== undefined) task.commands = [...patch.commands];
 		if (patch.runs !== undefined) task.runs = patch.runs.map((run) => ({ ...run }));
 		if (patch.errorSummary !== undefined) task.errorSummary = patch.errorSummary;
-		if (patch.verdict !== undefined) task.verdict = patch.verdict;
+		if (patch.verdict === null) delete task.verdict;
+		else if (patch.verdict !== undefined) task.verdict = patch.verdict;
 		if (patch.attempts !== undefined) task.attempts = patch.attempts;
 		if (patch.fixes !== undefined) task.fixes = patch.fixes;
 		if (patch.fixedBy !== undefined) task.fixedBy = patch.fixedBy;

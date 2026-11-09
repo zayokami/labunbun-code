@@ -6,8 +6,14 @@
  * the woken member's own turn, and that turn starts from the task card rather
  * than from a transcript of everything the band has said. The rules it enforces
  * are the invariants `docs/dev/blackboard.md` records — a task is claimable only
- * when its dependencies are completed, one `in_progress` task per seat, and one
- * wake per `(seat, task, rev)`.
+ * when its dependencies are completed, one `in_progress` task per seat, one
+ * wake per `(seat, task, rev)`, and two tasks whose files intersect never run
+ * together.
+ *
+ * Beyond routing it repairs: a failed `build`/`verify` run gets one fix task
+ * (or, past the attempt ceiling, one escalation to John), a completed fix marks
+ * the task it repaired, and a completed `implement` task with no verifier gets
+ * one. All of it is board writes — the dispatcher never asks a member anything.
  *
  * Written as pure functions plus a small controller, the way `task-nudges.ts`
  * is, so every rule is testable without a provider.
@@ -20,6 +26,15 @@ export const DEFAULT_TASK_CARD_CHARS = 4000;
 
 /** The pheromone bound inside a card. */
 export const DEFAULT_ERROR_SUMMARY_CHARS = 1200;
+
+/** Repair rounds a task gets before the dispatcher escalates it to John. */
+export const DEFAULT_MAX_FIX_ROUNDS = 3;
+
+/** The seat a fix goes to when the failing task names no implementer. */
+export const DEFAULT_FIXER = "paul";
+
+/** The seat the automatic verifier goes to. */
+export const DEFAULT_VERIFIER = "george";
 
 /** What a card may read off the board. Narrowed so a fake store can serve tests. */
 export type CardSource = Pick<TaskStore, "get">;
@@ -41,6 +56,31 @@ export function isReady(task: AgentTask, store: CardSource, seats: readonly stri
 /** The ready tasks in id order, which is the order they are claimed in. */
 export function readyTasks(store: Pick<TaskStore, "list"> & CardSource, seats: readonly string[]): AgentTask[] {
 	return store.list().filter((task) => isReady(task, store, seats));
+}
+
+/** One path in the form the conflict check compares: separated, without a trailing slash. */
+function normalizePath(path: string): string {
+	return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/** Two paths conflict when they are equal, or one contains the other. */
+export function pathsConflict(a: string, b: string): boolean {
+	const left = normalizePath(a);
+	const right = normalizePath(b);
+	if (left === "" || right === "") return false;
+	return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+/**
+ * True when the two tasks touch any of the same files. The workspace is one, so
+ * a claim is serialised across owners too: two seats editing the same tree at
+ * the same time is a merge conflict the board can simply refuse to cause. A
+ * task that names no files conflicts with nothing — the rule can only be as
+ * precise as the writer was.
+ */
+export function filesConflict(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+	if (!a?.length || !b?.length) return false;
+	return a.some((left) => b.some((right) => pathsConflict(left, right)));
 }
 
 /**
@@ -67,6 +107,7 @@ export function renderTaskCard(
 	const deps = task.blockedBy.map((id) => store.get(id)).filter((dep): dep is AgentTask => dep !== undefined);
 	if (deps.length > 0) lines.push(`Blocked by: ${deps.map((dep) => `#${dep.id} ${dep.status}`).join(", ")}`);
 	if (task.fixes) lines.push(`Repairs task #${task.fixes}; its failure is the record above.`);
+	if (task.fixedBy) lines.push(`Repaired by #${task.fixedBy} — run the acceptance again.`);
 	if (task.errorSummary) lines.push("", `Last failure: ${cutText(task.errorSummary, errorChars)}`);
 	lines.push(
 		"",
@@ -93,6 +134,12 @@ export interface BlackboardDispatcherOptions {
 	notice?: (line: string) => void;
 	charBudget?: number;
 	errorChars?: number;
+	/** Repair rounds per task before an escalation; defaults to {@link DEFAULT_MAX_FIX_ROUNDS}. */
+	maxAttempts?: number;
+	/** The seat a fix goes to when the failing task names no implementer. */
+	fixer?: string;
+	/** The seat the automatic verifier goes to. */
+	verifier?: string;
 }
 
 interface Claim {
@@ -122,6 +169,8 @@ function displaySeat(seat: string): string {
 export class BlackboardDispatcher {
 	readonly #options: BlackboardDispatcherOptions;
 	readonly #claims = new Map<string, Claim>();
+	/** Tasks whose continuation budget is spent; the notice fires once. */
+	readonly #exhausted = new Set<string>();
 	readonly #unsubscribe: () => void;
 	#scheduled = false;
 	#stopped = false;
@@ -132,9 +181,16 @@ export class BlackboardDispatcher {
 			// A restore replaces the board wholesale; the claim table refers to ids
 			// that may no longer exist. Clearing it lets the pass below re-seat an
 			// in-progress task instead of trusting a stale wake.
-			if (change.type === "restore") this.#claims.clear();
+			if (change.type === "restore") {
+				this.#claims.clear();
+				this.#exhausted.clear();
+			}
 			this.kick();
 		});
+		// A board can already hold work when the dispatcher is built — a restored
+		// snapshot, or tasks a previous band left and its successor recovered. The
+		// first pass claims them instead of waiting for a write that may not come.
+		this.kick();
 	}
 
 	/** The claim a seat currently holds, for status and tests. */
@@ -156,8 +212,7 @@ export class BlackboardDispatcher {
 	/** One pass, synchronously. Exposed so a test need not guess at timer order. */
 	reconcile(): void {
 		if (this.#stopped) return;
-		const { store, seats, isBusy } = this.#options;
-		const tasks = store.list();
+		const { store, isBusy } = this.#options;
 
 		// 1. A claim whose task reached a terminal state releases its seat.
 		for (const [seat, claim] of [...this.#claims]) {
@@ -172,9 +227,146 @@ export class BlackboardDispatcher {
 			}
 		}
 
-		// 2. An in_progress task whose owner has not been told about this revision
+		// 2. The board's own repair work — fix bookkeeping, repairs and
+		//    escalations, the automatic verifier — lands before anyone is woken,
+		//    so the claim pass sees the tasks it wrote.
+		this.#maintainBoard();
+
+		// 3. An in_progress task whose owner has not been told about this revision
 		//    is a continuation: the board changed under the worker (John edited
 		//    the task), or the band restarted onto a board a previous run left.
+		this.#continueOpen(store.list(), isBusy);
+
+		// 4. Claim the lowest-id ready task per idle seat.
+		this.#claimReady(store.list(), isBusy);
+	}
+
+	/**
+	 * The board's repair bookkeeping, run every pass. Each branch is
+	 * idempotent — the next pass sees the fact it wrote and does nothing — so a
+	 * burst of store writes cannot multiply fixes, verifiers or escalations.
+	 */
+	#maintainBoard(): void {
+		const { store } = this.#options;
+		const tasks = store.list();
+		const maxAttempts = this.#options.maxAttempts ?? DEFAULT_MAX_FIX_ROUNDS;
+
+		// A completed fix is the repaired task's receipt. The failing task was
+		// re-armed under the fix; `fixedBy` says who repaired it.
+		for (const task of tasks) {
+			if (task.kind !== "fix" || task.status !== "completed" || task.fixes === undefined) continue;
+			const repaired = store.get(task.fixes);
+			if (repaired && repaired.fixedBy !== task.id) store.update(repaired.id, { fixedBy: task.id });
+		}
+
+		// A failed build/verify gets exactly one repair or one escalation, and
+		// only one of either per failing episode: the dispatcher clears the
+		// verdict when it acts, so the next pass has nothing left to answer.
+		for (const task of tasks) {
+			if (task.verdict !== "failed" || task.status === "completed") continue;
+			if (task.kind !== "build" && task.kind !== "verify") continue;
+			const active = tasks.some((other) => other.fixes === task.id && other.status !== "completed");
+			if (active) continue;
+			const attempts = task.attempts ?? 0;
+			if (attempts >= maxAttempts) this.#escalate(task, attempts);
+			else this.#spawnFix(task, attempts, tasks);
+		}
+
+		// "Done" without evidence is not a state the board leaves reachable.
+		for (const task of tasks) {
+			if (task.kind !== "implement" || task.status !== "completed") continue;
+			const covered = tasks.some(
+				(other) => (other.kind === "verify" || other.kind === "build") && other.blockedBy.includes(task.id),
+			);
+			if (!covered) this.#spawnVerifier(task);
+		}
+	}
+
+	/** One fix task for a failed build/verify, owned by whoever should repair it. */
+	#spawnFix(task: AgentTask, attempts: number, tasks: readonly AgentTask[]): void {
+		const { store } = this.#options;
+		const fixer = this.#implementerOf(task, tasks) ?? this.#options.fixer ?? DEFAULT_FIXER;
+		const fix = store.create(
+			`fix: ${task.subject}`,
+			`Repair #${task.id} (${task.kind}). The failing run is recorded on the board; once this completes, #${task.id} runs its declared commands again.`,
+			undefined,
+			fixer,
+			[],
+			{ kind: "fix", acceptance: task.acceptance, files: task.files, createdBy: "dispatcher" },
+		);
+		// The fix carries the failing task's count plus one, so a chain of fixes
+		// cannot restart the ceiling by writing a new task.
+		store.update(fix.id, { fixes: task.id, attempts: attempts + 1, errorSummary: task.errorSummary });
+		// Re-arm the failure under its repair: pending with no verdict, so the
+		// next claim is a fresh run and the failed state is not answered twice.
+		store.update(task.id, { status: "pending", verdict: null, attempts: attempts + 1, addBlockedBy: [fix.id] });
+		this.#options.notice?.(
+			`[blackboard] #${task.id} failed at attempt ${attempts + 1} — fix #${fix.id} created for ${displaySeat(fixer)}.`,
+		);
+	}
+
+	/** The ceiling: one escalation for John, and no further repair attempts. */
+	#escalate(task: AgentTask, attempts: number): void {
+		const { store } = this.#options;
+		const escalation = store.create(
+			`escalate: ${task.subject}`,
+			`#${task.id} (${task.kind}) is still failing after ${attempts} repair round(s) — the ceiling. Decide the next move: change what done means, take it yourself, or stop the band. Its failure is recorded on the board.`,
+			undefined,
+			"john",
+			[],
+			{ kind: "escalate", acceptance: task.acceptance, files: task.files, parent: task.id, createdBy: "dispatcher" },
+		);
+		store.update(task.id, { status: "pending", verdict: null, addBlockedBy: [escalation.id] });
+		this.#options.notice?.(
+			`[blackboard] #${task.id} still failing after ${attempts} round(s) — escalation #${escalation.id} is John's.`,
+		);
+	}
+
+	/** The seat that should repair a failure: the implementer it was built on, when named. */
+	#implementerOf(task: AgentTask, tasks: readonly AgentTask[]): string | undefined {
+		const { seats } = this.#options;
+		const implementer = tasks.find(
+			(other) =>
+				other.kind === "implement" &&
+				task.blockedBy.includes(other.id) &&
+				other.owner !== undefined &&
+				seats.includes(other.owner),
+		)?.owner;
+		return implementer;
+	}
+
+	/** An implement task completed with no verifier gets one, once. */
+	#spawnVerifier(task: AgentTask): void {
+		const { store } = this.#options;
+		const verifier = this.#options.verifier ?? DEFAULT_VERIFIER;
+		const verify = store.create(
+			`verify: ${task.subject}`,
+			`#${task.id} was marked completed with no verifier. Check the acceptance against the live workspace and, when commands are declared, run them — the exit codes decide.`,
+			undefined,
+			verifier,
+			[task.id],
+			{
+				kind: "verify",
+				acceptance: task.acceptance,
+				files: task.files,
+				commands: task.commands,
+				parent: task.id,
+				createdBy: "dispatcher",
+			},
+		);
+		this.#options.notice?.(
+			`[blackboard] #${task.id} completed unverified — verify #${verify.id} created for ${displaySeat(verifier)}.`,
+		);
+	}
+
+	/**
+	 * Wake the owner of an `in_progress` task whose revision it has not seen.
+	 * The continuation is an attempt: past the ceiling the task is left open
+	 * with one notice, never silently completed.
+	 */
+	#continueOpen(tasks: readonly AgentTask[], isBusy: (seat: string) => boolean): void {
+		const { store, seats } = this.#options;
+		const maxAttempts = this.#options.maxAttempts ?? DEFAULT_MAX_FIX_ROUNDS;
 		const busy = new Set<string>();
 		for (const seat of seats) {
 			if (isBusy(seat)) busy.add(seat);
@@ -189,19 +381,52 @@ export class BlackboardDispatcher {
 			const claim = this.#claims.get(task.owner);
 			const rev = task.rev ?? 0;
 			if (claim?.taskId === task.id && claim.rev === rev) continue;
-			this.#wake(task.owner, task, claim?.taskId === task.id ? "continued" : "resumed");
-			this.#claims.set(task.owner, { taskId: task.id, rev });
+			const resumed = claim?.taskId === task.id;
+			const attempts = task.attempts ?? 0;
+			if (attempts >= maxAttempts) {
+				// Record the revision so the notice fires once and the next pass
+				// stays quiet; the task is left open for John to look at.
+				this.#claims.set(task.owner, { taskId: task.id, rev });
+				if (!this.#exhausted.has(task.id)) {
+					this.#exhausted.add(task.id);
+					this.#options.notice?.(
+						`[blackboard] #${task.id} ${task.subject} has used ${attempts} attempt(s) — left open, not woken again. John can edit it.`,
+					);
+				}
+				continue;
+			}
+			const continued = store.update(task.id, { attempts: attempts + 1 });
+			if (!continued) continue;
+			this.#claims.set(task.owner, { taskId: continued.id, rev: continued.rev ?? 0 });
+			this.#wake(task.owner, continued, resumed ? "continued" : "resumed");
 		}
+	}
 
-		// 3. Claim the lowest-id ready task per idle seat. `busy` is updated in
-		//    the loop, so a second ready task for the same seat waits its turn.
+	/**
+	 * Claim the lowest-id ready task per idle seat. `busy` grows as claims land,
+	 * and `running` with them, so a second ready task for the same seat waits
+	 * its turn and a task that shares files with anything already running waits
+	 * for that to finish.
+	 */
+	#claimReady(tasks: readonly AgentTask[], isBusy: (seat: string) => boolean): void {
+		const { store, seats } = this.#options;
+		const busy = new Set<string>();
+		for (const seat of seats) {
+			if (isBusy(seat)) busy.add(seat);
+		}
+		const running = tasks.filter((task) => task.status === "in_progress");
+		for (const task of running) {
+			if (task.owner !== undefined) busy.add(task.owner);
+		}
 		for (const task of tasks) {
 			if (!isReady(task, store, seats)) continue;
 			const seat = task.owner as string;
 			if (busy.has(seat)) continue;
+			if (running.some((other) => filesConflict(other.files, task.files))) continue;
 			const claimed = store.update(task.id, { status: "in_progress" });
 			if (!claimed) continue;
 			busy.add(seat);
+			running.push(claimed);
 			this.#claims.set(seat, { taskId: claimed.id, rev: claimed.rev ?? 0 });
 			this.#options.notice?.(`[blackboard] ${displaySeat(seat)} claimed #${claimed.id} ${claimed.subject}`);
 			this.#wake(seat, claimed, "claimed");

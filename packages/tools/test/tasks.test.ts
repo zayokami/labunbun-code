@@ -291,4 +291,20 @@ describe("the blackboard fields", () => {
 		expect(store.get("1")?.verdict).toBe("failed");
 		expect(store.get("1")?.errorSummary).toBe("[exit code: 1] boom");
 	});
+
+	test("a null verdict clears it, because the dispatcher consumed the failure", () => {
+		const store = new TaskStore();
+		const task = store.create("verify", "d");
+		store.update(task.id, { verdict: "failed" });
+		expect(task.verdict).toBe("failed");
+		const before = task.rev ?? 0;
+
+		// The failing state a fix was built for is history: the next run has not
+		// decided yet, and a stale "failed" would make the dispatcher spawn a
+		// second repair for the same failure.
+		store.update(task.id, { verdict: null });
+		expect(task.verdict).toBeUndefined();
+		expect(task.rev).toBe(before + 1);
+		expect("verdict" in task).toBe(false);
+	});
 });
