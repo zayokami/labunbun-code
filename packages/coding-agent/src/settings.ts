@@ -414,6 +414,19 @@ export const SettingsSchema = z.object({
 	pricing: z.record(z.string(), ModelPricingSchema).optional(),
 	hooks: z.record(z.string(), z.array(z.unknown())).optional(),
 	mcpServers: z.record(z.string(), z.unknown()).optional(),
+	/**
+	 * The first-run wizard's log of what it did. It is written once and never
+	 * read back — a sign-in can expire, so a past record is not evidence a
+	 * credential is still there. It is in the schema so the file the wizard
+	 * writes does not load as one that sets an unknown key.
+	 */
+	firstRun: z
+		.object({
+			offeredAt: z.string(),
+			signedIn: z.record(z.string(), z.boolean()).optional(),
+			imported: z.boolean(),
+		})
+		.optional(),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -531,6 +544,9 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// the moment a session starts, is a prompt section they did not see.
 	language: "denied",
 	outputStyle: "denied",
+	// The wizard's own record of a run on this machine. A repository has no run
+	// to describe, and a cloned file claiming one would only be noise.
+	firstRun: "denied",
 	// Cosmetic, no reach beyond the user's own terminal.
 	theme: "repo",
 	tokenUnit: "repo",

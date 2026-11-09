@@ -52,7 +52,9 @@ describe("the queued-message preview", () => {
 	test("in vim the hint stops promising that Escape sends", () => {
 		// Escape is the vim mode key, so in vim it never sends the buffer — a legend
 		// that kept the "& send" half would be describing a key that does not exist.
-		expect(queuedHint(true, true)).toBe("Tab queue · Enter steer (at the next tool) · Esc interrupt");
+		// Tab is the prompt legend's clause, one row below; repeating it here made
+		// two versions of the same key row back to back.
+		expect(queuedHint(true, true)).toBe("Enter steer (at the next tool) · Esc interrupt");
 		expect(queuedHint(false, true)).not.toContain("send");
 		expect(queuedHint(true, false)).toContain("Esc interrupt & send");
 	});

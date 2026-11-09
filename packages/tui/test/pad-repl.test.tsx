@@ -524,7 +524,9 @@ describe("□ clears the screen", () => {
  * says it — so the assertions read the wheel's title and its ❯ row.
  */
 describe("△ and the command wheel", () => {
-	const RING = ["/help", "/theme", "run the tests"];
+	// The REPL's own commands are in the ring too: a controller has no keyboard
+	// with which to type `/exit`, so the wheel is the only way to reach it.
+	const RING = ["/clear", "/exit", "/help", "/quit", "/theme", "run the tests"];
 	/** Which ring row wears the mark, or -1 when the wheel is not up. */
 	const rowOf = (frame: string) => RING.findIndex((label) => frame.includes(`${DARK_THEME.marks.selected} ${label}`));
 
@@ -537,7 +539,9 @@ describe("△ and the command wheel", () => {
 		await push(h, padAction("wheel", { button: "triangle" }), shape(h));
 		expect(rowOf(h.frame())).toBe(0);
 
-		await push(h, padAction("down"), () => rowOf(h.frame()) === 1);
+		for (let row = 1; row <= RING.indexOf("/theme"); row++) {
+			await push(h, padAction("down"), () => rowOf(h.frame()) === row);
+		}
 		await push(h, padAction("confirm"), () => !h.frame().includes("Commands"));
 		expect(h.ran).toEqual(["/theme"]);
 
@@ -574,9 +578,10 @@ describe("△ and the command wheel", () => {
 		await delay(40);
 
 		await push(h, padAction("wheel", { button: "triangle" }), shape(h));
-		// Commands first, then the phrases: two downs from the top is the phrase.
-		await push(h, padAction("down"), () => rowOf(h.frame()) === 1);
-		await push(h, padAction("down"), () => rowOf(h.frame()) === 2);
+		// Commands first, then the phrases: every command row comes before it.
+		for (let row = 1; row < RING.length; row++) {
+			await push(h, padAction("down"), () => rowOf(h.frame()) === row);
+		}
 		await push(h, padAction("confirm"), () => !h.frame().includes("Commands"));
 
 		expect(h.ran).toEqual([]);
@@ -587,14 +592,14 @@ describe("△ and the command wheel", () => {
 		h.unmount();
 	}, 20_000);
 
-	test("an empty wheel says so rather than showing an empty box", async () => {
+	test("with no commands from the caller, the REPL's own are still there", async () => {
 		const h = setup({ commands: [], phrases: [] });
 		await delay(40);
 
-		await push(h, padAction("wheel", { button: "triangle" }), () => h.frame().includes("Nothing to offer"));
-		// Saying so is not the same as running something.
-		await press(h.pad, padAction("confirm"));
-		expect(h.ran).toEqual([]);
+		await push(h, padAction("wheel", { button: "triangle" }), shape(h));
+		// The registry is the caller's; the REPL's own commands are not in it,
+		// and a wheel that showed nothing would leave a controller nowhere to go.
+		expect(h.frame()).toContain("/exit");
 
 		h.unmount();
 	}, 20_000);

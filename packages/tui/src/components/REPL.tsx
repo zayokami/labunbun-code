@@ -195,23 +195,36 @@ export function ctrlCShouldExit(lastAt: number, now: number, windowMs = CTRL_C_E
 
 /**
  * Commands this component dispatches itself, which no caller-supplied registry
- * knows about. They are merged into `/help` so the list covers everything that
- * works, not just what the app layer contributed.
+ * knows about. They are merged into one table that the prompt's completion,
+ * the `?` overlay, the pad's wheel and `/help` all read, so a command that
+ * works is also a command a user can find: typing `/he` offers `/help`, not
+ * `/help-uganda` alone. `/quit` is listed with `/exit` because the switch
+ * accepts both, and an alias that completes is an alias nobody has to know.
  */
-const BUILT_IN_HELP: Array<[string, string]> = [
+const BUILT_IN_COMMANDS: Array<[string, string]> = [
 	["/clear", "Clear the conversation display"],
 	["/exit", "Exit"],
+	["/quit", "Exit (same as /exit)"],
 	["/help", "Show this help"],
 ];
+
+/**
+ * The one suggestion table. The REPL's own commands come first as a base and
+ * the caller's registry wins on a name collision, so a host that learns a
+ * better description for `/help` is not overruled by this file.
+ */
+export function suggestionTable(commands?: Array<[string, string]>): Array<[string, string]> {
+	const byName = new Map<string, string>(BUILT_IN_COMMANDS);
+	for (const [name, description] of commands ?? []) byName.set(name, description);
+	return [...byName].sort(([a], [b]) => a.localeCompare(b));
+}
 
 /**
  * Help text built from the command table the REPL was given, so a command added
  * to the registry cannot go missing from `/help`.
  */
 export function helpText(commandSuggestions?: Array<[string, string]>, editor: EditorKind = "none"): string {
-	const byName = new Map<string, string>(BUILT_IN_HELP);
-	for (const [name, description] of commandSuggestions ?? []) byName.set(name, description);
-	const rows = [...byName].sort(([a], [b]) => a.localeCompare(b));
+	const rows = suggestionTable(commandSuggestions);
 	const width = Math.max(...rows.map(([name]) => name.length));
 	const lines = rows.map(([name, description]) => `  ${name.padEnd(width)}  ${description}`);
 	// One line per editor, never both, and none at all when there is no editor:
@@ -503,7 +516,11 @@ export function REPL({
 	/** The command wheel: the app's commands and the user's phrases, one press away. */
 	const [wheelOpen, setWheelOpen] = useState(false);
 	const [wheelIndex, setWheelIndex] = useState(0);
-	const wheel = useMemo(() => wheelEntries(commandSuggestions ?? [], pad?.phrases ?? []), [commandSuggestions, pad]);
+	// One table for the prompt's completion, the `?` overlay, the pad wheel and
+	// `/help`. Before this, only `/help` merged the REPL's own commands, so
+	// `/he` completed to `/help-uganda` and the wheel had no `/exit`.
+	const suggestions = useMemo(() => suggestionTable(commandSuggestions), [commandSuggestions]);
+	const wheel = useMemo(() => wheelEntries(suggestions, pad?.phrases ?? []), [suggestions, pad]);
 
 	useEffect(
 		() => () => {
@@ -653,7 +670,7 @@ export function REPL({
 			store.set((s) => (s.statusCard ? { ...s, statusCard: null } : s));
 			if (trimmed.startsWith("/")) {
 				if (onCommand?.(trimmed)) return;
-				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions, editor: editor.mode });
+				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions: suggestions, editor: editor.mode });
 				return;
 			}
 			if (trimmed.startsWith("#")) {
@@ -702,7 +719,7 @@ export function REPL({
 			onCommand,
 			onSubmitText,
 			onMemoryShortcut,
-			commandSuggestions,
+			suggestions,
 			editor.mode,
 			enqueue,
 		],
@@ -1391,9 +1408,7 @@ export function REPL({
 					/>
 				) : null}
 				{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
-				{shortcutsOpen && (
-					<ShortcutOverlay groups={shortcutGroups({ editor: editor.mode, commands: commandSuggestions })} />
-				)}
+				{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ editor: editor.mode, commands: suggestions })} />}
 				{activity && !transcriptMode && (
 					<ActivityPanel
 						home={activity.home}
@@ -1435,7 +1450,7 @@ export function REPL({
 						{/* full output here — reading back is exactly when truncation hurts */}
 						<MessageList entries={windowEntries} full />
 						<Text dimColor>
-							Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · ctrl+o/Esc back
+							Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · Ctrl+O/Esc back
 						</Text>
 					</>
 				) : null}
@@ -1466,7 +1481,7 @@ export function REPL({
 						activity !== null
 					}
 					onToggleHelp={() => setShortcutsOpen(true)}
-					commandSuggestions={commandSuggestions}
+					commandSuggestions={suggestions}
 					completeFiles={completeFiles}
 					// The prompt is the only thing that constructs an editor engine, so this
 					// prop is the whole of what `/emacs on` does to typing — and it was the one

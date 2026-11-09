@@ -480,9 +480,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	startupNotices.push(...formatSettingsDiagnostics(loadedSettings));
 	markStartup("settings loaded");
 	// Say out loud what a file inside this project asked for and did not get —
-	// silence here would look like the setting simply didn't work.
+	// silence here would look like the setting simply didn't work. Buffered like
+	// every other settings diagnostic: stderr is the screen the REPL is about to
+	// draw over, so a warning printed there is a warning the user never sees.
 	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
-	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
+	if (ignoredNotice) startupNotices.push(`Warning: ${ignoredNotice}`);
 	// Before provider registration and the API-key check below, both of which
 	// read process.env — a key configured via settings.env has to be in place
 	// by then or it would have no effect at all.
@@ -3673,7 +3675,7 @@ export function appCommandTable(): Array<[string, string]> {
 	return [
 		["/activity", "Show a heatmap of the days you used this, and the streak: /activity [7d|30d|all]"],
 		["/agents", "List agent definitions, and load this project's: /agents [approve]"],
-		["/autocompact", "Switch the automatic compaction passes and their trigger line: /autocompact [on|off|<percent>]"],
+		["/autocompact", "Show or set automatic compaction: /autocompact [on|off|<percent>]"],
 		[
 			"/beetle",
 			"Run a four-agent band that works until stopped: /beetle [<task>|status|off|models|say <member> <text>]",
@@ -3683,22 +3685,16 @@ export function appCommandTable(): Array<[string, string]> {
 		["/context", "Show what the context window is made of, and what is left"],
 		["/cost", "Show token usage and cost for this conversation, then for this project"],
 		["/doctor", "Check the environment, settings, and provider setup"],
-		["/emacs", "Turn modeless emacs editing in the prompt on or off: /emacs [on|off]"],
+		["/emacs", "Turn Emacs editing on or off: /emacs [on|off]"],
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
 		[
 			"/gamepad",
 			"Control the session from a DualShock 4 or Xbox controller: /gamepad [on|off|status|watch|list|reset|approve|rumble|switch]",
 		],
-		[
-			"/login",
-			"Sign in to a subscription: /login [claude|chatgpt|gemini|<code#state>] — the Claude and Gemini flows may ask you to paste",
-		],
+		["/login", "Sign in to a subscription: /login [claude|chatgpt|gemini]"],
 		["/logout", "Sign out of a subscription: /logout [claude|chatgpt|gemini]"],
-		[
-			"/mcp",
-			"List MCP servers, approve one, or read prompts and resources: /mcp [approve <name>|prompts <server>|prompt <server> <name> [key=value ...]|resources <server>|resource <server> <uri>]",
-		],
+		["/mcp", "List, approve, or read MCP servers, prompts, and resources: /mcp [subcommand]"],
 		["/memory", "Open your memory files for editing: /memory [rules|project]"],
 		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
@@ -3715,13 +3711,10 @@ export function appCommandTable(): Array<[string, string]> {
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/think", `Show or set how hard the model thinks: /think [${THINKING_LEVELS.join("|")}]`],
 		["/todo", "Show the full task board: every task, its status, owner, blockers, and description"],
-		["/tokens", "Show or switch the token unit: /tokens [k|mtok] — with no argument it toggles"],
+		["/tokens", "Show or switch the token unit: /tokens [k|mtok]"],
 		["/tree", "Show the session branch tree"],
-		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
-		[
-			"/yolo",
-			"YOLO mode: classifier off, approvals suppressed, sandbox kept — typing the confirmation phrase enables it: /yolo [on|off]",
-		],
+		["/vim", "Turn vim editing on or off: /vim [on|off]"],
+		["/yolo", "Turn off permission gates for this session: /yolo [on|off]"],
 	];
 }
 
@@ -4851,7 +4844,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// the confinement every mode ships with, never "keep whatever I had".
 			const target = arg ? (findModeChoice(arg) ?? choiceForMode(arg)) : undefined;
 			if (arg && !target) {
-				pushInfo(ctx.handle, `Usage: /mode ${MODE_CHOICES.map((c) => c.id).join("|")}`);
+				// The ids are what the user types; the labels are what the picker
+				// and every status row call the same four rows. An error line that
+				// only printed `agentNoSandbox` taught nobody which mode that is.
+				const ids = MODE_CHOICES.map((c) => c.id).join("|");
+				const labels = MODE_CHOICES.map((c) => c.label).join(", ");
+				pushInfo(ctx.handle, `Usage: /mode ${ids} — the modes are ${labels}`);
 			} else if (target) {
 				// Snapshot before the move: the pair approval restores is the one the
 				// session is in now, not `plan` itself. Only the transition into plan

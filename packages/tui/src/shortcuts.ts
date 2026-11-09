@@ -52,14 +52,18 @@ export function escapeHint(editor: EditorKind, vimMode: VimMode): string {
  */
 export function hintLine(
 	columns: number,
-	opts: { editor: EditorKind; vimMode: VimMode; busy?: boolean; canSteer?: boolean },
+	opts: { editor: EditorKind; vimMode: VimMode; busy?: boolean; canSteer?: boolean; hasDraft?: boolean },
 ): string {
 	const esc = escapeHint(opts.editor, opts.vimMode);
 	if (opts.busy) {
 		// The Esc clause stays the editor's answer even here: under vim insert the
 		// key leaves insert before it can reach the session's interrupt.
 		const enter = opts.canSteer ? "Enter steer" : "Enter queue";
-		if (columns >= HINT_SHORT_MIN_COLUMNS) return `${enter} · Tab queue · ${esc}`;
+		// Tab has nothing to do with an empty buffer, and without steering it
+		// would only repeat Enter. A legend that names an inert key teaches the
+		// user to distrust the rest of the row.
+		const tab = opts.canSteer && opts.hasDraft !== false ? " · Tab queue" : "";
+		if (columns >= HINT_SHORT_MIN_COLUMNS) return `${enter}${tab} · ${esc}`;
 		return `${enter} · ${esc}`;
 	}
 	// Under emacs `C-r` starts an incremental search backward, not history

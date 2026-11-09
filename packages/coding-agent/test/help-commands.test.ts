@@ -208,6 +208,13 @@ describe("helpText", () => {
 		}
 	});
 
+	test("completion finds a command by its documented alias", () => {
+		// `/migrate` dispatches to `/yoshi`; a picker that says "No matching
+		// commands" for a name Enter accepts reads as a broken command.
+		const names = completeCommands(builtInCommands(), "migrate").map((c) => c.name);
+		expect(names).toContain("yoshi");
+	});
+
 	test("keeps the commands the REPL dispatches on its own", () => {
 		// These are not in any caller's table, so merging rather than replacing is
 		// what keeps them visible.

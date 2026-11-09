@@ -195,13 +195,17 @@ describe("prompt input", () => {
 	// During a run Enter is not "send a new turn": the buffer is queued, or
 	// steered into the turn at its next tool boundary. The legend has to follow
 	// the key, and this is the only row that can say what it will do.
-	test("the hint follows the running turn", async () => {
-		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} busy canSteer />));
+	test("the hint follows the running turn, and Tab only once there is something to queue", async () => {
+		const { lastFrame, stdin, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} busy canSteer />));
 		await delay(30);
-		const frame = flat(lastFrame());
-		expect(frame).toContain("Enter steer");
-		expect(frame).toContain("Tab queue");
-		expect(frame).not.toContain("Enter send");
+		const empty = flat(lastFrame());
+		expect(empty).toContain("Enter steer");
+		// The buffer is empty: Tab has nothing to queue and the legend says so.
+		expect(empty).not.toContain("Tab queue");
+		expect(empty).not.toContain("Enter send");
+		stdin.write("look at this");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("Tab queue");
 		unmount();
 	});
 

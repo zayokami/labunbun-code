@@ -1039,7 +1039,15 @@ export function PromptInput({
 					    `dimColor` as a transform over the whole squashed line, so only
 					    text outside that Text can carry a colour of its own. */}
 					{modeLabel ? <Text color={modeBadgeColor(modeLabel, theme)}>{`[${modeLabel}] `}</Text> : null}
-					<Text dimColor>{hintLine(columns, { editor: editor.mode, vimMode, busy, canSteer })}</Text>
+					<Text dimColor>
+						{hintLine(columns, {
+							editor: editor.mode,
+							vimMode,
+							busy,
+							canSteer,
+							hasDraft: state.text.trim().length > 0,
+						})}
+					</Text>
 				</Text>
 			</Box>
 		</Box>

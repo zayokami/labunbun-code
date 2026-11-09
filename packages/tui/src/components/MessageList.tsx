@@ -430,7 +430,10 @@ function ResultLines({
 	const diff = looksLikeDiff(lines);
 	const notes: string[] = [];
 	if (!full && total > RESULT_PREVIEW_CHARS) {
-		notes.push(`… ${formatChars(total - RESULT_PREVIEW_CHARS)} more characters · Ctrl+O for transcript`);
+		const hidden = total - RESULT_PREVIEW_CHARS;
+		// Singular for a one-character overrun: "1 more characters" is the kind of
+		// sentence that makes the whole note look like a bug.
+		notes.push(`… ${formatChars(hidden)} more ${hidden === 1 ? "character" : "characters"} · Ctrl+O for transcript`);
 	}
 	if (full && truncated) notes.push(`(output capped at ${formatChars(RESULT_TEXT_CAP)} characters)`);
 	if (interrupted) notes.push("(interrupted; output is partial)");

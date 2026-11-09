@@ -524,6 +524,10 @@ describe("ListPickerDialog preview panel", () => {
 		const frame = p.frame();
 		expect(frame).toContain("Session 0");
 		expect(frame).toContain("Esc closes preview");
+		// The panel's Esc and the footer's Esc are the same key: while the preview
+		// is open the first press closes it, so the footer must not still promise
+		// that Esc leaves the list.
+		expect(frame).not.toContain("Esc cancel");
 		p.unmount();
 	});
 

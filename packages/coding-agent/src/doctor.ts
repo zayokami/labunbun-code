@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
 	DEFAULT_MODE_CHOICE,
 	DEFAULT_SANDBOX_FOR_MODE,
+	type NetworkConfinement,
 	needsNetworkProxy,
 	networkConfinementReason,
 } from "@labunbun/agent";
@@ -58,6 +59,39 @@ export interface DoctorCheck {
  * outlive the code it describes.
  */
 export const COMMAND_PATHS_WITHOUT_SANDBOX = ["MCP HTTP servers"] as const;
+
+/**
+ * The one action that closes a Network warn row, where there is one. The reason
+ * sentence says what is not holding; a verdict a user cannot act on is a
+ * verdict they stop reading. The two causes with no setting behind them keep
+ * the plain full stop — a build with no backend for the host is not fixed by
+ * editing a file.
+ */
+function networkRemedy(confinement: NetworkConfinement): string {
+	switch (confinement) {
+		case "backend-missing":
+			return " — install bubblewrap (bwrap).";
+		case "filesystem-axis-off":
+			return " — set `sandbox` to workspace-write.";
+		default:
+			return ".";
+	}
+}
+
+/**
+ * The Auth row's one line.
+ *
+ * The fail row is the one a user reads for a next step. Naming all two dozen
+ * variables is a wall of names they do not have; four and a count is enough to
+ * recognise their provider, and the remedy comes first.
+ */
+export function authDetail(present: readonly string[], keys: readonly string[], signedIn: readonly string[]): string {
+	if (present.length > 0 || signedIn.length > 0) return [...present, ...signedIn].join(", ");
+	const NAMED_KEYS = 4;
+	const named = keys.slice(0, NAMED_KEYS).join(", ");
+	const more = keys.length > NAMED_KEYS ? `, +${keys.length - NAMED_KEYS} more` : "";
+	return `no API key or sign-in — run /login, or set one of: ${named}${more}`;
+}
 
 /**
  * `home` and `liveThemeName` are the two things this cannot read off `settings`:
@@ -169,10 +203,7 @@ export async function runDoctorChecks(
 	checks.push({
 		name: "Auth",
 		status: present.length > 0 || signedIn.length > 0 ? "ok" : "fail",
-		detail:
-			present.length > 0 || signedIn.length > 0
-				? [...present, ...signedIn].join(", ")
-				: `none of ${keys.join(", ")} set`,
+		detail: authDetail(present, keys, signedIn),
 	});
 
 	// Model resolution
@@ -304,7 +335,7 @@ export async function runDoctorChecks(
 					? `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine except the local proxy's own loopback ports, so shell traffic goes through the proxy and the allowed list governs both shell and web tools${uncovered}`
 					: `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine except the loopback bridge into the proxy, so shell traffic goes through the proxy and the allowed list governs both shell and web tools${uncovered}`
 				: `${axis.access} (${reach}) · a local proxy decides, and a program that ignores HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`
-			: `${axis.access} (${reach}) · ${networkConfinementReason(confinement, platform, backend, appContainerReason)} So the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`;
+			: `${axis.access} (${reach}) · ${networkConfinementReason(confinement, platform, backend, appContainerReason)} So the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it${networkRemedy(confinement)}`;
 		checks.push({ name: "Network", status: kernelHoldsIt ? "ok" : "warn", detail });
 	} else {
 		checks.push({

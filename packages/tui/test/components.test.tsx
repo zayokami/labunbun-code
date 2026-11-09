@@ -150,6 +150,19 @@ describe("MessageList", () => {
 		expect(frame).not.toContain("x".repeat(500)); // full output never rendered
 	});
 
+	test("a one-character overrun says character, not characters", () => {
+		const { lastFrame } = render(
+			withTheme(
+				<MessageList
+					entries={[
+						{ kind: "toolUse", callId: "c1", toolName: "Read", inputPreview: "f.txt", resultText: "x".repeat(401) },
+					]}
+				/>,
+			),
+		);
+		expect(lastFrame() ?? "").toContain("1 more character · Ctrl+O for transcript");
+	});
+
 	test("transcript mode says the reducer capped the stored output", () => {
 		// Ctrl+O lifts the *preview* cap; it cannot lift the reducer's, because the
 		// rest of the string was never kept. Saying which cap is in force is the

@@ -243,6 +243,22 @@ describe("wizardProviderDefault", () => {
 		// A Claude config outranks a stray key variable.
 		expect(wizardProviderDefault({ claudeConfigured: true, envKeysPresent: true })).toBe("1");
 	});
+
+	test("a subscription already signed in is the default, not a second sign-in", () => {
+		const claude = { ...NO_SIGN_INS, claude: true };
+		const chatgpt = { ...NO_SIGN_INS, chatgpt: true };
+		// The detection block names the sign-in; the row must agree with it.
+		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: false, signIns: claude })).toBe("1");
+		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: true, signIns: chatgpt })).toBe("2");
+		// Claude's sign-in outranks ChatGPT's when both are on disk.
+		expect(
+			wizardProviderDefault({
+				claudeConfigured: false,
+				envKeysPresent: false,
+				signIns: { ...NO_SIGN_INS, claude: true, chatgpt: true },
+			}),
+		).toBe("1");
+	});
 });
 
 describe("wizardDetectionLines", () => {

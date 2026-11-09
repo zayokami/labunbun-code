@@ -27,13 +27,17 @@ export function queuedPreview(text: string): string {
  * a message mid-flight, so the hint has to say which one it is rather than
  * naming both and leaving the user to guess.
  *
+ * It is one row above the prompt's own legend, which already names Tab and
+ * Enter, so this line carries only what that legend cannot: *when* a steer
+ * lands, and the fact that Esc sends the draft along with the interrupt.
+ *
  * `vim` is here for the same reason: there Escape is a mode key, so the prompt's
  * Escape never sends the buffer (see PromptInput) and the hint must not claim
  * it does — a legend that promises a key to be a mode toggle is worse than none.
  */
 export function queuedHint(canSteer: boolean, vim = false): string {
 	const enter = canSteer ? "Enter steer (at the next tool)" : "Enter queue (when this turn ends)";
-	return `Tab queue · ${enter} · Esc interrupt${vim ? "" : " & send"}`;
+	return `${enter} · Esc interrupt${vim ? "" : " & send"}`;
 }
 
 export function QueuedMessages({

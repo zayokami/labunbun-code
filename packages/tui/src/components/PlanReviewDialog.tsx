@@ -218,7 +218,7 @@ export function PlanReviewDialog({ plan, resolve, pad }: PlanReviewDialogState &
 				<Text dimColor>
 					{feedbackMode
 						? "Type feedback · Backspace delete · Enter send · Esc back"
-						: "↑/↓ select · Enter confirm · 1-3 answer · y approve · n keep planning · Esc cancel"}
+						: "↑/↓ select · Enter confirm · 1-3 or y/n answer · Esc cancel"}
 					{pad ? (feedbackMode ? " · ✕ send · ○ back" : " · ✕ confirm · ○ cancel") : ""}
 				</Text>
 			</Box>

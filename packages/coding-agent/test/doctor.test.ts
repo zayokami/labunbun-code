@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeSandboxBackend, type SandboxBackend } from "@labunbun/tools";
-import { COMMAND_PATHS_WITHOUT_SANDBOX, formatDoctorReport, runDoctorChecks } from "../src/doctor.ts";
+import { authDetail, COMMAND_PATHS_WITHOUT_SANDBOX, formatDoctorReport, runDoctorChecks } from "../src/doctor.ts";
 import { padConfigFrom } from "../src/gamepad-runtime.ts";
 import { approveProjectDefinitions } from "../src/project-trust.ts";
 import { SettingsSchema } from "../src/settings.ts";
@@ -122,6 +122,21 @@ describe("runDoctorChecks", () => {
 		const { home, cwd } = makeDirs();
 		const checks = await runDoctorChecks(SettingsSchema.parse({}), cwd, home);
 		expect(checks.find((c) => c.name === "Auth")?.detail).not.toContain("subscription");
+	});
+
+	test("the fail row leads with the remedy and names four variables, not two dozen", () => {
+		// The registry's key list is long enough that printing all of it is a wall
+		// the user cannot find their provider in. This is the row a user reads for
+		// their next step, so the step comes before the list and the list is short.
+		const detail = authDetail([], ["A_KEY", "B_KEY", "C_KEY", "D_KEY", "E_KEY", "F_KEY"], []);
+		expect(detail.startsWith("no API key or sign-in — run /login, or set one of: ")).toBe(true);
+		expect(detail).toContain("A_KEY, B_KEY, C_KEY, D_KEY, +2 more");
+		expect(detail).not.toContain("E_KEY");
+	});
+
+	test("a present key or a sign-in is the whole row", () => {
+		expect(authDetail(["ANTHROPIC_API_KEY"], ["ANTHROPIC_API_KEY", "OTHER_KEY"], [])).toBe("ANTHROPIC_API_KEY");
+		expect(authDetail([], ["OTHER_KEY"], ["Claude subscription"])).toBe("Claude subscription");
 	});
 
 	// The probe writes a file to prove the directory is writable, and used to do
@@ -393,6 +408,26 @@ describe("the Network row", () => {
 		expect(row?.status).toBe("warn");
 		expect(row?.detail).toContain(phrase);
 		expect(row?.detail).toContain("HTTP_PROXY/HTTPS_PROXY/ALL_PROXY");
+	});
+
+	test("a missing backend tells the user what to install", async () => {
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(restricted(), cwd, home, "linux", false);
+		expect(row?.status).toBe("warn");
+		expect(row?.detail).toContain("install bubblewrap (bwrap)");
+	});
+
+	test("a sandbox axis that is off names the setting that turns it on", async () => {
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(
+			SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["x.test"], sandbox: "danger-full-access" }),
+			cwd,
+			home,
+			"darwin",
+			true,
+		);
+		expect(row?.status).toBe("warn");
+		expect(row?.detail).toContain("set `sandbox` to workspace-write");
 	});
 
 	test("the ok row says which kernel shape it is, and the two shapes differ", async () => {

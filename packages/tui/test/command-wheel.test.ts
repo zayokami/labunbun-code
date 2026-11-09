@@ -8,7 +8,14 @@
  * difference between pressing ✕ on a command and pressing ✕ on nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { phraseLabel, WHEEL_ROWS, wheelEntries, wheelMove, wheelStart } from "../src/command-wheel.ts";
+import {
+	DESCRIPTION_WIDTH,
+	phraseLabel,
+	WHEEL_ROWS,
+	wheelEntries,
+	wheelMove,
+	wheelStart,
+} from "../src/command-wheel.ts";
 
 const COMMANDS: Array<[string, string]> = [
 	["/help", "Show commands"],
@@ -40,6 +47,19 @@ describe("wheelEntries", () => {
 		expect(phrase.text).toBe("run the tests");
 		// Phrases have no description: the text is the description.
 		expect(phrase.description).toBeUndefined();
+	});
+
+	test("a long command one-liner is cut to one row rather than wrapping", () => {
+		// The window is a fixed five rows and the ring is one entry per row. An
+		// untruncated `/mcp` sentence wrapped its row, pushed the footer off the
+		// box, and hid the entries the user was paging toward.
+		const long = "List, approve, or read MCP servers, prompts, and resources, and keep going";
+		const [entry] = wheelEntries([["/mcp", long]], []);
+		expect(entry.label).toBe("/mcp");
+		expect(entry.description?.length).toBe(DESCRIPTION_WIDTH);
+		expect(entry.description?.endsWith("…")).toBe(true);
+		// A one-liner that already fits is left as written.
+		expect(wheelEntries([["/help", "Show commands"]], [])[0].description).toBe("Show commands");
 	});
 
 	test("an empty ring is a ring with nothing in it, not an undefined one", () => {

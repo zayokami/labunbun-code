@@ -192,14 +192,20 @@ export type WizardProviderRow = "1" | "2" | "3" | "4";
 /**
  * The row that is already true for this machine — Codex's default rule, same
  * shape (`onboarding_screen.rs:169-175`: the sign-in when the account path is
- * the allowed one, the key otherwise). A Claude config on disk means the Claude
- * sign-in, a key variable already in the environment means the API-key row, and
- * a bare machine gets row `1` because a sign-in needs nothing typed.
+ * the allowed one, the key otherwise). A sign-in already on disk means that
+ * sign-in's row: the detection block has just said it is there, and sending the
+ * user through the browser again would contradict the sentence above the
+ * question. Without one, a Claude config on disk means the Claude sign-in, a
+ * key variable already in the environment means the API-key row, and a bare
+ * machine gets row `1` because a sign-in needs nothing typed.
  */
 export function wizardProviderDefault(found: {
 	claudeConfigured: boolean;
 	envKeysPresent: boolean;
+	signIns?: SubscriptionSignIns;
 }): WizardProviderRow {
+	if (found.signIns?.claude) return "1";
+	if (found.signIns?.chatgpt) return "2";
 	if (!found.claudeConfigured && found.envKeysPresent) return "3";
 	return "1";
 }
@@ -491,7 +497,11 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 				"  4. Use another endpoint or gateway         DeepSeek, Kimi, GLM, OpenRouter, a local daemon",
 			].join("\n"),
 			["1", "2", "3", "4"],
-			wizardProviderDefault({ claudeConfigured: sources.includes("claude-code"), envKeysPresent: envKeys.length > 0 }),
+			wizardProviderDefault({
+				claudeConfigured: sources.includes("claude-code"),
+				envKeysPresent: envKeys.length > 0,
+				signIns,
+			}),
 			"1/2/3/4",
 		);
 

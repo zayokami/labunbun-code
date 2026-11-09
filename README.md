@@ -144,7 +144,7 @@ With a spill writer, the tool writes the full text to disk first. The first line
 
 The tool also runs the first step after one hour with no activity. The provider's cache is cold at that moment, so a smaller context costs nothing extra.
 
-Set `trimOldToolResults: false` to skip the first step. Use `/trim` to run the first step on request. Use `/context` to see what the window contains. The indicator counts the system prompt and the tool schemas.
+Set `trimOldToolResults: false` to skip the first step; that key does not stop the summary pass. Set `compaction.enabled: false` to stop both automatic passes. Use `/trim` to run the first step on request. Use `/context` to see what the window contains. The indicator counts the system prompt and the tool schemas.
 
 `/context` shows `Auto-compact` (`on`, `off (settings)`, or `paused after repeated failures`), `Hard limit`, and `Fixed (system + tools)`. The last row warns when the fixed part alone is over the hard limit.
 
@@ -617,10 +617,13 @@ Use these commands in the terminal.
 | `/logout [claude\|chatgpt\|gemini]` | Sign out of a subscription. |
 | `/mode [mode]` | Show the permission mode, or change it. |
 | `/permissions` | Show the permission mode and the rules. |
+| `/yolo [on\|off]` | Turn off the permission gates for this session. A typed phrase confirms it. |
 | `/plan` | Show the plan recorded in this session: its state, its steps, and the full text. |
 | `/doctor` | Check the environment, the settings, and the provider. |
 | `/cost` | Show the cost of this session, then of this project. |
 | `/context` | Show what the context window contains. |
+| `/map [path] [--tokens N]` | Show the ranked repository map. |
+| `/map-refresh [path] [--tokens N]` | Rebuild the repository map from disk. |
 | `/cache` | Show the prompt cache hit rate and its ceiling. |
 | `/compact [focus]` | Summarize the conversation. Warns when the compacted context is still at or over the hard limit, and points at `/trim`. |
 | `/trim` | Replace old tool results with short previews. |
@@ -650,7 +653,7 @@ Use these commands in the terminal.
 | `/beetle [...]` | Run the four-agent band. See [The four-agent band](#the-four-agent-band). |
 | `/yoshi [...]` | Import from another agent tool. See [Import procedure](#import-procedure). |
 | `/init` | Make a `LABUNBUN.md` file for this project. |
-| `/explain <target>` | Ask the model to explain code or a concept. |
+| `/explain [target]` | Ask the model to explain code or a concept. Without a target it explains the code last discussed. |
 | `/hal` | Play a sound. |
 | `/clear` | Clear the display. The session and the model context stay. |
 | `/help` | Show this list. |
@@ -764,7 +767,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `networkAccess` | `enabled`, `restricted` | User |
 | `networkDomains` | An array of strings and objects | User |
 | `trimOldToolResults` | A boolean. The value `true` is the default. | User |
-| `compaction` | An object with the keys `model`, `reserveTokens`, and `thresholdPercent` | User |
+| `compaction` | An object with the keys `enabled`, `model`, `reserveTokens`, and `thresholdPercent` | User |
 | `modelDiscovery` | A boolean. The value `true` is the default. | User |
 | `backgroundShellNotifications` | A boolean. The value `true` is the default. | User |
 | `env` | An object of environment variables | User |

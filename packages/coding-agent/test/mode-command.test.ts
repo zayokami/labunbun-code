@@ -210,7 +210,12 @@ describe("/mode with a name", () => {
 		expect(h.session.permissionMode).toBe("plan");
 		expect(h.session.sandbox).toBe("workspace-write");
 		expect(h.picks).toHaveLength(0);
-		expect(infoTexts(h.store)).toBe(`Usage: /mode ${MODE_CHOICES.map((c) => c.id).join("|")}`);
+		// Ids are what the user types, labels are what every other surface calls
+		// the same rows; a refusal that only printed the ids named no mode a user
+		// could recognise.
+		const ids = MODE_CHOICES.map((c) => c.id).join("|");
+		const labels = MODE_CHOICES.map((c) => c.label).join(", ");
+		expect(infoTexts(h.store)).toBe(`Usage: /mode ${ids} — the modes are ${labels}`);
 	});
 });
 

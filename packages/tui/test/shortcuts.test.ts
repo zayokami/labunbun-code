@@ -74,6 +74,17 @@ describe("hintLine", () => {
 		expect(narrow).not.toContain("Tab queue");
 	});
 
+	test("Tab is named only while it has something to queue", () => {
+		// The buffer is cleared on submit, so right after Enter the busy legend used
+		// to advertise Tab over an empty prompt, where the key does nothing.
+		const empty = hintLine(120, { editor: "none", vimMode: "insert", busy: true, canSteer: true, hasDraft: false });
+		expect(empty).toContain("Enter steer");
+		expect(empty).not.toContain("Tab queue");
+		// Without steering, Enter and Tab queue the same text: one action, one key.
+		const noSteer = hintLine(120, { editor: "none", vimMode: "insert", busy: true, canSteer: false, hasDraft: true });
+		expect(noSteer).not.toContain("Tab queue");
+	});
+
 	test("the mid-run hint keeps the editor's answer for Escape", () => {
 		expect(hintLine(120, { editor: "vim", vimMode: "insert", busy: true })).toContain("Esc normal");
 	});

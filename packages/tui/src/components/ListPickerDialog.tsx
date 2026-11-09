@@ -401,7 +401,7 @@ export function ListPickerDialog({
 				    by a controller is a picker a controller has to be able to leave. */}
 				<Text dimColor>
 					{loadPreview && !query ? (previewOpen ? "space close preview · " : "space preview · ") : ""}
-					type to filter · ↑/↓ select · Enter choose · Esc cancel
+					type to filter · ↑/↓ select · Enter choose · {previewOpen ? "Esc closes preview" : "Esc cancel"}
 					{pad ? " · ✕ choose · ○ cancel" : ""}
 				</Text>
 			</Box>

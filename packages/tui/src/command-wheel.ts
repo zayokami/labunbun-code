@@ -28,9 +28,21 @@ export const WHEEL_ROWS = 5;
 /** Longest a phrase is allowed to be before it is cut, in characters. */
 const PHRASE_WIDTH = 56;
 
+/**
+ * Longest a command's one-liner may run. The ring is one row per entry and the
+ * window is a fixed height; an untruncated `/mcp` sentence wrapped the row,
+ * pushed the footer off the box, and hid entries the user was paging toward.
+ */
+export const DESCRIPTION_WIDTH = 44;
+
 export function wheelEntries(commands: Array<[string, string]>, phrases: readonly string[]): WheelEntry[] {
 	return [
-		...commands.map(([name, description]) => ({ label: name, text: name, kind: "command" as const, description })),
+		...commands.map(([name, description]) => ({
+			label: name,
+			text: name,
+			kind: "command" as const,
+			description: phraseLabel(description, DESCRIPTION_WIDTH),
+		})),
 		...phrases.map((phrase) => ({ label: phraseLabel(phrase), text: phrase, kind: "phrase" as const })),
 	];
 }

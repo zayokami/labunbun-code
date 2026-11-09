@@ -739,6 +739,29 @@ describe("settings diagnostics", () => {
 		});
 	});
 
+	test("the first-run wizard's own record is not an unknown key", () => {
+		// The wizard writes this block once and nothing reads it back. A schema
+		// that did not know the key turned the app's own file into a warning on
+		// every later start — the file was fine; the schema was behind it.
+		withSettingsTiers(
+			{
+				user: {
+					theme: "light",
+					firstRun: {
+						offeredAt: "2026-10-14T08:30:00.000Z",
+						signedIn: { claude: true, chatgpt: false, gemini: false },
+						imported: false,
+					},
+				},
+			},
+			(cwd, home) => {
+				const loaded = loadSettings(cwd, undefined, home);
+				expect(loaded.diagnostics).toEqual([]);
+				expect(loaded.settings.firstRun?.offeredAt).toBe("2026-10-14T08:30:00.000Z");
+			},
+		);
+	});
+
 	test("a tier that does not match the schema is named and left out; the other tiers still apply", () => {
 		withSettingsTiers({ user: { theme: 42 }, project: { vimMode: true } }, (cwd, home) => {
 			const loaded = loadSettings(cwd, undefined, home);

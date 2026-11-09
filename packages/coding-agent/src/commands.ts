@@ -186,7 +186,11 @@ export function completeCommands(commands: Command[], prefix: string): Command[]
 			(c) =>
 				c.name.startsWith(normalized) ||
 				c.name.includes(normalized) ||
-				c.description.toLowerCase().includes(normalized),
+				c.description.toLowerCase().includes(normalized) ||
+				// An alias is a name the user can type. Leaving it out here makes
+				// `/migrate` look like a broken command: Enter dispatches it, and
+				// the picker above the prompt says "No matching commands".
+				c.aliases?.some((alias) => alias.startsWith(normalized) || alias.includes(normalized)),
 		)
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -264,7 +268,7 @@ export function builtInCommands(): Command[] {
 		},
 		{
 			name: "explain",
-			description: "Ask the model to explain code or a concept: /explain <target>",
+			description: "Ask the model to explain code or a concept: /explain [target]",
 			type: "prompt",
 			getPrompt: (args) =>
 				`Explain ${args || "the most recently discussed code"}. Cover what it does, why it is written this way, and any gotchas. Reference specific files and line numbers.`,
