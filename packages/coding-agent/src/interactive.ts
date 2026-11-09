@@ -2218,6 +2218,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// The same store the board tools (and so every member) already write
 		// through — status reads the work, not a copy of it.
 		taskBoard: () => taskStore.summary(),
+		// The dispatcher routes over that same board; with it connected the band
+		// defaults to task-scoped worker sessions.
+		taskStore,
+		context: settings.beetle?.context ?? "task",
 		initialModels: settings.beetle?.models ?? null,
 		maxTurns: settings.beetle?.maxTurns,
 		maxCostUSD: settings.beetle?.maxCostUSD,

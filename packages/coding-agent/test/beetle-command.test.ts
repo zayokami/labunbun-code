@@ -21,6 +21,7 @@ import {
 	type Model,
 	registerOpenAICompatibleProvider,
 } from "@labunbun/ai";
+import { TaskStore } from "@labunbun/tools";
 import { createStore } from "@labunbun/tui";
 import { z } from "zod";
 import { beetleUsage } from "../src/beetle.ts";
@@ -91,6 +92,10 @@ function makeHarness(
 		/** Budget guardrails as the app layer reads them from settings. */
 		maxTurns?: number;
 		maxCostUSD?: number;
+		/** A board for the dispatcher; absent keeps the long-lived `"session"` band. */
+		taskStore?: TaskStore;
+		/** `settings.beetle.context`, passed through as the app does. */
+		context?: "task" | "session";
 		/** Reuse an existing home — the restart in the ledger tests. */
 		home?: string;
 	} = {},
@@ -142,6 +147,8 @@ function makeHarness(
 		noteToolChange: (cause) => toolChanges.push(cause),
 		setStatusCard: (card) => cards.push(card),
 		taskBoard: () => boardTasks,
+		taskStore: options.taskStore,
+		context: options.context,
 		initialModels: options.initial ?? null,
 		maxTurns: options.maxTurns,
 		maxCostUSD: options.maxCostUSD,
@@ -230,6 +237,51 @@ describe("starting a band", () => {
 		expect(harness.notices.some((line) => line.startsWith("Band on stage"))).toBe(true);
 		// The four briefings went out through the bus, each with a relay line.
 		expect(harness.notices.filter((line) => line.includes("you →"))).toHaveLength(4);
+	});
+
+	test("the board path keeps the main session out of the bus and leaves the human channels open", async () => {
+		const store = new TaskStore();
+		const harness = makeHarness({
+			initial: { john: "session", paul: "session", george: "session", ringo: "session" },
+			taskStore: store,
+		});
+		harness.surface.start("board task");
+		await tick();
+
+		// No main-session tool and no tool-block change: on the board path the
+		// band speaks through the board, not to the main conversation.
+		expect(harness.bandToolNames()).toEqual([]);
+		expect(harness.toolChanges).toEqual([]);
+		// The start became a lead task on the board, owned by John.
+		expect(store.list()).toHaveLength(1);
+		expect(store.list()[0]).toMatchObject({ owner: "john", kind: "plan", status: "in_progress" });
+
+		// The human's two channels are not the band's: both still reach a seat.
+		harness.surface.say("john", "check the plan");
+		expect(harness.notices).toContain("[beetle] you → John: check the plan");
+		expect(harness.surface.handleMention("@john and this")).toBe(true);
+		expect(harness.notices).toContain("[beetle] you → John: and this");
+
+		harness.surface.stop();
+		expect(harness.bandToolNames()).toEqual([]);
+	});
+
+	test("an explicit session context keeps the long-lived band even with a board connected", async () => {
+		const store = new TaskStore();
+		const harness = makeHarness({
+			initial: { john: "session", paul: "session", george: "session", ringo: "session" },
+			taskStore: store,
+			context: "session",
+		});
+		harness.surface.start("long-lived");
+		await tick();
+
+		// The main session carries the bus tool again, and nothing was routed
+		// through the board: the user asked for the old shape.
+		expect(harness.bandToolNames()).toEqual(["BandMessage"]);
+		expect(harness.toolChanges).toEqual(["beetle: band tool added"]);
+		expect(store.list()).toHaveLength(0);
+		harness.surface.stop();
 	});
 
 	test("a cancel at any step starts nothing and saves nothing", async () => {

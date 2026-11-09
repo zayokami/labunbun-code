@@ -12,9 +12,11 @@
  */
 import type { AgentSession, AnyTool, NetworkAxis, PermissionMode, PermissionRule, SandboxMode } from "@labunbun/agent";
 import type { Model, StreamFn, ThinkingLevel } from "@labunbun/ai";
+import type { TaskStore } from "@labunbun/tools";
 import {
 	BAND_LINE_PREVIEW_CHARS,
 	BeetleBand,
+	type BeetleContext,
 	type BeetleMember,
 	type BeetleModels,
 	type BeetlePickOption,
@@ -121,6 +123,13 @@ export interface BeetleSurfaceDeps {
 	setStatusCard?: (card: BeetleStatusCard) => void;
 	/** The shared task board, read at the call — `TaskStore.summary()` in the app. */
 	taskBoard?: () => BoardTask[];
+	/**
+	 * The board itself, for the dispatcher. Absent leaves the band on the
+	 * long-lived `"session"` context: there is nothing to claim tasks from.
+	 */
+	taskStore?: TaskStore;
+	/** `settings.beetle.context`; defaults to `"task"` when a board is connected. */
+	context?: BeetleContext;
 	/** The seeded config from settings; null = never configured. */
 	initialModels: Partial<BeetleModels> | null;
 	/** Per-run turn cap for every member (settings.beetle.maxTurns); undefined = unbounded. */
@@ -320,6 +329,8 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 		const next = new BeetleBand({
 			models,
 			cwd: deps.cwd,
+			taskStore: deps.taskStore,
+			context: deps.context,
 			streamFn: deps.streamFn,
 			allTools: deps.allTools,
 			mcpTools: deps.mcpTools,
@@ -347,8 +358,12 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			getPermissionRules: deps.getPermissionRules,
 		});
 		band = next;
+		// On the board path the main session carries no send tool: the human's
+		// `/beetle say` and `@john` are the intervention channels, and a model-
+		// driven main session messaging members would be one more conversation
+		// the blackboard exists to remove.
 		const session = deps.getSession();
-		if (session) {
+		if (session && next.context === "session") {
 			session.setTools([...session.tools, next.mainTool]);
 			deps.noteToolChange("beetle: band tool added");
 		}

@@ -1726,3 +1726,279 @@ describe("the book-keeping snapshot", () => {
 		expect(() => band.off()).not.toThrow();
 	});
 });
+
+// ---------------------------------------------------------------------------
+// The blackboard path: task-scoped sessions, cards, and the star topology
+// ---------------------------------------------------------------------------
+
+interface BoardBand {
+	band: BeetleBand;
+	store: TaskStore;
+	faux: RoutedFaux;
+	notices: string[];
+	reports: string[];
+}
+
+/**
+ * A band on the board path. Distinct model ids per seat, the way the bus tests
+ * do it: four sessions share one faux provider otherwise, and the scripts would
+ * interleave. Every seat gets a script even when a test wakes only some of
+ * them, so a stray wake is a failed assertion rather than a crash.
+ */
+function makeBoardBand(options: { script: Record<string, FauxStep[]>; store?: TaskStore }): BoardBand {
+	const store = options.store ?? new TaskStore();
+	const faux = routedFaux(options.script);
+	const refs = memberRefTable();
+	const notices: string[] = [];
+	const reports: string[] = [];
+	const band = new BeetleBand({
+		models: { john: "faux/john", paul: "faux/paul", george: "faux/george", ringo: "faux/ringo" },
+		cwd: process.cwd(),
+		context: "task",
+		taskStore: store,
+		streamFn: faux.streamFn,
+		allTools: createTaskTools(store),
+		model: () => FAUX_MODEL,
+		resolveModel: (ref) => refs.get(ref),
+		canRunModel: () => true,
+		onNotice: (text) => notices.push(text),
+		report: (text) => reports.push(text),
+		getPermissionRules: () => [],
+		// The watchdog is not what these tests are about; a timer per test would
+		// only add noise to the run.
+		stallNoticeMs: 0,
+	});
+	return { band, store, faux, notices, reports };
+}
+
+describe("the blackboard band", () => {
+	test("a start puts one lead task on the board and wakes only John", async () => {
+		const { band, store, faux } = makeBoardBand({
+			script: {
+				john: [{ text: "JOHN" }],
+				paul: [{ text: "idle" }],
+				george: [{ text: "idle" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+		band.start("ship the parser");
+
+		await until(() => faux.calls("john").length === 1);
+		const lead = store.list();
+		expect(lead).toHaveLength(1);
+		expect(lead[0]).toMatchObject({ owner: "john", kind: "plan", status: "in_progress" });
+		expect(lead[0]?.description).toBe("ship the parser");
+		// The card, plus the lead instruction: the split is a board write.
+		expect(faux.calls("john")[0]).toContain("[blackboard] Task #1");
+		expect(faux.calls("john")[0]).toContain("You hold the lead.");
+		// Nobody else was started.
+		expect(band.memberSession("paul")).toBeUndefined();
+		expect(band.memberSession("george")).toBeUndefined();
+		expect(band.memberSession("ringo")).toBeUndefined();
+		band.off();
+	});
+
+	test("a task John creates wakes its owner with a card, and completion destroys the session", async () => {
+		const { band, store, faux } = makeBoardBand({
+			script: {
+				john: [
+					{
+						toolCalls: [
+							{
+								name: "TaskCreate",
+								arguments: {
+									subject: "write the parser",
+									description: "Implement the parser.",
+									owner: "paul",
+									kind: "implement",
+									acceptance: "the suite passes",
+								},
+							},
+						],
+					},
+					{ text: "assigned" },
+					{
+						toolCalls: [
+							{
+								name: "TaskCreate",
+								arguments: {
+									subject: "write the lexer",
+									description: "Implement the lexer.",
+									owner: "paul",
+									kind: "implement",
+									acceptance: "lexer tests pass",
+								},
+							},
+						],
+					},
+					{ text: "assigned again" },
+				],
+				paul: [
+					{ toolCalls: [{ name: "TaskUpdate", arguments: { taskId: "2", status: "completed" } }] },
+					{ text: "done" },
+					{ toolCalls: [{ name: "TaskUpdate", arguments: { taskId: "3", status: "completed" } }] },
+					{ text: "done again" },
+				],
+				george: [{ text: "idle" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+		band.start("ship the parser");
+
+		// Paul is woken with the card, not with a message from John.
+		await until(() => store.get("2")?.status === "completed", 5_000);
+		expect(faux.calls("paul")[0]).toContain("[blackboard] Task #2");
+		expect(faux.calls("paul")[0]).toContain("the suite passes");
+		expect(faux.calls("paul")[0]).not.toContain("From: John");
+
+		// The terminal task destroys the worker's conversation.
+		await until(() => band.memberSession("paul") === undefined, 5_000);
+		expect(band.status().find((entry) => entry.name === "paul")?.messages).toBe(0);
+		expect(band.status().find((entry) => entry.name === "paul")?.turns).toBeGreaterThan(0);
+
+		// The next task starts from its own card: nothing from the first one.
+		await until(() => faux.calls("john").length >= 2, 5_000);
+		band.deliver({ kind: "user" }, "john", "next");
+		await until(() => store.get("3") !== undefined, 5_000);
+		await until(() => store.get("3")?.status === "completed", 5_000);
+		const second = faux.calls("paul").at(-1) ?? "";
+		expect(second).toContain("lexer tests pass");
+		expect(second).not.toContain("the suite passes");
+		expect(second).not.toContain("write the parser");
+		band.off();
+	});
+
+	test("workers address John only, once per task; John has no send tool", async () => {
+		const { band, store, faux } = makeBoardBand({
+			script: {
+				john: [{ text: "answered" }],
+				paul: [{ text: "working" }],
+				george: [{ text: "idle" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+		// A task handed straight to Paul: John is not needed to claim it.
+		store.create("investigate the parser", "d", undefined, "paul", [], { kind: "research" });
+		await until(() => band.memberSession("paul") !== undefined && faux.calls("paul").length === 1);
+
+		const paul = sessionOf(band, "paul");
+		const tool = toolNamed(paul, "BandMessage");
+		// The schema names one target; a peer call would not validate.
+		expect(tool.inputSchema.safeParse({ to: "george", message: "peer?" }).success).toBe(false);
+		expect(tool.inputSchema.safeParse({ to: "john", message: "which module?" }).success).toBe(true);
+
+		const first = await tool.call({ to: "john", message: "which module?" }, callCtx());
+		expect(first.isError).toBeFalsy();
+		const second = await tool.call({ to: "john", message: "still there?" }, callCtx());
+		expect(second.isError).toBe(true);
+		expect(text(second)).toContain("one clarification per task");
+
+		// The delivery layer enforces the same star even when called directly.
+		const peer = band.deliver({ kind: "member", name: "paul" }, "george", "hi");
+		expect(peer.ok).toBe(false);
+		expect(peer.receipts[0]?.reason).toContain("John only");
+		const fromJohn = band.deliver({ kind: "member", name: "john" }, "paul", "go");
+		expect(fromJohn.ok).toBe(false);
+		expect(fromJohn.receipts[0]?.reason).toContain("board");
+
+		// John carries no send tool at all.
+		expect(sessionOf(band, "john").tools.map((candidate) => candidate.name)).not.toContain("BandMessage");
+
+		// The human's channel is not a worker's: it still reaches a seat.
+		expect(band.deliver({ kind: "user" }, "george", "look at this").ok).toBe(true);
+		band.off();
+	});
+
+	test("a board write under a running worker wakes it again with the edited card", async () => {
+		// Paul ends his run with the task open, waiting on a clarification; John's
+		// edit is the answer, and the revision is what wakes him.
+		const { band, store, faux } = makeBoardBand({
+			script: {
+				john: [{ text: "edited" }],
+				paul: [{ text: "waiting" }],
+				george: [{ text: "idle" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+		store.create("ambiguous", "d", undefined, "paul", [], { kind: "implement" });
+		await until(() => faux.calls("paul").length === 1);
+		await until(() => band.status().find((entry) => entry.name === "paul")?.state === "idle");
+
+		store.update("1", { acceptance: "use the strict parser" });
+		await until(() => faux.calls("paul").length === 2, 5_000);
+		expect(faux.calls("paul")[1]).toContain("use the strict parser");
+		band.off();
+	});
+
+	test("one clarification per task survives a continuation wake", async () => {
+		// The worker asks once, ends its run with the task open, and is woken
+		// again by John's edit. The second run may not spend a second question:
+		// the budget belongs to the task execution, not to one run of it.
+		const { band, store, faux } = makeBoardBand({
+			script: {
+				john: [{ text: "answer on the board" }],
+				paul: [
+					{ toolCalls: [{ name: "BandMessage", arguments: { to: "john", message: "which parser?" } }] },
+					{ text: "waiting" },
+					{ toolCalls: [{ name: "BandMessage", arguments: { to: "john", message: "again?" } }] },
+					{ text: "still waiting" },
+				],
+				george: [{ text: "idle" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+		store.create("ambiguous", "d", undefined, "paul", [], { kind: "implement" });
+		await until(() => faux.calls("john").length === 1);
+		await until(() => band.status().find((entry) => entry.name === "paul")?.state === "idle");
+
+		store.update("1", { acceptance: "the strict parser" });
+		await until(() => faux.calls("paul").length >= 4, 5_000);
+		// The refusal rides back in the request after the second call.
+		expect(faux.calls("paul")[3]).toContain("one clarification per task");
+		band.off();
+	});
+
+	test("the task-mode persona speaks the board, not the relay", () => {
+		const task = memberSystemPrompt("john", "task");
+		expect(task).toContain("The board is the record and the only handoff");
+		expect(task).toContain("One BandMessage to John per task");
+		expect(task).toContain("a task on the board for Paul");
+		expect(task).not.toContain("messages are the wake-up");
+		expect(task).not.toContain("Reply with the BandMessage tool");
+		// The long-lived shape still reads as it did.
+		const session = memberSystemPrompt("john");
+		expect(session).toContain("messages are the wake-up");
+		expect(session).toContain("a BandMessage to Paul");
+	});
+
+	test("a task context with no board cannot route, so the band stays long-lived", async () => {
+		const faux = routedFaux({
+			john: [{ text: "JOHN" }],
+			paul: [{ text: "PAUL" }],
+			george: [{ text: "GEORGE" }],
+			ringo: [{ text: "RINGO" }],
+		});
+		const refs = memberRefTable();
+		const band = new BeetleBand({
+			models: { john: "faux/john", paul: "faux/paul", george: "faux/george", ringo: "faux/ringo" },
+			cwd: process.cwd(),
+			context: "task",
+			streamFn: faux.streamFn,
+			allTools: [],
+			model: () => FAUX_MODEL,
+			resolveModel: (ref) => refs.get(ref),
+			canRunModel: () => true,
+			getPermissionRules: () => [],
+			stallNoticeMs: 0,
+		});
+		// The explicit request cannot be honoured without a dispatcher: the band
+		// falls back rather than running a hybrid with half the board contract.
+		expect(band.context).toBe("session");
+		band.start("no board here");
+		// The long-lived shape follows: all four start, and John keeps the bus.
+		expect(sessionOf(band, "john").tools.map((tool) => tool.name)).toContain("BandMessage");
+		await until(() => faux.calls("paul").length === 1);
+		expect(faux.calls("john")[0]).toContain("You hold the lead.");
+		band.off();
+	});
+});

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createTaskTools, TASK_BOARD_TOOL_NAMES, TaskStore } from "../src/tasks.ts";
+import { createTaskTools, TASK_BOARD_TOOL_NAMES, type TaskChange, TaskStore } from "../src/tasks.ts";
 
 const NO_CTX = {
 	callId: "t1",
@@ -191,5 +191,104 @@ describe("task tools", () => {
 			.map((t) => t.name)
 			.sort();
 		expect(names).toEqual([...TASK_BOARD_TOOL_NAMES].sort());
+	});
+});
+
+describe("the blackboard fields", () => {
+	test("create carries the extras, copied rather than aliased", () => {
+		const store = new TaskStore();
+		const files = ["packages/tools/src/tasks.ts"];
+		const task = store.create("verify the store", "d", undefined, "george", [], {
+			kind: "verify",
+			acceptance: "the suite is green",
+			files,
+			commands: ["bun test"],
+			createdBy: "john",
+		});
+
+		expect(task).toMatchObject({
+			kind: "verify",
+			acceptance: "the suite is green",
+			files: ["packages/tools/src/tasks.ts"],
+			commands: ["bun test"],
+			createdBy: "john",
+			attempts: 0,
+			rev: 0,
+		});
+		files.push("elsewhere.ts");
+		expect(task.files).toEqual(["packages/tools/src/tasks.ts"]);
+	});
+
+	test("a derived task inherits the repair count it came from", () => {
+		const store = new TaskStore();
+		store.create("verify", "d", undefined, "george", [], { kind: "verify" });
+		store.update("1", { attempts: 2 });
+
+		const fix = store.create("fix it", "d", undefined, "paul", [], { kind: "fix", parent: "1", createdBy: "george" });
+		expect(fix.attempts).toBe(2);
+		expect(fix.parent).toBe("1");
+	});
+
+	test("every update bumps rev and moves updatedAt", () => {
+		const store = new TaskStore();
+		const task = store.create("a", "d");
+		expect(task.rev).toBe(0);
+		expect(task.updatedAt).toBe(task.createdAt);
+
+		store.update(task.id, { status: "in_progress" });
+		expect(task.rev).toBe(1);
+		store.update(task.id, { addBlockedBy: ["99"] });
+		expect(task.rev).toBe(2);
+		expect(task.updatedAt).toBeGreaterThanOrEqual(task.createdAt);
+	});
+
+	test("the change record names the task as it was", () => {
+		const store = new TaskStore();
+		const changes: TaskChange[] = [];
+		store.subscribe((change) => changes.push(change));
+		store.create("a", "d");
+		store.update("1", { status: "completed", verdict: "passed" });
+
+		expect(changes[0]?.type).toBe("create");
+		const change = changes[1];
+		expect(change?.type).toBe("update");
+		if (change?.type !== "update") throw new Error("expected an update change");
+		expect(change.task.status).toBe("completed");
+		expect(change.task.verdict).toBe("passed");
+		expect(change.previous.status).toBe("pending");
+		expect(change.previous.verdict).toBeUndefined();
+	});
+
+	test("the board text shows the blackboard facts and bounds a long error", async () => {
+		const store = new TaskStore();
+		store.create("verify the store", "d", undefined, "george", [], {
+			kind: "verify",
+			acceptance: "the suite is green",
+			files: ["packages/tools/src/tasks.ts"],
+			commands: ["bun test"],
+		});
+		store.update("1", { verdict: "failed", attempts: 1, errorSummary: `${"x".repeat(5000)} the tail` });
+
+		const got = await toolByName("TaskGet", store).call({ taskId: "1" }, NO_CTX);
+		const text = (got.content[0] as any).text as string;
+		expect(text).toContain("[verify · verdict: failed · attempts: 1]");
+		expect(text).toContain("acceptance: the suite is green");
+		expect(text).toContain("files: packages/tools/src/tasks.ts");
+		expect(text).toContain("commands: bun test");
+		expect(text).toContain("last failure:");
+		expect(text).toContain("the tail");
+		// The bounded cut, not the full 5,000 characters.
+		expect(text.length).toBeLessThan(1500);
+	});
+
+	test("TaskUpdate records a verdict and an error summary", async () => {
+		const store = new TaskStore();
+		store.create("verify", "d");
+		await toolByName("TaskUpdate", store).call(
+			{ taskId: "1", verdict: "failed", errorSummary: "[exit code: 1] boom" },
+			NO_CTX,
+		);
+		expect(store.get("1")?.verdict).toBe("failed");
+		expect(store.get("1")?.errorSummary).toBe("[exit code: 1] boom");
 	});
 });

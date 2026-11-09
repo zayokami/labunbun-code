@@ -392,6 +392,12 @@ export const SettingsSchema = z.object({
 	beetle: z
 		.object({
 			models: z.record(z.string(), z.string()).optional(),
+			/**
+			 * How long a worker's conversation lives. `"task"` is the blackboard
+			 * default — the session is created when a task is claimed and destroyed
+			 * when it completes; `"session"` keeps the old long-lived conversation.
+			 */
+			context: z.enum(["task", "session"]).optional(),
 			maxTurns: z.number().int().positive().optional(),
 			maxCostUSD: z.number().positive().optional(),
 			stallNoticeMinutes: z.number().int().nonnegative().optional(),

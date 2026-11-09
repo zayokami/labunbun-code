@@ -116,7 +116,18 @@ export {
 // tool would have built.
 export { workspacePolicy } from "./sandbox/workspace-policy.ts";
 export { createInspectSourceMapTool } from "./sourcemap.ts";
-export { type AgentTask, createTaskTools, TASK_BOARD_TOOL_NAMES, type TaskStatus, TaskStore } from "./tasks.ts";
+export {
+	type AgentTask,
+	createTaskTools,
+	TASK_BOARD_TOOL_NAMES,
+	type TaskChange,
+	type TaskExtras,
+	type TaskKind,
+	type TaskRun,
+	type TaskStatus,
+	TaskStore,
+	type TaskVerdict,
+} from "./tasks.ts";
 export {
 	createWebFetchTool,
 	createWebSearchTool,

@@ -97,13 +97,41 @@ export function writeTaskSnapshot(session: SessionStore, tasks: AgentTask[]): vo
 }
 
 const TASK_STATUSES = ["pending", "in_progress", "completed"];
+const TASK_KINDS = ["plan", "implement", "verify", "build", "research", "fix", "escalate", "report"];
+const TASK_VERDICTS = ["passed", "failed"];
+
+/** Optional string fields: absent is fine, present must be a string. */
+function optionalString(value: unknown): boolean {
+	return value === undefined || typeof value === "string";
+}
+
+function optionalStringArray(value: unknown): boolean {
+	return value === undefined || (Array.isArray(value) && value.every((item) => typeof item === "string"));
+}
+
+/** A recorded run is the one place a file could carry more than a task's own text. */
+function isTaskRun(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false;
+	const run = value as Record<string, unknown>;
+	return (
+		typeof run.command === "string" &&
+		(run.exitCode === null || typeof run.exitCode === "number") &&
+		typeof run.summary === "string" &&
+		typeof run.at === "number" &&
+		optionalString(run.by)
+	);
+}
 
 /**
  * A snapshot is data read back from a file, so it is checked rather than trusted.
  *
  * The status especially: it is a key into the label tables, and a status this
  * build does not know would render as `undefined` in the strip and in
- * `TaskList` — a task list that lies about its own state.
+ * `TaskList` — a task list that lies about its own state. The blackboard fields
+ * are checked the same way, and a malformed one refuses the snapshot rather
+ * than restoring a task whose `kind` or `verdict` would be read as a routing or
+ * completion fact it never was. A field this build does not know is left alone:
+ * snapshots outlive builds.
  */
 function isTaskList(value: unknown): value is AgentTask[] {
 	if (!Array.isArray(value)) return false;
@@ -118,7 +146,21 @@ function isTaskList(value: unknown): value is AgentTask[] {
 			typeof candidate.status === "string" &&
 			TASK_STATUSES.includes(candidate.status) &&
 			Array.isArray(candidate.blockedBy) &&
-			candidate.blockedBy.every((id) => typeof id === "string")
+			candidate.blockedBy.every((id) => typeof id === "string") &&
+			(candidate.kind === undefined || TASK_KINDS.includes(candidate.kind)) &&
+			(candidate.verdict === undefined || TASK_VERDICTS.includes(candidate.verdict)) &&
+			optionalString(candidate.acceptance) &&
+			optionalString(candidate.errorSummary) &&
+			optionalString(candidate.fixes) &&
+			optionalString(candidate.fixedBy) &&
+			optionalString(candidate.parent) &&
+			optionalString(candidate.createdBy) &&
+			optionalStringArray(candidate.files) &&
+			optionalStringArray(candidate.commands) &&
+			(candidate.runs === undefined || (Array.isArray(candidate.runs) && candidate.runs.every(isTaskRun))) &&
+			(candidate.attempts === undefined || typeof candidate.attempts === "number") &&
+			(candidate.rev === undefined || typeof candidate.rev === "number") &&
+			(candidate.updatedAt === undefined || typeof candidate.updatedAt === "number")
 		);
 	});
 }

@@ -4,11 +4,46 @@
  * track multi-step work; the UI subscribes to the store for the progress strip.
  */
 
-import { type AnyTool, buildTool } from "@labunbun/agent";
+import { type AnyTool, buildTool, cutText } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 
 export type TaskStatus = "pending" | "in_progress" | "completed";
+
+/** What a task is for. The blackboard's dispatcher routes by kind when no owner is named. */
+export type TaskKind = "plan" | "implement" | "verify" | "build" | "research" | "fix" | "escalate" | "report";
+
+/** The outcome a build/verify task leaves behind. `failed` is terminal but not satisfied. */
+export type TaskVerdict = "passed" | "failed";
+
+/**
+ * One command's outcome: the environment's trace, not a member's account of it.
+ *
+ * `summary` is a `cutText` result, so it keeps the spill pointer and both ends
+ * of the output. The full text lives behind that pointer; copying it onto the
+ * board would make every later wake pay for it.
+ */
+export interface TaskRun {
+	command: string;
+	/** Null when the result carried no exit code (a non-Bash tool, a killed run). */
+	exitCode: number | null;
+	summary: string;
+	at: number;
+	by?: string;
+}
+
+/** What a creator may add to a task beyond subject, description and the original fields. */
+export interface TaskExtras {
+	kind?: TaskKind;
+	acceptance?: string;
+	files?: string[];
+	commands?: string[];
+	createdBy?: string;
+	/** The task this one was derived from; `attempts` is inherited from it. */
+	parent?: string;
+	/** System-set for a fix task: the failing task's count plus one. */
+	attempts?: number;
+}
 
 export interface AgentTask {
 	id: string;
@@ -21,20 +56,65 @@ export interface AgentTask {
 	owner?: string;
 	blockedBy: string[];
 	createdAt: number;
+	// -- The blackboard fields. All optional so a snapshot written before them still reads.
+	kind?: TaskKind;
+	/** What "done" means, in terms a verifier can check. */
+	acceptance?: string;
+	/** The files or areas the task touches; the dispatcher's conflict key. */
+	files?: string[];
+	/** Commands a build/verify task declares; only these become evidence. */
+	commands?: string[];
+	/** Bounded environment traces, newest last. */
+	runs?: TaskRun[];
+	errorSummary?: string;
+	verdict?: TaskVerdict;
+	/** Repair rounds spent on this task. */
+	attempts?: number;
+	/** On a fix task, the task it repairs. */
+	fixes?: string;
+	/** Set when a fix task repaired this one. */
+	fixedBy?: string;
+	/** On a worker-derived task, the task it came from. */
+	parent?: string;
+	createdBy?: string;
+	/** Bumped by every store write; the dispatcher's wake key. */
+	rev?: number;
+	updatedAt?: number;
+}
+
+/** What a `subscribe` listener is told. A listener written before this existed ignores the argument. */
+export type TaskChange =
+	| { type: "create"; task: AgentTask }
+	| { type: "update"; task: AgentTask; previous: AgentTask }
+	| { type: "restore" };
+
+/** A copy deep enough that a listener cannot reach the store's arrays. */
+function cloneTask(task: AgentTask): AgentTask {
+	return {
+		...task,
+		blockedBy: [...task.blockedBy],
+		files: task.files ? [...task.files] : undefined,
+		commands: task.commands ? [...task.commands] : undefined,
+		runs: task.runs?.map((run) => ({ ...run })),
+	};
 }
 
 export class TaskStore {
 	readonly #tasks = new Map<string, AgentTask>();
-	readonly #listeners = new Set<() => void>();
+	readonly #listeners = new Set<(change: TaskChange) => void>();
 	#counter = 0;
 
-	subscribe(listener: () => void): () => void {
+	/**
+	 * `listener` receives the change that woke it. A zero-argument callback is
+	 * still assignable, which is what keeps the strip's subscription as it was.
+	 */
+	subscribe(listener: (change: TaskChange) => void): () => void {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
 	}
 
-	#notify(): void {
-		for (const listener of this.#listeners) listener();
+	#notify(change: TaskChange): void {
+		for (const listener of this.#listeners) listener(change);
 	}
 
 	create(
@@ -43,8 +123,13 @@ export class TaskStore {
 		activeForm?: string,
 		owner?: string,
 		blockedBy: string[] = [],
+		extras: TaskExtras = {},
 	): AgentTask {
 		this.#counter += 1;
+		const now = Date.now();
+		// A worker-derived task continues the count of the task it came from: a
+		// repair chain must not restart the ceiling by writing a new task.
+		const inherited = extras.parent === undefined ? undefined : this.#tasks.get(extras.parent)?.attempts;
 		const task: AgentTask = {
 			id: String(this.#counter),
 			subject,
@@ -53,10 +138,19 @@ export class TaskStore {
 			activeForm,
 			owner,
 			blockedBy: [...new Set(blockedBy)],
-			createdAt: Date.now(),
+			createdAt: now,
+			kind: extras.kind,
+			acceptance: extras.acceptance,
+			files: extras.files ? [...extras.files] : undefined,
+			commands: extras.commands ? [...extras.commands] : undefined,
+			attempts: extras.attempts ?? inherited ?? 0,
+			parent: extras.parent,
+			createdBy: extras.createdBy,
+			rev: 0,
+			updatedAt: now,
 		};
 		this.#tasks.set(task.id, task);
-		this.#notify();
+		this.#notify({ type: "create", task });
 		return task;
 	}
 
@@ -70,18 +164,54 @@ export class TaskStore {
 
 	update(
 		id: string,
-		patch: Partial<Pick<AgentTask, "subject" | "description" | "status" | "activeForm" | "owner">> & {
+		patch: Partial<
+			Pick<
+				AgentTask,
+				| "subject"
+				| "description"
+				| "status"
+				| "activeForm"
+				| "owner"
+				| "kind"
+				| "acceptance"
+				| "files"
+				| "commands"
+				| "runs"
+				| "errorSummary"
+				| "verdict"
+				| "attempts"
+				| "fixes"
+				| "fixedBy"
+				| "parent"
+				| "createdBy"
+			>
+		> & {
 			addBlockedBy?: string[];
 			removeBlockedBy?: string[];
 		},
 	): AgentTask | undefined {
 		const task = this.#tasks.get(id);
 		if (!task) return undefined;
+		// The change record carries the task as it was, so a listener can name
+		// what moved without keeping its own copy of the board.
+		const previous = cloneTask(task);
 		if (patch.subject !== undefined) task.subject = patch.subject;
 		if (patch.description !== undefined) task.description = patch.description;
 		if (patch.status !== undefined) task.status = patch.status;
 		if (patch.activeForm !== undefined) task.activeForm = patch.activeForm;
 		if (patch.owner !== undefined) task.owner = patch.owner;
+		if (patch.kind !== undefined) task.kind = patch.kind;
+		if (patch.acceptance !== undefined) task.acceptance = patch.acceptance;
+		if (patch.files !== undefined) task.files = [...patch.files];
+		if (patch.commands !== undefined) task.commands = [...patch.commands];
+		if (patch.runs !== undefined) task.runs = patch.runs.map((run) => ({ ...run }));
+		if (patch.errorSummary !== undefined) task.errorSummary = patch.errorSummary;
+		if (patch.verdict !== undefined) task.verdict = patch.verdict;
+		if (patch.attempts !== undefined) task.attempts = patch.attempts;
+		if (patch.fixes !== undefined) task.fixes = patch.fixes;
+		if (patch.fixedBy !== undefined) task.fixedBy = patch.fixedBy;
+		if (patch.parent !== undefined) task.parent = patch.parent;
+		if (patch.createdBy !== undefined) task.createdBy = patch.createdBy;
 		// Removal runs before addition, so an id named in both lists ends present.
 		if (patch.removeBlockedBy) {
 			const remove = new Set(patch.removeBlockedBy);
@@ -92,7 +222,9 @@ export class TaskStore {
 				if (!task.blockedBy.includes(dep)) task.blockedBy.push(dep);
 			}
 		}
-		this.#notify();
+		task.rev = (task.rev ?? 0) + 1;
+		task.updatedAt = Date.now();
+		this.#notify({ type: "update", task, previous });
 		return task;
 	}
 
@@ -108,17 +240,30 @@ export class TaskStore {
 	}
 
 	// Long-form design notes: docs/dev/tools.md
-	/** Replace the whole list with a list that was saved somewhere. */
+	/**
+	 * Replace the whole list with a list that was saved somewhere.
+	 *
+	 * The blackboard fields are defaulted rather than trusted: a snapshot
+	 * written before they existed has none, and a task with an undefined `rev`
+	 * would make the dispatcher's wake dedupe compare against nothing.
+	 */
 	restore(tasks: AgentTask[]): void {
 		this.#tasks.clear();
-		for (const task of tasks) this.#tasks.set(task.id, { ...task, blockedBy: [...task.blockedBy] });
+		for (const task of tasks) {
+			this.#tasks.set(task.id, {
+				...cloneTask(task),
+				attempts: task.attempts ?? 0,
+				rev: task.rev ?? 0,
+				updatedAt: task.updatedAt ?? task.createdAt,
+			});
+		}
 		this.#counter = tasks.reduce((highest, task) => Math.max(highest, Number(task.id) || 0), 0);
-		this.#notify();
+		this.#notify({ type: "restore" });
 	}
 
 	/** Every field of every task, as a copy, for saving. `summary` is for display. */
 	snapshot(): AgentTask[] {
-		return this.list().map((task) => ({ ...task, blockedBy: [...task.blockedBy] }));
+		return this.list().map(cloneTask);
 	}
 }
 
@@ -128,10 +273,31 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 	completed: "completed",
 };
 
+/**
+ * The board's text form: what the task is, what done means, and the
+ * environment's last word on it. The error cut is bounded here as well as at
+ * record time, so one oversized entry cannot make every later `TaskList` pay
+ * for it.
+ */
 function formatTask(task: AgentTask): string {
 	const owner = task.owner ? ` (${task.owner})` : "";
 	const deps = task.blockedBy.length > 0 ? ` (blocked by: ${task.blockedBy.join(", ")})` : "";
-	return `#${task.id} [${STATUS_LABEL[task.status]}]${owner} ${task.subject}${deps}\n    ${task.description}`;
+	const lines = [
+		`#${task.id} [${STATUS_LABEL[task.status]}]${owner} ${task.subject}${deps}`,
+		`    ${task.description}`,
+	];
+	const facts: string[] = [];
+	if (task.kind) facts.push(task.kind);
+	if (task.verdict) facts.push(`verdict: ${task.verdict}`);
+	if (task.attempts) facts.push(`attempts: ${task.attempts}`);
+	if (task.fixes) facts.push(`fixes #${task.fixes}`);
+	if (task.fixedBy) facts.push(`fixed by #${task.fixedBy}`);
+	if (facts.length > 0) lines.push(`    [${facts.join(" · ")}]`);
+	if (task.acceptance) lines.push(`    acceptance: ${task.acceptance}`);
+	if (task.files?.length) lines.push(`    files: ${task.files.join(", ")}`);
+	if (task.commands?.length) lines.push(`    commands: ${task.commands.join(", ")}`);
+	if (task.errorSummary) lines.push(`    last failure: ${cutText(task.errorSummary, 600)}`);
+	return lines.join("\n");
 }
 
 /** The four board tools' names, in one place — the band filters tool tables by them. */
@@ -163,13 +329,35 @@ export function createTaskTools(store: TaskStore): AnyTool[] {
 			activeForm: z.string().optional().describe("Present-continuous form shown while running, e.g. 'Running tests'"),
 			owner: z.string().optional().describe("Who is on the hook for this task, e.g. a band member's name"),
 			blockedBy: z.array(z.string()).optional().describe("Task ids that must complete before this one"),
+			kind: z
+				.enum(["plan", "implement", "verify", "build", "research", "fix", "escalate", "report"])
+				.optional()
+				.describe("What the task is for; the dispatcher routes by it"),
+			acceptance: z.string().optional().describe("What done looks like, in terms a verifier can check"),
+			files: z
+				.array(z.string())
+				.optional()
+				.describe("Files or areas this task touches; overlapping tasks are not run together"),
+			commands: z
+				.array(z.string())
+				.optional()
+				.describe("On a verify/build task, the commands whose exit codes decide the verdict"),
+			createdBy: z.string().optional().describe("Who wrote this task"),
+			parent: z.string().optional().describe("On a derived task, the task it came from"),
 		}),
 		prompt:
 			"- Create tasks BEFORE starting multi-step work; keep exactly one task in_progress while work is underway;\n" +
 			"  mark a task completed IMMEDIATELY after finishing, and only when the work is actually done and verified.",
 		isConcurrencySafe: () => false,
 		call: async (input) => {
-			const task = store.create(input.subject, input.description, input.activeForm, input.owner, input.blockedBy);
+			const task = store.create(input.subject, input.description, input.activeForm, input.owner, input.blockedBy, {
+				kind: input.kind,
+				acceptance: input.acceptance,
+				files: input.files,
+				commands: input.commands,
+				createdBy: input.createdBy,
+				parent: input.parent,
+			});
 			return { content: [textContent(`Created task #${task.id}: ${task.subject}`)] };
 		},
 	});
@@ -216,6 +404,21 @@ export function createTaskTools(store: TaskStore): AnyTool[] {
 			owner: z.string().optional().describe("Reassign the task to this owner"),
 			addBlockedBy: z.array(z.string()).optional().describe("Task ids that must complete before this one"),
 			removeBlockedBy: z.array(z.string()).optional().describe("Task ids to remove from this task's dependencies"),
+			kind: z
+				.enum(["plan", "implement", "verify", "build", "research", "fix", "escalate", "report"])
+				.optional()
+				.describe("What the task is for"),
+			acceptance: z.string().optional().describe("What done looks like, in terms a verifier can check"),
+			files: z.array(z.string()).optional().describe("Files or areas this task touches"),
+			commands: z
+				.array(z.string())
+				.optional()
+				.describe("On a verify/build task, the commands whose exit codes decide the verdict"),
+			errorSummary: z
+				.string()
+				.optional()
+				.describe("The failing run's bounded output, when the recorder could not capture it"),
+			verdict: z.enum(["passed", "failed"]).optional().describe("On a verify/build task, the outcome you reached"),
 		}),
 		prompt:
 			"- Update the board as you go; never mark a task completed with failing tests, partial work,\n" +

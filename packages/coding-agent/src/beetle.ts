@@ -1,30 +1,40 @@
 /**
- * /beetle — a band of four long-lived members that work a task together.
+ * /beetle — a band of four members that work a task together.
  *
- * The design is a message-driven relay: a delivery to a member is both a
- * message and a wake-up. An idle member starts on it immediately; a busy one
- * reads it at its turn boundary (the session's follow-up queue, whose contract
- * is "restart the loop after natural termination" — steering would dangle, see
- * `session.ts`). A delivery can also be marked wake-less: it then waits in a
- * per-target mailbox and rides in front of the next waking delivery to that
- * target, so a stopped member can be given work to read on revival instead of
- * being woken into a failing request per message. Nobody polls: with every
- * member idle the band costs nothing, and only `/beetle off` disbands it.
+ * Two shapes share this file, chosen by `beetle.context`.
+ *
+ * The default with a board connected (`"task"`) is the blackboard: a member
+ * hands work over by writing a task, a deterministic dispatcher claims the
+ * lowest-id ready task per idle seat and wakes its owner with a rendered card,
+ * and a worker's session is created at the claim and destroyed when the task
+ * completes — its memory is the board. `BandMessage` survives as a one-per-task
+ * clarification channel from a worker to John; John answers by editing the
+ * board. The human's `/beetle say` and `@john` are the intervention channels.
+ * `docs/dev/blackboard.md` is the long form.
+ *
+ * Without a board (`"session"`, also the fallback when `"task"` is asked for
+ * with no store) the original message-driven relay runs: a delivery to a member
+ * is both a message and a wake-up. An idle member starts on it immediately; a
+ * busy one reads it at its turn boundary (the session's follow-up queue, whose
+ * contract is "restart the loop after natural termination" — steering would
+ * dangle, see `session.ts`). A delivery can also be marked wake-less: it then
+ * waits in a per-target mailbox and rides in front of the next waking delivery
+ * to that target, so a stopped member can be given work to read on revival
+ * instead of being woken into a failing request per message. Nobody polls: with
+ * every member idle the band costs nothing, and only `/beetle off` disbands it.
  *
  * The four seats exist so the roles are structurally forced rather than asked
- * for politely. John has no Edit/Write: his only way to change anything is a
- * message to Paul, the single writer. George has no Edit/Write either: a
+ * for politely. John has no Edit/Write: his only way to change anything is to
+ * write work for Paul, the single writer. George has no Edit/Write either: a
  * verifier who can patch tends to patch instead of reporting. Ringo has none:
  * a runner that fixes the thing under test hides the evidence. This is
  * structural guidance, not a sandbox — every seat keeps Bash, and Bash can
  * write — and the personas say so honestly.
  *
- * The band's own tool is BandMessage: the main session gains it while a band
- * is active, and each member carries its own copy with `main` added to its
- * targets. The shared task board (TaskCreate/TaskGet/TaskList/TaskUpdate) is
- * not built here — it arrives in the worker table backed by the main session's
- * store — and the name filter below keeps it in every seat's table, so all
- * four work off one board.
+ * The shared task board (TaskCreate/TaskGet/TaskList/TaskUpdate) is not built
+ * here — it arrives in the worker table backed by the main session's store —
+ * and the name filter below keeps it in every seat's table, so all four work
+ * off one board.
  */
 import {
 	type AgentEvent,
@@ -39,8 +49,9 @@ import {
 	type SandboxMode,
 } from "@labunbun/agent";
 import { type Model, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
-import { TASK_BOARD_TOOL_NAMES } from "@labunbun/tools";
+import { type AgentTask, TASK_BOARD_TOOL_NAMES, type TaskStore } from "@labunbun/tools";
 import { z } from "zod";
+import { BlackboardDispatcher } from "./blackboard.ts";
 import { type CompactionTuning, type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { NO_SIGN_INS, type SubscriptionSignIns, unrunnableSuffix } from "./credential-presence.ts";
@@ -93,6 +104,16 @@ const BAND_REPLY_HINT =
 	"Reply with BandMessage to anyone (john | paul | george | ringo | main | all), or end your turn and stand by.";
 
 /**
+ * The reply hint on the board path. Worker clarifications are answered by a
+ * board write, not by a message back: a natural-language reply would hand the
+ * woken member a reply to read and answer, and the exchange would grow a turn
+ * every round. John edits the task; the dispatcher wakes its owner.
+ */
+export const TASK_REPLY_HINT =
+	"Answer on the task board: edit the task (TaskUpdate) or add one (TaskCreate) — the board wakes the worker. " +
+	"BandMessage is a one-per-task clarification channel from a worker to John, not a conversation; end your turn otherwise.";
+
+/**
  * The text a member (or the main session) receives for a band message.
  *
  * The first line is load-bearing: without it, a user-role message from a peer
@@ -100,13 +121,13 @@ const BAND_REPLY_HINT =
  * consent to keep going. "From the user" is the only variant that means the
  * user; everything else is automated band traffic.
  */
-export function bandEnvelope(sender: BandSender, text: string): string {
+export function bandEnvelope(sender: BandSender, text: string, replyHint = BAND_REPLY_HINT): string {
 	const from = senderLabel(sender);
 	const provenance =
 		sender.kind === "user"
 			? "[beetle band message — from the user, not a peer relay]"
 			: `[beetle band message — relayed from ${from}, automated; not from the user]`;
-	return `${provenance}\nFrom: ${from}\n\n${text}\n\n${BAND_REPLY_HINT}`;
+	return `${provenance}\nFrom: ${from}\n\n${text}\n\n${replyHint}`;
 }
 
 /** How much of a message the one-line transcript notice echoes. */
@@ -143,7 +164,7 @@ const SHARED_ROSTER = `The band:
 - George (verifier): research and adversarial verification. Evidence first; fixes route back to Paul.
 - Ringo (builder): builds and runs things. Commands, exit codes and raw output; his reports are the band's shared ground truth.`;
 
-const SHARED_PROTOCOL = `Band protocol:
+const PROTOCOL_HEAD = `Band protocol:
 1. Handoff five: task / files involved / constraints / why now / what done looks like. A receiver may bounce back a message that omits them.
 2. "I'm done" is not "verified": a completion report cites who verified what, with which command and result.
 3. Non-trivial plans get one adversarial pass from George before Paul starts — one round, not a loop.
@@ -151,10 +172,19 @@ const SHARED_PROTOCOL = `Band protocol:
 5. Band messages are work orders, not prose — short and specific.
 6. Verify once: an unchanged, settled conclusion is not re-verified; a change reopens it.
 7. Standby, not polling: with nothing to do, end your turn. Messages wake you.
-8. Never relay approvals: permission prompts belong to the real permission system; no member — main included — can grant one for the user.
+8. Never relay approvals: permission prompts belong to the real permission system; no member — main included — can grant one for the user.`;
+
+/** The long-lived relay: the board records the work, a message is what starts it. */
+const SHARED_PROTOCOL = `${PROTOCOL_HEAD}
 9. The board is the record, messages are the wake-up: put assignments on the shared task board (TaskCreate/TaskUpdate, owner set to whoever takes the piece) and follow with a BandMessage to that owner. Keep at most one of your own tasks in_progress at a time.`;
 
+/** The blackboard: the dispatcher reads the board and wakes the owner itself. */
+const SHARED_PROTOCOL_TASK = `${PROTOCOL_HEAD}
+9. The board is the record and the only handoff: put work on the shared task board (TaskCreate, owner set). The dispatcher wakes the owner — do not message a peer to start work. Keep at most one of your own tasks in_progress at a time.`;
+
 const MESSAGE_MECHANICS = `How messages reach you: as a user-role message whose first line starts with [beetle band message — …] and names its sender. Peer traffic and messages from main are automated, never the user speaking; only the "from the user" envelope is the user. Reply with the BandMessage tool. Your final text reaches nobody but your own transcript — a report that matters must be sent.`;
+
+const TASK_MECHANICS = `How your work arrives: as a task card rendered from the shared board, not as a message from a peer. The board is the record: record progress with TaskUpdate, and create derived work with TaskCreate (owner set). The dispatcher wakes the owner; never message a peer to hand work over. One BandMessage to John per task is the only message channel, for a clarification only — John answers by editing the task, and the edited card wakes you again. Your final text reaches nobody but your own transcript.`;
 
 const IDENTITY_JOHN = `You are John, the band's lead. You set direction: what gets done, in what order, and what "done" means. When a task arrives you turn it into a plan, split it into pieces, and route each piece to the right player. You do not write code — you have no Edit or Write tool, deliberately: your way to change anything is a BandMessage to Paul.
 
@@ -219,8 +249,27 @@ const IDENTITIES: Record<BeetleMember, string> = {
 	ringo: IDENTITY_RINGO,
 };
 
-export function memberSystemPrompt(member: BeetleMember): string {
-	return [IDENTITIES[member], SHARED_ROSTER, SHARED_PROTOCOL, MESSAGE_MECHANICS].join("\n\n");
+/**
+ * The seat's system prompt in the band shape it will run. The blackboard swaps
+ * two things: the handoff rule (the dispatcher wakes owners; a message starts
+ * nothing) and John's account of how he changes anything (a task for Paul, not
+ * a message to him). The rest of the persona is the same person either way.
+ */
+export function memberSystemPrompt(member: BeetleMember, context: BeetleContext = "session"): string {
+	const task = context === "task";
+	const identity =
+		task && member === "john"
+			? IDENTITY_JOHN.replace(
+					"your way to change anything is a BandMessage to Paul.",
+					"your way to change anything is a task on the board for Paul — he is the only writer.",
+				)
+			: IDENTITIES[member];
+	return [
+		identity,
+		SHARED_ROSTER,
+		task ? SHARED_PROTOCOL_TASK : SHARED_PROTOCOL,
+		task ? TASK_MECHANICS : MESSAGE_MECHANICS,
+	].join("\n\n");
 }
 
 /**
@@ -239,6 +288,16 @@ export function bandBriefing(member: BeetleMember, task: string): string {
 	return `${task}\n\nYou are ${DISPLAY_NAME[member]} (${BEETLE_ROLES[member]}). Stand by for John's assignment; if cheap, safe legwork in your seat helps, start it now and keep the first pass short. The band: John leads, Paul implements, George verifies, Ringo builds and runs. Anything the user must see goes to main.`;
 }
 
+/**
+ * The lead's standing instruction, prepended to every card he is woken with.
+ * The split is a board write: the dispatcher wakes owners, so a message from
+ * John would be a second, unaccounted-for way to start work.
+ */
+export const LEAD_WAKE =
+	"You hold the lead. Put the split on the shared task board: TaskCreate one task per piece with owner " +
+	"(paul | george | ringo), kind, acceptance and files. The board wakes its owner — do not message workers. " +
+	"Mark your own task completed when every piece is done.";
+
 // ---------------------------------------------------------------------------
 // The BandMessage tool
 // ---------------------------------------------------------------------------
@@ -250,7 +309,16 @@ export function bandBriefing(member: BeetleMember, task: string): string {
  * at startup — a mid-session tool's `prompt` is never read by anyone. Do not
  * move this text into a `prompt`.
  */
-export function bandToolDescription(canAddressMain: boolean): string {
+export function bandToolDescription(canAddressMain: boolean, allowed?: readonly BandTarget[]): string {
+	if (allowed) {
+		return (
+			`Send at most ONE clarification, to ${allowed.join(" | ")} only, during the task you are running. ` +
+			"Ask what the task card cannot answer: a genuine ambiguity or a decision only the lead can make. " +
+			"A second call in the same task is refused. Do not use it to report progress or to acknowledge — " +
+			"put work on the task board (TaskCreate/TaskUpdate) and the board wakes its owner. " +
+			"John answers by changing the task, not by replying; his answer reaches you as the next task card."
+		);
+	}
 	const targets = canAddressMain ? "john | paul | george | ringo | main | all" : "john | paul | george | ringo | all";
 	return (
 		`Send a message to the /beetle band. By default a message is also a wake-up: an idle member starts on it immediately; a busy one reads it at its next turn boundary. Pass wake: false to deliver without waking — an idle or stopped recipient reads it with its next wake-up. Targets: ${targets}. You cannot message yourself.\n\n` +
@@ -265,13 +333,17 @@ const BAND_TOOL_NAME = "BandMessage";
 export function createBandMessageTool(
 	send: (to: BandTarget, message: string, opts?: { wake?: boolean }) => DeliveryOutcome,
 	canAddressMain: boolean,
+	allowed?: readonly BandTarget[],
 ): AnyTool {
-	const targets = canAddressMain
-		? (["john", "paul", "george", "ringo", "main", "all"] as const)
-		: (["john", "paul", "george", "ringo", "all"] as const);
+	const targets =
+		allowed ??
+		(canAddressMain
+			? (["john", "paul", "george", "ringo", "main", "all"] as const)
+			: (["john", "paul", "george", "ringo", "all"] as const));
+	const enumValues = [...targets] as [BandTarget, ...BandTarget[]];
 	return buildTool({
 		name: BAND_TOOL_NAME,
-		description: bandToolDescription(canAddressMain),
+		description: bandToolDescription(canAddressMain, allowed),
 		// Sending wakes a session and hands it text; whatever that session then
 		// does is evaluated in its own session under the same axes, so the bus
 		// itself touches nothing. This declaration and the name's seat in
@@ -279,7 +351,7 @@ export function createBandMessageTool(
 		// plan-mode-allowlist.test.ts.
 		isReadOnly: () => true,
 		inputSchema: z.object({
-			to: z.enum(targets).describe("Who receives it"),
+			to: z.enum(enumValues).describe("Who receives it"),
 			message: z.string().describe("The message — a work order carrying the handoff five when it assigns work"),
 			wake: z
 				.boolean()
@@ -382,19 +454,39 @@ export function memberTallyLines(members: BeetleMemberStatus[]): string[] {
 	);
 }
 
+/**
+ * How long a worker's conversation lives.
+ *
+ * `"task"` is the blackboard default: the session is created when the task is
+ * claimed and destroyed when it reaches a terminal state, so nothing a worker
+ * said in one task reaches the next — its memory is the board. `"session"` is
+ * the old long-lived conversation, kept as the explicit fallback (and for a
+ * band constructed without a board, where there is nothing to dispatch over).
+ */
+export type BeetleContext = "task" | "session";
+
 interface MemberRuntime {
 	name: BeetleMember;
-	session: AgentSession;
-	wiring: CompactionWiring;
+	/** Undefined between a destroyed task session and the next claim. */
+	session: AgentSession | undefined;
+	wiring: CompactionWiring | undefined;
 	modelRef: string;
 	pendingRef: string | undefined;
+	/** The model a new session starts on, kept when no session is alive. */
+	model: Model;
 	state: BeetleMemberState;
 	turns: number;
+	/** Spend from sessions this member has already finished, in USD. */
+	settledCostUSD: number;
 	lastActivity: string | null;
 	/** When this member's last event landed, for the quiet watchdog. */
 	lastEventAt: number;
 	/** One quiet notice per episode; that member's next event clears it. */
 	stallNotified: boolean;
+	/** The task whose card this member's current session was started with. */
+	currentTaskId: string | undefined;
+	/** A terminal task landed while the run was still going; destroy at its end. */
+	pendingDispose: boolean;
 }
 
 /**
@@ -422,6 +514,17 @@ function formatQuiet(ms: number): string {
 export interface BeetleBandOptions {
 	models: BeetleModels;
 	cwd: string;
+	/**
+	 * The shared task board the dispatcher routes over. Without one, the band
+	 * falls back to `"session"` context: there is nothing to claim a task from.
+	 */
+	taskStore?: TaskStore;
+	/** Defaults to `"task"` when a board is connected, `"session"` otherwise. */
+	context?: BeetleContext;
+	/** Bound on a rendered task card; `beetle.taskCardChars` in the app. */
+	taskCardChars?: number;
+	/** Bound on the failing run's cut inside a card; `beetle.errorSummaryChars`. */
+	errorSummaryChars?: number;
 	/** The same session stream the main conversation uses. */
 	streamFn: StreamFn;
 	/** The worker tool table (the one subagents draw from). */
@@ -501,21 +604,53 @@ export class BeetleBand {
 	#held = new Map<BeetleMember | "main", string[]>();
 	/** The quiet watchdog's interval, dropped with the band in `off()`. */
 	#watchdog: ReturnType<typeof setInterval> | undefined;
+	readonly #context: BeetleContext;
+	#dispatcher: BlackboardDispatcher | undefined;
+	/** One clarification per worker per claimed task. */
+	#bandBudget = new Map<BeetleMember, { used: boolean }>();
 
 	constructor(options: BeetleBandOptions) {
 		this.#options = options;
+		// A board is the precondition for task routing: with none connected there is
+		// nothing to claim tasks from, so even an explicit "task" runs the
+		// long-lived band rather than a hybrid with no dispatcher.
+		this.#context = options.taskStore ? (options.context ?? "task") : "session";
 		for (const name of BEETLE_MEMBERS) {
-			this.#members.set(name, this.#spawn(name));
+			this.#members.set(name, this.#runtime(name));
+		}
+		if (this.#context === "task") {
+			// John keeps the lead's conversation for the band's lifetime; the
+			// workers start when the board hands them a task.
+			this.#ensureSession(this.#members.get("john") as MemberRuntime);
+		} else {
+			for (const member of this.#members.values()) this.#ensureSession(member);
 		}
 		this.#mainTool = createBandMessageTool(
 			(to, message, opts) => this.deliver({ kind: "main" }, to, message, opts),
 			false,
 		);
 		this.#watchdog = this.#startWatchdog();
+		if (this.#context === "task" && options.taskStore) {
+			this.#dispatcher = new BlackboardDispatcher({
+				store: options.taskStore,
+				seats: BEETLE_MEMBERS,
+				isBusy: (seat) => this.#members.get(seat as BeetleMember)?.session?.isRunning ?? false,
+				wake: (seat, card, task) => this.#wakeForTask(seat as BeetleMember, card, task),
+				release: (seat, task) => this.#releaseSeat(seat as BeetleMember, task),
+				notice: (line) => this.#options.onNotice?.(line),
+				charBudget: options.taskCardChars,
+				errorChars: options.errorSummaryChars,
+			});
+		}
 	}
 
 	get active(): boolean {
 		return this.#active;
+	}
+
+	/** `"task"` routes over the board; `"session"` keeps the old long-lived band. */
+	get context(): BeetleContext {
+		return this.#context;
 	}
 
 	/**
@@ -532,11 +667,24 @@ export class BeetleBand {
 		return this.#members.get(name)?.session;
 	}
 
-	/** Wake all four with the task briefing; John additionally gets the lead's instructions. */
+	/**
+	 * Open the work.
+	 *
+	 * On the board path the band's task becomes one task owned by John: the
+	 * dispatcher claims it and wakes him with its card. The workers are not
+	 * woken — they start when John's TaskCreate hands one of them a piece. The
+	 * long-lived path keeps the old behavior and wakes all four.
+	 */
 	start(task: string): void {
 		this.#task = task;
-		for (const name of BEETLE_MEMBERS) {
-			this.deliver({ kind: "user" }, name, bandBriefing(name, task));
+		if (this.#context === "task" && this.#options.taskStore) {
+			const subject = (task.split(/\r?\n/, 1)[0] ?? "").trim() || "band task";
+			this.#options.taskStore.create(subject, task, undefined, "john", [], { kind: "plan", createdBy: "user" });
+			this.#dispatcher?.kick();
+		} else {
+			for (const name of BEETLE_MEMBERS) {
+				this.deliver({ kind: "user" }, name, bandBriefing(name, task));
+			}
 		}
 		this.#emitState();
 	}
@@ -560,8 +708,10 @@ export class BeetleBand {
 		// travels back to the sender through the tool result, and the line below
 		// reaches the user like it does for every other attempt — a model stuck
 		// addressing itself shows up in the transcript instead of vanishing.
-		const receipts: DeliveryReceipt[] =
-			from.kind === "member" && to === from.name
+		const policy = this.#policyRefusal(from, to);
+		const receipts: DeliveryReceipt[] = policy
+			? [{ to, status: "refused", reason: policy }]
+			: from.kind === "member" && to === from.name
 				? [
 						{
 							to,
@@ -571,6 +721,12 @@ export class BeetleBand {
 					]
 				: this.#recipientsFor(from, to).map((target) => this.#deliverOne(from, target, text, opts));
 		const outcome: DeliveryOutcome = { ok: receipts.some((receipt) => receipt.status !== "refused"), receipts };
+		// The clarification is spent only when it actually reached John: a refused
+		// or undeliverable call leaves the worker its one question.
+		if (outcome.ok && this.#context === "task" && from.kind === "member" && to === "john") {
+			const budget = this.#bandBudget.get(from.name);
+			if (budget) budget.used = true;
+		}
 		try {
 			this.#options.onNotice?.(bandLine(from, to, text));
 		} catch {
@@ -593,10 +749,12 @@ export class BeetleBand {
 				clearInterval(this.#watchdog);
 				this.#watchdog = undefined;
 			}
+			this.#dispatcher?.dispose();
+			this.#dispatcher = undefined;
 			for (const member of this.#members.values()) {
 				member.state = "stopped";
 				try {
-					member.session.abort();
+					member.session?.abort();
 				} catch {
 					// One member's broken teardown must not strand the other three:
 					// the band is stopping either way, and the tally still comes back.
@@ -626,13 +784,17 @@ export class BeetleBand {
 		return this.status();
 	}
 
-	/** What the four are doing, priced from their own transcripts. */
+	/**
+	 * What the four are doing, priced from their own transcripts. A worker
+	 * between tasks has no transcript; its spend and turns still count, because
+	 * a destroyed session is not a refund.
+	 */
 	status(): BeetleMemberStatus[] {
 		return BEETLE_MEMBERS.map((name) => {
 			const member = this.#members.get(name);
 			if (!member) throw new Error(`beetle member missing at construction: ${name}`);
-			const cost = costStateFromMessages(member.session.messages);
-			const model = member.session.model;
+			const liveCost = member.session ? costStateFromMessages(member.session.messages).totalCostUSD : 0;
+			const model = member.session?.model ?? member.model;
 			return {
 				name,
 				role: BEETLE_ROLES[name],
@@ -641,10 +803,10 @@ export class BeetleBand {
 				pendingRef: member.pendingRef,
 				state: member.state,
 				turns: member.turns,
-				costUSD: cost.totalCostUSD,
+				costUSD: member.settledCostUSD + liveCost,
 				unpriced: model.pricing === undefined,
 				lastActivity: member.lastActivity,
-				messages: member.session.messages.length,
+				messages: member.session?.messages.length ?? 0,
 			};
 		});
 	}
@@ -664,6 +826,28 @@ export class BeetleBand {
 		} catch {
 			// Ignored on purpose: the ledger records the band; it does not leash it.
 		}
+	}
+
+	/**
+	 * The board path's star topology, enforced where the message would leave.
+	 *
+	 * Workers address John only, once per task. John has no send tool and no
+	 * exception here: his answer to a clarification is a board write, and the
+	 * dispatcher wakes the worker with the edited task. A human's `/beetle say`
+	 * and `@john` are different senders and are not caught by this.
+	 */
+	#policyRefusal(from: BandSender, to: BandTarget): string | undefined {
+		if (this.#context !== "task" || from.kind !== "member") return undefined;
+		if (from.name === "john") {
+			return "John answers on the board — edit the task with TaskUpdate and the dispatcher wakes its owner; he does not message the band.";
+		}
+		if (to !== "john") {
+			return "workers address John only — put the work on the task board instead of messaging a peer.";
+		}
+		if (this.#bandBudget.get(from.name)?.used) {
+			return "one clarification per task — put the rest on the board (TaskCreate/TaskUpdate) or end your turn.";
+		}
+		return undefined;
 	}
 
 	#recipientsFor(from: BandSender, to: BandTarget): Array<BeetleMember | "main"> {
@@ -696,6 +880,10 @@ export class BeetleBand {
 		}
 		const member = this.#members.get(target);
 		if (!member) return { to: target, status: "refused", reason: `unknown member "${target}"` };
+		// On the board path the message that reaches a worker is a card or a
+		// human's line, not a peer relay; either way its answer belongs on the
+		// board, so the hint says so.
+		const hint = this.#context === "task" ? TASK_REPLY_HINT : BAND_REPLY_HINT;
 		if (member.state === "stopped") {
 			if (!wake) {
 				// The wake-less form asks for nothing and spends nothing: it
@@ -715,26 +903,28 @@ export class BeetleBand {
 				};
 			}
 			member.state = "idle";
+			const revived = this.#ensureSession(member);
 			this.#tryLateResolve(member);
 			this.#applyAxes(member);
-			member.session.followUp(this.#release(target, bandEnvelope(from, text)));
+			revived.followUp(this.#release(target, bandEnvelope(from, text, hint)));
 			return { to: target, status: "revived" };
 		}
-		if (!wake && !member.session.isRunning) {
+		if (!wake && !(member.session?.isRunning ?? false)) {
 			this.#hold(target, from, text);
 			return { to: target, status: "held" };
 		}
+		const session = this.#ensureSession(member);
 		this.#tryLateResolve(member);
 		this.#applyAxes(member);
-		const wasRunning = member.session.isRunning;
-		member.session.followUp(this.#release(target, bandEnvelope(from, text)));
+		const wasRunning = session.isRunning;
+		session.followUp(this.#release(target, bandEnvelope(from, text, hint)));
 		return { to: target, status: wasRunning ? "queued" : "woken" };
 	}
 
 	/** Hold one wake-less delivery, envelope and all, in send order. */
 	#hold(target: BeetleMember | "main", from: BandSender, text: string): void {
 		const list = this.#held.get(target) ?? [];
-		list.push(bandEnvelope(from, text));
+		list.push(bandEnvelope(from, text, this.#context === "task" ? TASK_REPLY_HINT : BAND_REPLY_HINT));
 		this.#held.set(target, list);
 	}
 
@@ -763,8 +953,9 @@ export class BeetleBand {
 		const ref = member.pendingRef;
 		const resolved = this.#options.resolveModel?.(ref);
 		if (!resolved || !(this.#options.canRunModel?.(resolved) ?? true)) return;
-		member.session.setModel(resolved);
-		member.wiring.rebuild(resolved, undefined);
+		member.model = resolved;
+		member.session?.setModel(resolved);
+		member.wiring?.rebuild(resolved, undefined);
 		member.pendingRef = undefined;
 		this.#options.report?.(`[beetle] ${DISPLAY_NAME[member.name]}: model "${ref}" is now available — switched to it.`);
 	}
@@ -777,27 +968,57 @@ export class BeetleBand {
 	 * did not arrive.
 	 */
 	#applyAxes(member: MemberRuntime): void {
+		const session = member.session;
+		if (!session) return;
 		const mode = this.#options.permissionMode?.();
 		const sandbox = this.#options.sandbox?.();
 		if (mode !== undefined || sandbox !== undefined) {
-			member.session.setMode(mode ?? member.session.permissionMode, sandbox);
+			session.setMode(mode ?? session.permissionMode, sandbox);
 		}
 		const network = this.#options.network?.();
-		if (network !== undefined) member.session.setNetwork(network);
+		if (network !== undefined) session.setNetwork(network);
 	}
 
-	#spawn(name: BeetleMember): MemberRuntime {
+	/** A member's book-keeping, resolved once; the session itself comes later. */
+	#runtime(name: BeetleMember): MemberRuntime {
 		const options = this.#options;
 		const ref = options.models[name];
 		const configured = ref !== SESSION_MODEL_REF ? this.#resolveRef(ref) : undefined;
-		const initialModel = configured?.model ?? options.model();
 		if (ref !== SESSION_MODEL_REF && !configured?.model) {
 			options.report?.(
 				`[beetle] ${DISPLAY_NAME[name]}: model "${ref}" is not available — running on the session model for now; it will switch over the moment it is.`,
 			);
 		}
+		return {
+			name,
+			session: undefined,
+			wiring: undefined,
+			modelRef: ref,
+			pendingRef: configured?.pendingRef,
+			model: configured?.model ?? options.model(),
+			state: "idle",
+			turns: 0,
+			settledCostUSD: 0,
+			lastActivity: null,
+			lastEventAt: Date.now(),
+			stallNotified: false,
+			currentTaskId: undefined,
+			pendingDispose: false,
+		};
+	}
+
+	/**
+	 * The member's session, created on first use. On the board path this is the
+	 * task boundary: a worker has none between tasks, and gets a fresh one —
+	 * system prompt, tools, empty transcript — when the dispatcher hands it a
+	 * card.
+	 */
+	#ensureSession(member: MemberRuntime): AgentSession {
+		if (member.session) return member.session;
+		const options = this.#options;
+		const name = member.name;
 		const wiring = createCompactionWiring({
-			model: initialModel,
+			model: member.model,
 			store: undefined,
 			streamFn: options.streamFn,
 			trimOldToolResults: options.trimOldToolResults,
@@ -810,8 +1031,8 @@ export class BeetleBand {
 		// a tool that declares itself read-only and must stay admitted in plan mode).
 		const readOnlyToolNames = collectReadOnlyToolNames(memberTools);
 		const session = new AgentSession({
-			model: initialModel,
-			systemPrompt: memberSystemPrompt(name),
+			model: member.model,
+			systemPrompt: memberSystemPrompt(name, this.#context),
 			tools: memberTools,
 			cwd: options.cwd,
 			maxTurns: options.maxTurns,
@@ -851,20 +1072,79 @@ export class BeetleBand {
 				},
 			},
 		});
-		const member: MemberRuntime = {
-			name,
-			session,
-			wiring,
-			modelRef: ref,
-			pendingRef: configured?.pendingRef,
-			state: "idle",
-			turns: 0,
-			lastActivity: null,
-			lastEventAt: Date.now(),
-			stallNotified: false,
-		};
-		session.on((event) => this.#onMemberEvent(member, event));
-		return member;
+		member.session = session;
+		member.wiring = wiring;
+		member.lastEventAt = Date.now();
+		member.stallNotified = false;
+		session.on((event) => this.#onMemberEvent(member, session, event));
+		return session;
+	}
+
+	/**
+	 * Destroy a task-scoped session. Its spend and turns stay on the member's
+	 * tally — a destroyed session is not a refund — and the transcript goes with
+	 * it, which is the point: the next task starts from its card, not from what
+	 * the last one said.
+	 */
+	#disposeMember(member: MemberRuntime): void {
+		const session = member.session;
+		member.session = undefined;
+		member.wiring = undefined;
+		member.pendingDispose = false;
+		member.currentTaskId = undefined;
+		if (!session) return;
+		member.settledCostUSD += costStateFromMessages(session.messages).totalCostUSD;
+		try {
+			session.abort();
+		} catch {
+			// Nothing to salvage: the transcript is already off the member.
+		}
+		if (member.state !== "stopped") member.state = "idle";
+	}
+
+	/** Hand a claimed task to its owner: one card, one wake. */
+	#wakeForTask(name: BeetleMember, card: string, task: AgentTask): void {
+		const member = this.#members.get(name);
+		if (!member) return;
+		if (member.state === "stopped") {
+			// A stopped member refuses requests; waking it would burn a failed
+			// request. The claim stays open and the user can revive it explicitly.
+			this.#options.report?.(
+				`[beetle] ${DISPLAY_NAME[name]} is stopped — task #${task.id} was not delivered. /beetle say ${name} <task> revives it.`,
+			);
+			return;
+		}
+		const resumedTask = member.currentTaskId === task.id && member.session !== undefined;
+		const session = this.#ensureSession(member);
+		// The clarification budget belongs to the task execution, not to one run of
+		// it: John answering by editing the task wakes the worker again, and that
+		// second run may not spend a second question. A destroyed session (or a
+		// different task) starts a fresh execution and a fresh budget.
+		if (!resumedTask) this.#bandBudget.set(name, { used: false });
+		member.currentTaskId = task.id;
+		member.pendingDispose = false;
+		this.#tryLateResolve(member);
+		this.#applyAxes(member);
+		// The lead's card carries the one instruction his persona cannot infer
+		// from a task: the split goes on the board, not into messages.
+		const text = name === "john" ? `${LEAD_WAKE}\n\n${card}` : card;
+		session.followUp(text);
+	}
+
+	/**
+	 * A claimed task reached a terminal state. A running worker finishes its
+	 * current run first — cutting it off mid-tool would leave the transcript and
+	 * the board disagreeing about what happened — then the session goes.
+	 */
+	#releaseSeat(name: BeetleMember, _task: AgentTask): void {
+		const member = this.#members.get(name);
+		if (!member) return;
+		if (!member.session) return;
+		if (member.session.isRunning) {
+			member.pendingDispose = true;
+			return;
+		}
+		this.#disposeMember(member);
 	}
 
 	#resolveRef(ref: string): { model?: Model; pendingRef?: string } {
@@ -891,6 +1171,19 @@ export class BeetleBand {
 						),
 						...mcp,
 					];
+		if (this.#context === "task") {
+			// John's answer is a board write, so he carries no send tool at all;
+			// a worker's copy can address John and no one else. The delivery path
+			// enforces the rest (one per task, no peer traffic) rather than relying
+			// on the enum: a schema is guidance, a refusal is a fact.
+			if (name === "john") return kept;
+			return [
+				...kept,
+				createBandMessageTool((to, message, opts) => this.deliver({ kind: "member", name }, to, message, opts), false, [
+					"john",
+				]),
+			];
+		}
 		const bandTool = createBandMessageTool(
 			(to, message, opts) => this.deliver({ kind: "member", name }, to, message, opts),
 			true,
@@ -898,7 +1191,11 @@ export class BeetleBand {
 		return [...kept, bandTool];
 	}
 
-	#onMemberEvent(member: MemberRuntime, event: AgentEvent): void {
+	#onMemberEvent(member: MemberRuntime, session: AgentSession, event: AgentEvent): void {
+		// A session that has already been destroyed can still emit the tail of an
+		// aborted run; it is no longer this member's, and must not revive a state
+		// the next task already owns.
+		if (member.session !== session) return;
 		// Every event is a heartbeat: the quiet watchdog reads from here, and an
 		// arriving event re-arms the member for a fresh notice if it goes quiet
 		// again later — one notice per episode, not one per stall.
@@ -930,11 +1227,26 @@ export class BeetleBand {
 			} else if (member.state !== "stopped") {
 				member.state = "idle";
 			}
+			// The task boundary. A terminal task destroys the session now that the
+			// run that touched it has ended; a run that ended with its task still
+			// open keeps its session — the board may change under it, and the
+			// dispatcher will wake it with the edited card.
+			if (this.#active) {
+				if (member.pendingDispose || this.#taskTerminal(member)) this.#disposeMember(member);
+				this.#emitState();
+				this.#dispatcher?.kick();
+			}
 		} else if (event.type === "tool_execution_start") {
 			member.lastActivity = `${event.toolName}: running`;
 		} else if (event.type === "tool_execution_end") {
 			member.lastActivity = `${event.toolName}: ${event.result.isError ? "error" : "ok"}`;
 		}
+	}
+
+	/** True when the member's current task has been recorded completed. */
+	#taskTerminal(member: MemberRuntime): boolean {
+		if (!member.currentTaskId) return false;
+		return this.#options.taskStore?.get(member.currentTaskId)?.status === "completed";
 	}
 
 	/**

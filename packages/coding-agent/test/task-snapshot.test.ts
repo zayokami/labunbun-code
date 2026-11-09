@@ -201,6 +201,70 @@ describe("a task list saved in a session", () => {
 		expect(snapshots(store.path)).toHaveLength(written);
 	});
 
+	test("the blackboard fields survive a save and restore", () => {
+		const store = freshStore();
+		const tasks = new TaskStore();
+		bindTaskStore(tasks, () => store);
+
+		tasks.create("verify the store", "run the suite", undefined, "george", [], {
+			kind: "verify",
+			acceptance: "the suite is green",
+			files: ["packages/tools/src/tasks.ts"],
+			commands: ["bun test"],
+			createdBy: "john",
+		});
+		tasks.update("1", {
+			verdict: "failed",
+			attempts: 1,
+			errorSummary: "[exit code: 1] boom",
+			runs: [{ command: "bun test", exitCode: 1, summary: "[exit code: 1] boom", at: 5, by: "george" }],
+		});
+
+		const second = new TaskStore();
+		restoreTasks(second, SessionStore.load(store.path));
+		expect(second.get("1")).toMatchObject({
+			kind: "verify",
+			acceptance: "the suite is green",
+			files: ["packages/tools/src/tasks.ts"],
+			commands: ["bun test"],
+			createdBy: "john",
+			verdict: "failed",
+			attempts: 1,
+			errorSummary: "[exit code: 1] boom",
+		});
+		expect(second.get("1")?.runs).toEqual([
+			{ command: "bun test", exitCode: 1, summary: "[exit code: 1] boom", at: 5, by: "george" },
+		]);
+	});
+
+	test("a snapshot written before the blackboard fields restores with them defaulted", () => {
+		const store = freshStore();
+		store.appendCustom(TASK_SNAPSHOT_KIND, [task("1", "the old plan")]);
+
+		const tasks = new TaskStore();
+		restoreTasks(tasks, store);
+
+		// `attempts` and `rev` are counted against, never compared to undefined.
+		const restored = tasks.get("1");
+		expect(restored?.attempts).toBe(0);
+		expect(restored?.rev).toBe(0);
+		expect(restored?.updatedAt).toBe(restored?.createdAt);
+		expect(restored?.kind).toBeUndefined();
+	});
+
+	test("a malformed blackboard field refuses the snapshot rather than half-reading it", () => {
+		const store = freshStore();
+		store.appendCustom(TASK_SNAPSHOT_KIND, [task("1", "the plan that stands")]);
+		// A kind this build cannot route, a verdict it cannot read, a run without
+		// its exit code, and an array where a string belongs.
+		store.appendCustom(TASK_SNAPSHOT_KIND, [{ ...task("2", "bad kind"), kind: "deploy" }]);
+		store.appendCustom(TASK_SNAPSHOT_KIND, [{ ...task("3", "bad verdict"), verdict: "maybe" }]);
+		store.appendCustom(TASK_SNAPSHOT_KIND, [{ ...task("4", "bad run"), runs: [{ command: "bun test" }] }]);
+		store.appendCustom(TASK_SNAPSHOT_KIND, [{ ...task("5", "bad files"), files: "a.ts" }]);
+
+		expect(readTaskSnapshot(store)?.map((t) => t.subject)).toEqual(["the plan that stands"]);
+	});
+
 	test("a restored list cannot be edited from outside, and a session that is not there changes nothing", () => {
 		const store = freshStore();
 		const saved = [task("1", "original")];
