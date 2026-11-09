@@ -56,6 +56,7 @@ import { type CompactionTuning, type CompactionWiring, createCompactionWiring } 
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { NO_SIGN_INS, type SubscriptionSignIns, unrunnableSuffix } from "./credential-presence.ts";
 import { offeredModels } from "./model-offer.ts";
+import { TaskPheromoneRecorder } from "./task-pheromone.ts";
 
 export const BEETLE_MEMBERS = ["john", "paul", "george", "ringo"] as const;
 export type BeetleMember = (typeof BEETLE_MEMBERS)[number];
@@ -606,6 +607,8 @@ export class BeetleBand {
 	#watchdog: ReturnType<typeof setInterval> | undefined;
 	readonly #context: BeetleContext;
 	#dispatcher: BlackboardDispatcher | undefined;
+	/** Reads Bash results into the board; only a task-routed band has one. */
+	#pheromone: TaskPheromoneRecorder | undefined;
 	/** One clarification per worker per claimed task. */
 	#bandBudget = new Map<BeetleMember, { used: boolean }>();
 
@@ -640,6 +643,14 @@ export class BeetleBand {
 				notice: (line) => this.#options.onNotice?.(line),
 				charBudget: options.taskCardChars,
 				errorChars: options.errorSummaryChars,
+			});
+			// The environment speaks through the seat's own tool events. The
+			// recorder writes a declared command's result to the task — a store
+			// write, not a model turn — and closes a clean build/verify.
+			this.#pheromone = new TaskPheromoneRecorder({
+				store: options.taskStore,
+				errorChars: options.errorSummaryChars,
+				notice: (line) => this.#options.onNotice?.(line),
 			});
 		}
 	}
@@ -1238,8 +1249,10 @@ export class BeetleBand {
 			}
 		} else if (event.type === "tool_execution_start") {
 			member.lastActivity = `${event.toolName}: running`;
+			this.#pheromone?.begin(event.callId, event.toolName, event.input);
 		} else if (event.type === "tool_execution_end") {
 			member.lastActivity = `${event.toolName}: ${event.result.isError ? "error" : "ok"}`;
+			this.#pheromone?.record(member.name, member.currentTaskId, event.toolName, event.callId, event.result);
 		}
 	}
 

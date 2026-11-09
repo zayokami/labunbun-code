@@ -1745,7 +1745,11 @@ interface BoardBand {
  * interleave. Every seat gets a script even when a test wakes only some of
  * them, so a stray wake is a failed assertion rather than a crash.
  */
-function makeBoardBand(options: { script: Record<string, FauxStep[]>; store?: TaskStore }): BoardBand {
+function makeBoardBand(options: {
+	script: Record<string, FauxStep[]>;
+	store?: TaskStore;
+	tools?: AnyTool[];
+}): BoardBand {
 	const store = options.store ?? new TaskStore();
 	const faux = routedFaux(options.script);
 	const refs = memberRefTable();
@@ -1757,7 +1761,7 @@ function makeBoardBand(options: { script: Record<string, FauxStep[]>; store?: Ta
 		context: "task",
 		taskStore: store,
 		streamFn: faux.streamFn,
-		allTools: createTaskTools(store),
+		allTools: [...createTaskTools(store), ...(options.tools ?? [])],
 		model: () => FAUX_MODEL,
 		resolveModel: (ref) => refs.get(ref),
 		canRunModel: () => true,
@@ -1955,6 +1959,40 @@ describe("the blackboard band", () => {
 		await until(() => faux.calls("paul").length >= 4, 5_000);
 		// The refusal rides back in the request after the second call.
 		expect(faux.calls("paul")[3]).toContain("one clarification per task");
+		band.off();
+	});
+
+	test("a declared command's result becomes a run on the board, and a clean verify closes it", async () => {
+		// The tool events are the seam: the recorder sees the Bash start, pairs
+		// the result with the declared command, writes the run and decides the
+		// verdict without a model turn. The session lifecycle follows it — a
+		// closed task is released and the worker's conversation is destroyed.
+		const bash = buildTool({
+			name: "Bash",
+			description: "fake shell reporting a zero exit (test)",
+			inputSchema: z.object({ command: z.string() }),
+			call: async (input) => ({ content: [{ type: "text", text: `[exit code: 0]\nran: ${input.command}` }] }),
+		});
+		const { band, store } = makeBoardBand({
+			tools: [bash],
+			script: {
+				john: [{ text: "idle" }],
+				paul: [{ text: "idle" }],
+				george: [{ toolCalls: [{ name: "Bash", arguments: { command: "bun test" } }] }, { text: "ran it" }],
+				ringo: [{ text: "idle" }],
+			},
+		});
+		store.create("verify the parser", "Run the suite.", "Verifying", "george", [], {
+			kind: "verify",
+			commands: ["bun test"],
+		});
+
+		await until(() => store.get("1")?.status === "completed", 5_000);
+		const task = store.get("1");
+		expect(task?.verdict).toBe("passed");
+		expect(task?.runs).toHaveLength(1);
+		expect(task?.runs?.[0]).toMatchObject({ command: "bun test", exitCode: 0, by: "george" });
+		await until(() => band.memberSession("george") === undefined, 5_000);
 		band.off();
 	});
 

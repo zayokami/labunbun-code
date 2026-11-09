@@ -92,7 +92,9 @@ A worker runs commands with Bash; the result already begins with `[exit code: N]
 
 - On `tool_execution_start`, the command is remembered per call id.
 - On `tool_execution_end`, a Bash result whose command is in the seat's current task's `commands` becomes a `TaskRun`; the summary is `cutText(raw, beetle.errorSummaryChars)`, so it keeps the spill pointer and both ends of the error.
-- The run is appended to `runs` (bounded; oldest dropped), `errorSummary` is replaced, `rev` is bumped, and `updatedAt` moves. This is a store write from the host, not a model turn.
+- The run is appended to `runs` (bounded; oldest dropped), `errorSummary` is
+  replaced by a failing run's summary, `rev` is bumped, and `updatedAt` moves.
+  This is a store write from the host, not a model turn.
 - For a `build`/`verify` task, once every declared command has a run, the verdict is `passed` iff every exit code is zero. The task closes itself; Ringo's job is only to run the commands.
 
 The full output is not copied onto the board. The spill pointer inside the summary is the handle, and `Read` opens it — the same contract every other tool result follows.
@@ -135,18 +137,21 @@ The worker copy of the tool is built with a one-value target enum, and the deliv
 
 ## Implementation status
 
-Phase 0 and Phase 1 are landed; the rest of this page is the design they are
-built toward.
+Phase 0, Phase 1 and Phase 2 are landed; the rest of this page is the design
+they are built toward.
 
 - **Landed:** the task record and its snapshot acceptance, change-carrying
   subscriptions, the dispatcher and task card, task-scoped worker sessions
-  (`beetle.context: "task"` is the default when a board is connected), and the
-  restricted `BandMessage`. The card's budget and the error-summary budget are
-  band options (`taskCardChars`, `errorSummaryChars`), not settings keys yet.
-- **Not yet:** the pheromone recorder and deterministic verdicts (Phase 2); the
-  fix loop, automatic verifier, file-conflict serialisation, the worker
-  `TaskCreate` limits and crash recovery (Phase 3); the remaining settings keys
-  and the status lines (Phase 4).
+  (`beetle.context: "task"` is the default when a board is connected), the
+  restricted `BandMessage`, and the pheromone recorder with deterministic
+  verdicts: a declared command's result becomes a bounded `TaskRun` on the task,
+  and a `build`/`verify` task closes itself once every latest run exits zero;
+  a failing run writes `verdict: "failed"` and the error summary and leaves the
+  task open. The card's budget and the error-summary budget are band options
+  (`taskCardChars`, `errorSummaryChars`), not settings keys yet.
+- **Not yet:** the fix loop, automatic verifier, file-conflict serialisation,
+  the worker `TaskCreate` limits and crash recovery (Phase 3); the remaining
+  settings keys and the status lines (Phase 4).
 - **Compatibility:** a band constructed with no `taskStore` has nothing to
   dispatch over, so its context is `"session"` — the long-lived band this page
   replaces. The app always connects the board, so its default is `"task"`.
@@ -166,9 +171,10 @@ Landed:
 - `packages/tools/test/tasks.test.ts`: the new fields round-trip; `rev`/`updatedAt` move on update; the change record names the previous task.
 - `packages/coding-agent/test/task-snapshot.test.ts`: an old snapshot restores with the new fields defaulted; a malformed optional field is refused, not half-read.
 - `packages/coding-agent/test/blackboard.test.ts`: ready/claim ordering, dependency gates, one task per seat, wake dedupe by `rev`, terminal release, resumed `in_progress` tasks, and dispose.
-- `packages/coding-agent/test/beetle.test.ts`: a start becomes one lead task owned by John; a worker's first request carries its card and nothing from a prior task; a completed task destroys the session; workers address John only, once per task; John has no send tool; the human channels still deliver; a board edit under a finished run wakes the worker with the edited card.
+- `packages/coding-agent/test/beetle.test.ts`: a start becomes one lead task owned by John; a worker's first request carries its card and nothing from a prior task; a completed task destroys the session; workers address John only, once per task; John has no send tool; the human channels still deliver; a board edit under a finished run wakes the worker with the edited card; a declared command's result becomes a run and a clean verify closes the task.
 - `packages/coding-agent/test/beetle-command.test.ts`: on the board path the main session gets no `BandMessage` and the band writes no tool-block change, while `/beetle say` and `@john` still reach a seat; an explicit `"session"` context keeps the old tool and the old briefings.
+- `packages/coding-agent/test/beetle-pheromone.test.ts`: the exit code behind a spill header; only declared commands become evidence; the summary is bounded and keeps the pointer; the run list is bounded; latest-run-per-command verdicts; a clean verify closes the task; a failure writes the pheromone and leaves it open; a completed task ignores late results.
 
-Planned, one file per phase: the pheromone recorder (`beetle-pheromone.test.ts`),
-the fix loop and automatic verifier (the rest of `blackboard.test.ts`).
+Planned, one file per phase: the rest of `blackboard.test.ts` — the fix loop
+and the automatic verifier.
 
