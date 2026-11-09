@@ -31,6 +31,7 @@ import {
 	boardLine,
 	createBeetleSurface,
 	createToolChangeLatch,
+	handoffLine,
 	readinessLine,
 	seatsLine,
 	stallNoticeMsFrom,
@@ -266,6 +267,24 @@ describe("starting a band", () => {
 
 		harness.surface.stop();
 		expect(harness.bandToolNames()).toEqual([]);
+	});
+
+	test("status on the board path reports the dispatcher's handoffs", async () => {
+		const store = new TaskStore();
+		const harness = makeHarness({
+			initial: { john: "session", paul: "session", george: "session", ringo: "session" },
+			taskStore: store,
+		});
+		harness.surface.start("board task");
+		await until(() => harness.notices.some((line) => line.startsWith("[blackboard] John claimed")));
+		harness.surface.status();
+
+		const line = harness.notices.find((notice) => notice.startsWith("Handoffs:"));
+		expect(line).toBeDefined();
+		expect(line).toMatch(/^Handoffs: \d+ by the board — ≈\d+ model turns a relay would have spent · /);
+		// The lead task was claimed, so the board did at least one handoff.
+		expect(line).not.toMatch(/^Handoffs: 0 /);
+		harness.surface.stop();
 	});
 
 	test("an explicit session context keeps the long-lived band even with a board connected", async () => {
@@ -614,6 +633,19 @@ describe("boardLine", () => {
 			"Board: 2 tasks · in_progress: #1 Drums (ringo), #2 Bass (paul) · 0 pending · 0 completed",
 		],
 		[
+			"a failed verdict is named even though the task stays open",
+			[
+				{ id: "2", subject: "Wire the bridge", status: "in_progress", owner: "george", verdict: "failed" },
+				{ id: "3", subject: "Mix the tape", status: "pending" },
+			],
+			"Board: 2 tasks · in_progress: #2 Wire the bridge (george) · failing: #2 · 1 pending · 0 completed",
+		],
+		[
+			"a completed task's stale verdict is not failing",
+			[{ id: "1", subject: "Done", status: "completed", verdict: "failed" }],
+			"Board: 1 task · 0 pending · 1 completed",
+		],
+		[
 			"nothing in progress leaves the segment out",
 			[{ id: "1", subject: "Done", status: "completed" }],
 			"Board: 1 task · 0 pending · 1 completed",
@@ -662,6 +694,21 @@ describe("the seat and readiness lines", () => {
 			owner: "paul",
 		}));
 		expect(readinessLine(board)).toBe("Readiness: 4 ready (#1, #2, #3, …) · 0 blocked · 0 unassigned");
+	});
+});
+
+describe("handoffLine", () => {
+	test("counts the board's model-free handoffs and the repairs it wrote", () => {
+		expect(handoffLine({ wakes: 5, claims: 3, fixes: 2, verifications: 1, escalations: 0 })).toBe(
+			"Handoffs: 5 by the board — ≈10 model turns a relay would have spent · 2 fixes · 1 auto-verify · 0 escalations",
+		);
+	});
+
+	test("singulars read as prose", () => {
+		const line = handoffLine({ wakes: 1, claims: 1, fixes: 1, verifications: 0, escalations: 1 });
+		expect(line).toBe(
+			"Handoffs: 1 by the board — ≈2 model turns a relay would have spent · 1 fix · 0 auto-verifies · 1 escalation",
+		);
 	});
 });
 

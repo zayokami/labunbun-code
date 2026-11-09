@@ -36,6 +36,20 @@ export const DEFAULT_FIXER = "paul";
 /** The seat the automatic verifier goes to. */
 export const DEFAULT_VERIFIER = "george";
 
+/**
+ * What the dispatcher did, for `/beetle status`'s handoff line. `wakes` counts
+ * every model-free handoff — a first claim and each re-wake after a board edit.
+ * The relay this replaced spent a peer message and a receipt turn per handoff,
+ * so the status line's saving is `wakes * 2`; it is an estimate and says so.
+ */
+export interface BoardReport {
+	wakes: number;
+	claims: number;
+	fixes: number;
+	verifications: number;
+	escalations: number;
+}
+
 /** What a card may read off the board. Narrowed so a fake store can serve tests. */
 export type CardSource = Pick<TaskStore, "get">;
 
@@ -136,6 +150,12 @@ export interface BlackboardDispatcherOptions {
 	errorChars?: number;
 	/** Repair rounds per task before an escalation; defaults to {@link DEFAULT_MAX_FIX_ROUNDS}. */
 	maxAttempts?: number;
+	/**
+	 * Create a fix (or, at the ceiling, an escalation) for a failed build/verify
+	 * run. False leaves the failure open with its verdict for John to route;
+	 * the automatic verifier is a separate rule and still runs.
+	 */
+	autoFix?: boolean;
 	/** The seat a fix goes to when the failing task names no implementer. */
 	fixer?: string;
 	/** The seat the automatic verifier goes to. */
@@ -171,6 +191,9 @@ export class BlackboardDispatcher {
 	readonly #claims = new Map<string, Claim>();
 	/** Tasks whose continuation budget is spent; the notice fires once. */
 	readonly #exhausted = new Set<string>();
+	/** Failures already reported as left to John; keyed by revision so the next one speaks again. */
+	readonly #leftToJohn = new Set<string>();
+	readonly #report: BoardReport = { wakes: 0, claims: 0, fixes: 0, verifications: 0, escalations: 0 };
 	readonly #unsubscribe: () => void;
 	#scheduled = false;
 	#stopped = false;
@@ -184,6 +207,7 @@ export class BlackboardDispatcher {
 			if (change.type === "restore") {
 				this.#claims.clear();
 				this.#exhausted.clear();
+				this.#leftToJohn.clear();
 			}
 			this.kick();
 		});
@@ -197,6 +221,11 @@ export class BlackboardDispatcher {
 	claimFor(seat: string): { taskId: string; rev: number } | undefined {
 		const claim = this.#claims.get(seat);
 		return claim ? { ...claim } : undefined;
+	}
+
+	/** What the dispatcher has done so far; a copy, so a caller cannot corrupt it. */
+	report(): BoardReport {
+		return { ...this.#report };
 	}
 
 	/** Queue one reconciliation pass. */
@@ -262,9 +291,21 @@ export class BlackboardDispatcher {
 		// A failed build/verify gets exactly one repair or one escalation, and
 		// only one of either per failing episode: the dispatcher clears the
 		// verdict when it acts, so the next pass has nothing left to answer.
+		// `autoFix: false` turns this rule off; the failure stays open, verdict
+		// and all, and says so once per revision.
+		const autoFix = this.#options.autoFix !== false;
 		for (const task of tasks) {
 			if (task.verdict !== "failed" || task.status === "completed") continue;
 			if (task.kind !== "build" && task.kind !== "verify") continue;
+			if (!autoFix) {
+				const key = `${task.id}:${task.rev ?? 0}`;
+				if (this.#leftToJohn.has(key)) continue;
+				this.#leftToJohn.add(key);
+				this.#options.notice?.(
+					`[blackboard] #${task.id} failed — autoFix is off; the failure stays on the board for John.`,
+				);
+				continue;
+			}
 			const active = tasks.some((other) => other.fixes === task.id && other.status !== "completed");
 			if (active) continue;
 			const attempts = task.attempts ?? 0;
@@ -300,6 +341,7 @@ export class BlackboardDispatcher {
 		// Re-arm the failure under its repair: pending with no verdict, so the
 		// next claim is a fresh run and the failed state is not answered twice.
 		store.update(task.id, { status: "pending", verdict: null, attempts: attempts + 1, addBlockedBy: [fix.id] });
+		this.#report.fixes += 1;
 		this.#options.notice?.(
 			`[blackboard] #${task.id} failed at attempt ${attempts + 1} — fix #${fix.id} created for ${displaySeat(fixer)}.`,
 		);
@@ -317,6 +359,7 @@ export class BlackboardDispatcher {
 			{ kind: "escalate", acceptance: task.acceptance, files: task.files, parent: task.id, createdBy: "dispatcher" },
 		);
 		store.update(task.id, { status: "pending", verdict: null, addBlockedBy: [escalation.id] });
+		this.#report.escalations += 1;
 		this.#options.notice?.(
 			`[blackboard] #${task.id} still failing after ${attempts} round(s) — escalation #${escalation.id} is John's.`,
 		);
@@ -354,6 +397,7 @@ export class BlackboardDispatcher {
 				createdBy: "dispatcher",
 			},
 		);
+		this.#report.verifications += 1;
 		this.#options.notice?.(
 			`[blackboard] #${task.id} completed unverified — verify #${verify.id} created for ${displaySeat(verifier)}.`,
 		);
@@ -374,6 +418,15 @@ export class BlackboardDispatcher {
 		for (const task of tasks) {
 			if (task.status !== "in_progress" || task.owner === undefined) continue;
 			if (!seats.includes(task.owner)) continue;
+			// autoFix off: a failed build/verify belongs to John. Waking its owner
+			// again would be the repair the switch turned off.
+			if (
+				this.#options.autoFix === false &&
+				task.verdict === "failed" &&
+				(task.kind === "build" || task.kind === "verify")
+			) {
+				continue;
+			}
 			// An in_progress task occupies its seat whether or not this pass wakes
 			// it: invariant four is a claim rule, and the seat already has work.
 			if (busy.has(task.owner)) continue;
@@ -398,6 +451,7 @@ export class BlackboardDispatcher {
 			const continued = store.update(task.id, { attempts: attempts + 1 });
 			if (!continued) continue;
 			this.#claims.set(task.owner, { taskId: continued.id, rev: continued.rev ?? 0 });
+			this.#report.wakes += 1;
 			this.#wake(task.owner, continued, resumed ? "continued" : "resumed");
 		}
 	}
@@ -428,6 +482,8 @@ export class BlackboardDispatcher {
 			busy.add(seat);
 			running.push(claimed);
 			this.#claims.set(seat, { taskId: claimed.id, rev: claimed.rev ?? 0 });
+			this.#report.wakes += 1;
+			this.#report.claims += 1;
 			this.#options.notice?.(`[blackboard] ${displaySeat(seat)} claimed #${claimed.id} ${claimed.subject}`);
 			this.#wake(seat, claimed, "claimed");
 		}

@@ -30,7 +30,7 @@ The dispatcher is a state machine over the board, not an agent. It renders strin
 5. **One wake per revision.** A wake is keyed by `(owner, task id, rev)`; a board change that bumps `rev` may wake again, an unchanged task cannot.
 6. **A worker's memory is the board.** The session is created when the task is claimed and destroyed when the task reaches a terminal state. Nothing a worker said survives into the next task.
 7. **Environment facts are structured.** A command's result is a `TaskRun` carrying the command, its exit code and a `cutText` summary. A member does not rewrite a test failure as prose.
-8. **A failure gets one fix task, not a conversation.** A failed `build`/`verify` task produces a `fix` task owned by the implementer, carrying the error pheromone. Repair attempts are counted; the count has a ceiling.
+8. **A failure gets one fix task, not a conversation.** A failed `build`/`verify` task produces a `fix` task owned by the implementer, carrying the error pheromone. Repair attempts are counted; the count has a ceiling. With `beetle.autoFix: false` the dispatcher writes nothing and leaves the failure to John.
 9. **Code is verified structurally.** An `implement` task that completes with no downstream `verify`/`build` task gets one created for it. "Done" without evidence is not a state the board leaves reachable.
 10. **`BandMessage` is an emergency channel, not a bus.** A worker may address John only, at most once per task run. John answers by changing the board, never by messaging back. The human channels are `/beetle say` and `@john`.
 
@@ -117,6 +117,8 @@ pending ──deps satisfied──▶ in_progress ──▶ completed
 
 `beetle.maxFixRounds` (default 3) bounds the loop per failing task. The fix task carries the failing task's `attempts + 1`, so a chain of fixes cannot restart the count. At the ceiling the dispatcher creates one `escalate` task owned by John and stops producing fixes; it does not keep paying for attempts the band cannot finish.
 
+`beetle.autoFix: false` turns the loop off. A failed `build`/`verify` keeps its verdict and stays `in_progress`; the dispatcher says so once per revision and does not wake its owner again, so the failure is John's to route. The automatic verifier is a separate rule and still runs.
+
 ## `BandMessage` after the change
 
 | sender | allowed targets | budget |
@@ -129,15 +131,18 @@ The worker copy of the tool is built with a one-value target enum, and the deliv
 
 ## `/beetle status`
 
-The human's window on the board without reading the transcript. After the band tally it prints three lines:
+The human's window on the board without reading the transcript. On the board path, after the band tally it prints four lines:
 
 ```
+Handoffs: 8 by the board — ≈16 model turns a relay would have spent · 2 fixes · 1 auto-verify · 0 escalations
 Seats: john #4 · paul #6 · george idle · ringo idle
 Readiness: 2 ready (#7, #9) · 1 blocked · 0 unassigned
 Board: 9 tasks · in_progress: #4 implement: blackboard dispatcher (john), #6 ... · 3 pending · 4 completed
 ```
 
-Each line is a pure function over the same store the dispatcher routes over — `seatsLine`, `readinessLine`, `boardLine` in `beetle-commands.ts`. No dispatcher access is needed: `owner` and `blockedBy` are already on the board, and readiness is counted the dispatcher's way (pending, a seat owner, every dependency completed). A pending task with no seat owner is counted as unassigned: it is written but nobody will be woken for it.
+Each line is a pure function over the same store the dispatcher routes over — `handoffLine`, `seatsLine`, `readinessLine`, `boardLine` in `beetle-commands.ts`. No dispatcher access is needed for the last three: `owner` and `blockedBy` are already on the board, and readiness is counted the dispatcher's way (pending, a seat owner, every dependency completed). A pending task with no seat owner is counted as unassigned: it is written but nobody will be woken for it. A failed verdict is named in the board line (`failing: #3`) so an `autoFix: false` failure cannot read as a run still in progress.
+
+The handoff line is the cost report: `wakes` counts the dispatcher's model-free handoffs — claims and re-wakes after board edits — and the saving is shown as `≈ wakes × 2` model turns, the peer message plus receipt turn a relay spent per handoff. The estimate is deliberately labeled; the fix, auto-verify and escalation counts are exact.
 
 ## Settings
 
@@ -145,12 +150,13 @@ Each line is a pure function over the same store the dispatcher routes over — 
 |---|---|---|
 | `beetle.context` | `"task"` | `"task"` destroys the worker session at the task boundary; `"session"` keeps the old long-lived conversation |
 | `beetle.maxFixRounds` | `3` | repair attempts before escalation |
+| `beetle.autoFix` | `true` | the dispatcher repairs failed build/verify runs; `false` leaves them to John |
 | `beetle.taskCardChars` | `4000` | wake payload bound |
 | `beetle.errorSummaryChars` | `1200` | per-run pheromone bound |
 
 ## Implementation status
 
-Phase 0 through Phase 4 are landed.
+Phase 0 through Phase 5 are landed.
 
 - **Landed:** the task record and its snapshot acceptance, change-carrying
   subscriptions, the dispatcher and task card, task-scoped worker sessions
@@ -166,7 +172,8 @@ Phase 0 through Phase 4 are landed.
   `TaskCreate` (fix/verify/research under a named parent, three per parent).
   Phase 4 makes `beetle.maxFixRounds`, `beetle.taskCardChars` and
   `beetle.errorSummaryChars` real settings keys and adds the seat, readiness
-  and board lines to `/beetle status`.
+  and board lines to `/beetle status`. Phase 5 adds the `beetle.autoFix`
+  switch, the handoff cost line, and the board line's `failing:` segment.
 - **Compatibility:** a band constructed with no `taskStore` has nothing to
   dispatch over, so its context is `"session"` — the long-lived band this page
   replaces. The app always connects the board, so its default is `"task"`.
@@ -178,6 +185,7 @@ Phase 0 through Phase 4 are landed.
 - **Phase 2** — the pheromone recorder and deterministic verdicts.
 - **Phase 3** — the fix loop, the automatic verifier, file-conflict serialisation, crash recovery and the worker `TaskCreate` limits.
 - **Phase 4** — settings, `/beetle status`, and this page's implementation notes.
+- **Phase 5** — the optional `beetle.autoFix` switch and the handoff cost line.
 
 ## Tests that hold these claims
 
@@ -185,9 +193,9 @@ Landed:
 
 - `packages/tools/test/tasks.test.ts`: the new fields round-trip; `rev`/`updatedAt` move on update; a `null` verdict clears it; the change record names the previous task.
 - `packages/coding-agent/test/task-snapshot.test.ts`: an old snapshot restores with the new fields defaulted; a malformed optional field is refused, not half-read.
-- `packages/coding-agent/test/blackboard.test.ts`: ready/claim ordering, dependency gates, one task per seat, wake dedupe by `rev`, terminal release, resumed `in_progress` tasks, dispose; `pathsConflict`/`filesConflict` and claim serialisation on overlapping files; the continuation ceiling (one notice, no wake); one fix for a failed verify, its error pheromone and re-armed failure; fix completion marking `fixedBy` and re-claiming the verifier; no second fix while one is active; the fixer fallback; escalation at the ceiling; the automatic verifier created once and skipped when a verifier already exists.
+- `packages/coding-agent/test/blackboard.test.ts`: ready/claim ordering, dependency gates, one task per seat, wake dedupe by `rev`, terminal release, resumed `in_progress` tasks, dispose; `pathsConflict`/`filesConflict` and claim serialisation on overlapping files; the continuation ceiling (one notice, no wake); one fix for a failed verify, its error pheromone and re-armed failure; fix completion marking `fixedBy` and re-claiming the verifier; no second fix while one is active; the fixer fallback; escalation at the ceiling; the automatic verifier created once and skipped when a verifier already exists; `autoFix: false` leaving a failure open with one notice and no wake (while the auto-verifier still runs); the report counting wakes, claims, fixes, verifications and escalations.
 - `packages/coding-agent/test/beetle.test.ts`: a start becomes one lead task owned by John; a worker's first request carries its card and nothing from a prior task; a completed task destroys the session; workers address John only, once per task; John has no send tool; the human channels still deliver; a board edit under a finished run wakes the worker with the edited card; a declared command's result becomes a run and a clean verify closes the task; a board left in progress is recovered and claimed; a worker's `TaskCreate` admits fix/verify/research under a parent, three per parent, while John keeps the full tool.
-- `packages/coding-agent/test/beetle-command.test.ts`: on the board path the main session gets no `BandMessage` and the band writes no tool-block change, while `/beetle say` and `@john` still reach a seat; an explicit `"session"` context keeps the old tool and the old briefings; `/beetle status` prints the seat, readiness and board lines, and `readinessLine` counts ready/blocked/unassigned the dispatcher's way.
+- `packages/coding-agent/test/beetle-command.test.ts`: on the board path the main session gets no `BandMessage` and the band writes no tool-block change, while `/beetle say` and `@john` still reach a seat; an explicit `"session"` context keeps the old tool and the old briefings; `/beetle status` prints the handoff, seat, readiness and board lines, with `readinessLine` counting ready/blocked/unassigned the dispatcher's way, `handoffLine` pluralising its repair counts, and the board line naming a `failing:` task.
 - `packages/coding-agent/test/beetle-pheromone.test.ts`: the exit code behind a spill header; only declared commands become evidence; the summary is bounded and keeps the pointer; the run list is bounded; latest-run-per-command verdicts; a clean verify closes the task; a failure writes the pheromone and leaves it open; a completed task ignores late results.
-- `packages/coding-agent/test/settings.test.ts`: the `beetle` block carries `maxFixRounds`, `taskCardChars` and `errorSummaryChars`; unset stays unset, and zero, negatives or fractions are refused at load.
+- `packages/coding-agent/test/settings.test.ts`: the `beetle` block carries `maxFixRounds`, `taskCardChars` and `errorSummaryChars`; unset stays unset, and zero, negatives or fractions are refused at load. `autoFix` accepts booleans only, and unset leaves the dispatcher's default on.
 

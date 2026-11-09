@@ -2229,6 +2229,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		maxCostUSD: settings.beetle?.maxCostUSD,
 		stallNoticeMinutes: settings.beetle?.stallNoticeMinutes,
 		maxFixRounds: settings.beetle?.maxFixRounds,
+		autoFix: settings.beetle?.autoFix,
 		taskCardChars: settings.beetle?.taskCardChars,
 		errorSummaryChars: settings.beetle?.errorSummaryChars,
 	});

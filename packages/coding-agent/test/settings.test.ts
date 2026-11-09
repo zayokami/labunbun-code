@@ -222,6 +222,14 @@ describe("SettingsSchema", () => {
 		}
 	});
 
+	test("autoFix is a switch, not a budget", () => {
+		expect(SettingsSchema.parse({ beetle: { autoFix: false } }).beetle?.autoFix).toBe(false);
+		expect(SettingsSchema.parse({ beetle: { autoFix: true } }).beetle?.autoFix).toBe(true);
+		// Unset leaves the dispatcher's default, which is on.
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.autoFix).toBeUndefined();
+		expect(SettingsSchema.safeParse({ beetle: { autoFix: "off" } }).success).toBe(false);
+	});
+
 	test("prices can be declared for a whole catalog, per provider or as an override", () => {
 		const parsed = SettingsSchema.parse({
 			providers: {

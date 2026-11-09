@@ -51,7 +51,7 @@ import {
 import { type Model, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
 import { type AgentTask, TASK_BOARD_TOOL_NAMES, type TaskStore } from "@labunbun/tools";
 import { z } from "zod";
-import { BlackboardDispatcher } from "./blackboard.ts";
+import { BlackboardDispatcher, type BoardReport } from "./blackboard.ts";
 import { type CompactionTuning, type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { NO_SIGN_INS, type SubscriptionSignIns, unrunnableSuffix } from "./credential-presence.ts";
@@ -75,6 +75,8 @@ const DISPLAY_NAME: Record<BeetleMember, string> = {
 	george: "George",
 	ringo: "Ringo",
 };
+
+export type { BoardReport };
 
 /** Per-member model config: a `provider/id` ref, or the sentinel `"session"`. */
 export type BeetleModels = Record<BeetleMember, string>;
@@ -608,6 +610,8 @@ export interface BeetleBandOptions {
 	errorSummaryChars?: number;
 	/** Repair rounds per task before the dispatcher escalates it; `beetle.maxFixRounds`. */
 	maxFixRounds?: number;
+	/** Repair failed build/verify runs; `beetle.autoFix: false` leaves them for John. */
+	autoFix?: boolean;
 	/** The same session stream the main conversation uses. */
 	streamFn: StreamFn;
 	/** The worker tool table (the one subagents draw from). */
@@ -730,6 +734,7 @@ export class BeetleBand {
 				charBudget: options.taskCardChars,
 				errorChars: options.errorSummaryChars,
 				maxAttempts: options.maxFixRounds,
+				autoFix: options.autoFix,
 			});
 			// The environment speaks through the seat's own tool events. The
 			// recorder writes a declared command's result to the task — a store
@@ -749,6 +754,11 @@ export class BeetleBand {
 	/** `"task"` routes over the board; `"session"` keeps the old long-lived band. */
 	get context(): BeetleContext {
 		return this.#context;
+	}
+
+	/** The dispatcher's counters for `/beetle status`; undefined on the session band. */
+	boardReport(): BoardReport | undefined {
+		return this.#dispatcher?.report();
 	}
 
 	/**

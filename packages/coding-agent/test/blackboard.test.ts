@@ -30,7 +30,10 @@ interface Woken {
 	card: string;
 }
 
-function fixture(store: TaskStore, options: { maxAttempts?: number; fixer?: string; verifier?: string } = {}) {
+function fixture(
+	store: TaskStore,
+	options: { maxAttempts?: number; fixer?: string; verifier?: string; autoFix?: boolean } = {},
+) {
 	const wakes: Woken[] = [];
 	const released: string[] = [];
 	const notices: string[] = [];
@@ -395,6 +398,60 @@ describe("the repair loop", () => {
 		expect(store.get("2")?.verdict).toBeUndefined();
 		expect(store.get("2")?.blockedBy).toContain("3");
 		expect(notices.some((line) => line.includes("escalation #3 is John's"))).toBe(true);
+		expect(dispatcher.report().escalations).toBe(1);
+		dispatcher.dispose();
+	});
+
+	test("with autoFix off a failure is left open for John, not repaired or woken", async () => {
+		const store = new TaskStore();
+		const { dispatcher, wakes, notices } = fixture(store, { autoFix: false });
+		failedVerify(store);
+		await settle();
+
+		// No fix and no escalation: the failure keeps its verdict and its seat.
+		expect(store.list()).toHaveLength(2);
+		expect(store.get("2")).toMatchObject({ status: "in_progress", verdict: "failed" });
+		expect(store.get("2")?.attempts).toBe(0);
+		// Nor is its owner woken with the failure: that wake would be the repair
+		// the switch turned off.
+		expect(wakes).toHaveLength(0);
+		expect(notices.filter((line) => line.includes("autoFix is off"))).toHaveLength(1);
+
+		// Later passes stay quiet; the board already said whose failure it is.
+		dispatcher.kick();
+		await settle();
+		expect(notices.filter((line) => line.includes("autoFix is off"))).toHaveLength(1);
+		dispatcher.dispose();
+	});
+
+	test("autoFix off does not turn the automatic verifier off", async () => {
+		const store = new TaskStore();
+		const { dispatcher } = fixture(store, { autoFix: false });
+		store.create("write the parser", "d", undefined, "paul", [], { kind: "implement" });
+		store.update("1", { status: "completed" });
+		await settle();
+
+		expect(store.get("2")).toMatchObject({ kind: "verify", owner: "george", status: "in_progress" });
+		dispatcher.dispose();
+	});
+
+	test("the report counts the dispatcher's handoffs and the work it wrote", async () => {
+		const store = new TaskStore();
+		const { dispatcher } = fixture(store);
+		store.create("write the parser", "d", undefined, "paul", [], { kind: "implement" });
+		store.update("1", { status: "completed" });
+		await settle();
+		// One verify created for the unverified implement, and claimed: one handoff.
+		expect(dispatcher.report()).toEqual({ wakes: 1, claims: 1, fixes: 0, verifications: 1, escalations: 0 });
+
+		// Fail the verify: a fix is written and claimed on the same pass.
+		store.update("2", { status: "in_progress", verdict: "failed", errorSummary: "boom" });
+		await settle();
+		expect(dispatcher.report()).toEqual({ wakes: 2, claims: 2, fixes: 1, verifications: 1, escalations: 0 });
+
+		// A copy, so a caller cannot corrupt the counters.
+		dispatcher.report().wakes = 99;
+		expect(dispatcher.report().wakes).toBe(2);
 		dispatcher.dispose();
 	});
 

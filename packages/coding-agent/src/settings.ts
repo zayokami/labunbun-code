@@ -403,6 +403,8 @@ export const SettingsSchema = z.object({
 			stallNoticeMinutes: z.number().int().nonnegative().optional(),
 			/** Repair rounds a failing build/verify gets before the dispatcher escalates it. */
 			maxFixRounds: z.number().int().positive().optional(),
+			/** Let the dispatcher repair failed build/verify runs; false leaves them to John. */
+			autoFix: z.boolean().optional(),
 			/** Bound on a rendered task card, in characters. */
 			taskCardChars: z.number().int().positive().optional(),
 			/** Bound on a failing run's summary on the board, in characters. */

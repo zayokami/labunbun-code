@@ -22,6 +22,7 @@ import {
 	type BeetleModels,
 	type BeetlePickOption,
 	type BeetleStateSnapshot,
+	type BoardReport,
 	formatReceipt,
 	memberTallyLines,
 	pickBeetleModels,
@@ -45,7 +46,7 @@ export interface BeetleStatusCard {
 	details: Array<[string, string]>;
 }
 
-/** The board slice the summary line reads — `TaskStore.summary()`'s shape. */
+/** The board slice `/beetle status` reads — a `TaskStore` row, narrowed. */
 export interface BoardTask {
 	id: string;
 	subject: string;
@@ -53,6 +54,8 @@ export interface BoardTask {
 	owner?: string;
 	/** Read by the readiness line; absent reads as no dependencies. */
 	blockedBy?: string[];
+	/** A failed build/verify is named by the board line even while it stays open. */
+	verdict?: "passed" | "failed";
 }
 
 /**
@@ -67,6 +70,10 @@ export function boardLine(tasks: BoardTask[]): string {
 		.filter((task) => task.status === "in_progress")
 		.map((task) => `#${task.id} ${task.subject}${task.owner ? ` (${task.owner})` : ""}`);
 	if (active.length > 0) parts.push(`in_progress: ${active.join(", ")}`);
+	// With `beetle.autoFix` off a failed verify stays open; without this segment
+	// it would read exactly like a run that is still going.
+	const failing = tasks.filter((task) => task.verdict === "failed" && task.status !== "completed");
+	if (failing.length > 0) parts.push(`failing: ${failing.map((task) => `#${task.id}`).join(", ")}`);
 	parts.push(`${tasks.filter((task) => task.status === "pending").length} pending`);
 	parts.push(`${tasks.filter((task) => task.status === "completed").length} completed`);
 	return `Board: ${parts.join(" · ")}`;
@@ -106,6 +113,25 @@ export function readinessLine(tasks: BoardTask[]): string {
 	const names = ready.length > preview.length ? `${preview.join(", ")}, …` : preview.join(", ");
 	const head = `Readiness: ${ready.length} ready${names ? ` (${names})` : ""}`;
 	return `${head} · ${blocked} blocked · ${unassigned.length} unassigned`;
+}
+
+/** "1 fix", "2 fixes" — the status line reads as prose, not as counters. */
+function plural(count: number, one: string, many = `${one}s`): string {
+	return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * The status card's handoff line: what the dispatcher did without a model, and
+ * the repairs it wrote. The saving is an estimate — the relay spent a peer
+ * message plus a receipt turn per handoff — so it carries a `≈`.
+ */
+export function handoffLine(report: BoardReport): string {
+	const turns = report.wakes * 2;
+	return (
+		`Handoffs: ${report.wakes} by the board — ≈${turns} model turns a relay would have spent · ` +
+		`${plural(report.fixes, "fix", "fixes")} · ${plural(report.verifications, "auto-verify", "auto-verifies")} · ` +
+		plural(report.escalations, "escalation")
+	);
 }
 
 export interface BeetleSurfaceDeps {
@@ -179,6 +205,8 @@ export interface BeetleSurfaceDeps {
 	stallNoticeMinutes?: number;
 	/** Repair rounds before escalation (settings.beetle.maxFixRounds); undefined = 3. */
 	maxFixRounds?: number;
+	/** Repair failed build/verify runs (settings.beetle.autoFix); undefined = true. */
+	autoFix?: boolean;
 	/** Bound on a rendered task card (settings.beetle.taskCardChars); undefined = 4000. */
 	taskCardChars?: number;
 	/** Bound on a failing run's summary (settings.beetle.errorSummaryChars); undefined = 1200. */
@@ -389,6 +417,7 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			maxCostUSD: deps.maxCostUSD,
 			stallNoticeMs: stallNoticeMsFrom(deps.stallNoticeMinutes),
 			maxFixRounds: deps.maxFixRounds,
+			autoFix: deps.autoFix,
 			taskCardChars: deps.taskCardChars,
 			errorSummaryChars: deps.errorSummaryChars,
 			onNotice: deps.notify,
@@ -549,6 +578,10 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 					`Lifetime: ${state.lifetime.bands} band${state.lifetime.bands === 1 ? "" : "s"} · ${state.lifetime.turns} turns · $${state.lifetime.costUSD.toFixed(4)}`,
 				);
 			}
+			// The board's own work: these handoffs cost no model turn, which is the
+			// whole point of the dispatcher. Absent on the session band.
+			const report = current.boardReport();
+			if (report) deps.notify(handoffLine(report));
 			// The board last: the tally line is about the band, the board lines are
 			// about the work — and the two read together are what "how is it going"
 			// means. Per-seat and readiness come first so the board summary closes
