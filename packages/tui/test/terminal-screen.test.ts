@@ -23,13 +23,13 @@ describe("TerminalScreen", () => {
 	test("hides the cursor, then writes a frame per changed paint", () => {
 		const stream = fakeStream();
 		const screen = new TerminalScreen({ stream, columns: 10, rows: 2 });
-		expect(stream.writes).toEqual(["\x1b[?25l"]);
+		expect(stream.writes).toEqual(["\x1b[?1049h", "\x1b[?25l"]);
 
 		expect(screen.paint(drawText("hi"))).toBe(true);
-		expect(stream.writes).toHaveLength(2);
-		expect(stream.writes[1]).toContain("hi");
+		expect(stream.writes).toHaveLength(3);
+		expect(stream.writes[2]).toContain("hi");
 		// The first frame owns the display: whatever was there is erased.
-		expect(stream.writes[1]).toContain("\x1b[H\x1b[2J");
+		expect(stream.writes[2]).toContain("\x1b[H\x1b[2J");
 		screen.dispose();
 	});
 
@@ -88,11 +88,11 @@ describe("TerminalScreen", () => {
 		screen.dispose();
 	});
 
-	test("dispose restores the default style and the cursor exactly once", () => {
+	test("dispose restores the default style, the main screen and the cursor exactly once", () => {
 		const stream = fakeStream();
 		const screen = new TerminalScreen({ stream, columns: 10, rows: 2 });
 		screen.dispose();
-		expect(stream.writes.slice(1)).toEqual(["\x1b[0m", "\x1b[?25h"]);
+		expect(stream.writes.slice(2)).toEqual(["\x1b[0m", "\x1b[?1049l", "\x1b[?25h"]);
 
 		const written = stream.writes.length;
 		screen.dispose();
@@ -100,9 +100,33 @@ describe("TerminalScreen", () => {
 		expect(screen.paint(drawText("A"))).toBe(false);
 	});
 
+	test("the alternate screen restores the transcript underneath", () => {
+		const stream = fakeStream();
+		const screen = new TerminalScreen({ stream, columns: 10, rows: 2 });
+		expect(stream.writes[0]).toBe("\x1b[?1049h");
+		screen.paint(drawText("A"));
+		screen.dispose();
+		expect(stream.writes.at(-2)).toBe("\x1b[?1049l");
+		expect(stream.writes.at(-1)).toBe("\x1b[?25h");
+	});
+
+	test("a view that shares the main screen never enters the alternate one", () => {
+		const stream = fakeStream();
+		const screen = new TerminalScreen({ stream, columns: 10, rows: 2, alternateScreen: false });
+		screen.paint(drawText("A"));
+		screen.dispose();
+		expect(stream.writes.join("")).not.toContain("1049");
+	});
+
 	test("a screen that does not hide the cursor leaves it alone", () => {
 		const stream = fakeStream();
-		const screen = new TerminalScreen({ stream, columns: 10, rows: 2, hideCursor: false });
+		const screen = new TerminalScreen({
+			stream,
+			columns: 10,
+			rows: 2,
+			hideCursor: false,
+			alternateScreen: false,
+		});
 		expect(stream.writes).toEqual([]);
 		screen.dispose();
 		expect(stream.writes).toEqual(["\x1b[0m"]);

@@ -18,6 +18,9 @@ import { CellGrid } from "./cell-grid.ts";
 import type { StyleTable } from "./cell-style.ts";
 import { chunkFrame, encodeFrame, hideCursor, resetStyle, showCursor } from "./frame.ts";
 
+const ENTER_ALTERNATE_SCREEN = "\x1b[?1049h";
+const LEAVE_ALTERNATE_SCREEN = "\x1b[?1049l";
+
 /** The part of a writable stream a screen needs. */
 export interface ScreenStream {
 	write(data: string): unknown;
@@ -40,6 +43,13 @@ export interface TerminalScreenOptions {
 	 * cursor parked in the middle of a redrawn frame reads as a render bug.
 	 */
 	hideCursor?: boolean;
+	/**
+	 * Draw on the terminal's alternate screen. On by default: the screen takes
+	 * the display, and disposing it restores the transcript that was underneath
+	 * instead of leaving an erased main screen. Turn it off for a view that
+	 * shares the main screen with the rest of the app.
+	 */
+	alternateScreen?: boolean;
 }
 
 /** Where the cursor is left after a frame, in zero-based cells. */
@@ -58,15 +68,18 @@ export interface CursorPosition {
  * the first frame and each frame after a resize, and the promise that disposal
  * leaves the terminal as it was found.
  *
- * The screen owns the display, so the first paint erases whatever was there.
- * A caller that wants its view drawn below existing output should not adopt a
- * full-screen view for it.
+ * The screen owns the display: it enters the alternate screen by default, so
+ * the transcript underneath is restored on disposal, and its first paint
+ * erases whatever the alternate screen held. A caller that wants its view
+ * drawn below existing output should turn `alternateScreen` off and should not
+ * expect the screen to preserve what it paints over.
  */
 export class TerminalScreen {
 	readonly grid: CellGrid;
 	private readonly stream: ScreenStream;
 	private readonly synchronized: boolean;
 	private readonly hidesCursor: boolean;
+	private readonly alternate: boolean;
 	private pendingClear = true;
 	private closed = false;
 
@@ -74,7 +87,9 @@ export class TerminalScreen {
 		this.stream = options.stream;
 		this.synchronized = options.synchronizedOutput ?? true;
 		this.hidesCursor = options.hideCursor ?? true;
+		this.alternate = options.alternateScreen ?? true;
 		this.grid = new CellGrid(options.columns, options.rows);
+		if (this.alternate) this.stream.write(ENTER_ALTERNATE_SCREEN);
 		if (this.hidesCursor) this.stream.write(hideCursor());
 	}
 
@@ -123,11 +138,15 @@ export class TerminalScreen {
 		return true;
 	}
 
-	/** Restore the cursor and the default style. Safe to call twice. */
+	/** Restore the default style, the main screen and the cursor. Safe to call twice. */
 	dispose(): void {
 		if (this.closed) return;
 		this.closed = true;
 		this.stream.write(resetStyle());
+		// Leave before showing the cursor: visibility is a terminal-wide mode, and
+		// the last state the caller is left with should be the main screen with a
+		// visible cursor.
+		if (this.alternate) this.stream.write(LEAVE_ALTERNATE_SCREEN);
 		if (this.hidesCursor) this.stream.write(showCursor());
 	}
 }

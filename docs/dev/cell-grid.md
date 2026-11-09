@@ -67,8 +67,9 @@ paint(draw) ─▶ back.beginFrame() ─▶ draw(back) ─▶ diff(front, back)
 6. **Resize invalidates the physical screen.** The grid reallocates, the next
    frame erases with `CSI 2 J`, and the screen is repainted from scratch. The
    erase is screen-only, never scrollback.
-7. **Disposal restores the terminal.** The default style is reset and the
-   cursor is shown exactly once; a disposed screen ignores further paints.
+7. **Disposal restores the terminal.** The default style is reset, the alternate
+   screen is left, and the cursor is shown exactly once; a disposed screen
+   ignores further paints.
 8. **A frame is atomic where the terminal supports it.** Frames are wrapped in
    DEC mode 2026 (synchronized output) unless the caller turns it off.
 9. **No write splits an escape sequence.** Windows' ConPTY loses track of large
@@ -84,13 +85,17 @@ background colour) has to be repainted even though it holds no glyph.
 `encodeFrame` positions the cursor only when a run does not continue where the
 previous one ended, emits SGR only when the style changes, and finishes in the
 default style. Grid coordinates are zero-based; the escape grammar is
-one-based; the conversion happens in one place.
+one-based; the conversion happens in one place. `chunkFrame` sits beside it for
+a caller writing frames to its own stream: it cuts only between escape
+sequences and code points, under the ConPTY budget.
 
 ## Lifecycle
 
-`TerminalScreen` owns a `CellGrid`, hides the cursor on construction, and
-restores it on `dispose`. The screen owns the display, so its first paint
-erases whatever the terminal held. `paint(draw, cursor?)` is the whole draw
+`TerminalScreen` owns a `CellGrid`, enters the alternate screen and hides the
+cursor on construction, and leaves the screen and restores the cursor on
+`dispose` — the alternate screen unless `alternateScreen: false`, for a view
+that shares the main screen. The screen owns the display, so its first paint
+erases whatever that screen held. `paint(draw, cursor?)` is the whole draw
 call; `cursor` parks the cursor after a frame that drew something. `resize` is
 explicit — the caller owns the terminal-size source — and leaves a pending erase
 that the next paint spends, even if that frame is empty.
@@ -107,6 +112,7 @@ instead of returning React elements.
   sanitizing, buffer reuse across frames, resize invalidation, the diff's run
   grouping, every SGR/positioning rule in the encoder, and sequence-safe
   chunking under the ConPTY budget.
-- `packages/tui/test/terminal-screen.test.ts`: hide/show cursor, the opening
-  erase, no-op frames, change-sized writes, the resize erase, cursor parking,
-  and idempotent disposal.
+- `packages/tui/test/terminal-screen.test.ts`: hide/show cursor, the alternate
+  screen on both sides of the lifecycle, the opening erase, no-op frames,
+  change-sized writes, the resize erase, cursor parking, and idempotent
+  disposal.

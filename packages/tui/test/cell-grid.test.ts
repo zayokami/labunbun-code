@@ -234,6 +234,29 @@ describe("CellGrid", () => {
 	});
 });
 
+describe("StyleTable", () => {
+	test("one appearance is one id, and normalized colours share it", () => {
+		const styles = new StyleTable();
+		const bold = styles.intern({ bold: true });
+		expect(styles.intern({ bold: true })).toBe(bold);
+		expect(styles.intern({ fg: 300 })).toBe(styles.intern({ fg: 255 }));
+		expect(styles.intern({ bg: [1.7, -5, 999] })).toBe(styles.intern({ bg: [1, 0, 255] }));
+		expect(styles.size).toBe(4); // default, bold, fg, bg
+	});
+
+	test("attributes and colours are part of the identity", () => {
+		const styles = new StyleTable();
+		expect(styles.intern({ bold: true })).not.toBe(styles.intern({ dim: true }));
+		expect(styles.intern({ fg: 1 })).not.toBe(styles.intern({ bg: 1 }));
+	});
+
+	test("an unknown id reads as the default style", () => {
+		const styles = new StyleTable();
+		expect(styles.style(999)).toEqual({});
+		expect(styles.sgr(999)).toBe("\x1b[0m");
+	});
+});
+
 describe("encodeFrame", () => {
 	const styles = new StyleTable();
 

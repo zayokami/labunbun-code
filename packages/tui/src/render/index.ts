@@ -16,6 +16,7 @@ export {
 	StyleTable,
 } from "./cell-style.ts";
 export {
+	chunkFrame,
 	diffBuffers,
 	encodeFrame,
 	type FrameOp,
