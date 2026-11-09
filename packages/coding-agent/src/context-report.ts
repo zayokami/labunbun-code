@@ -14,7 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import type { CompactionTrigger, ContextBreakdown, PreservedFile } from "@labunbun/agent";
-import { formatTokens } from "@labunbun/tui/format";
+import { contextPercentUsed, formatTokens } from "@labunbun/tui/format";
 
 const LOW_CONTEXT_WARN_FRACTION = 0.8;
 
@@ -103,7 +103,7 @@ export interface CompactionHistory {
 // The shortening itself lives in the TUI, beside the status line and the card
 // that draw it: one implementation for every "1.2k" in the app, so the watch
 // panel's facts and the status row cannot drift into two vocabularies.
-export { formatTokens };
+export { contextPercentUsed, formatTokens };
 
 /**
  * The card's rows, in reading order: what the context is made of, then what is
@@ -229,7 +229,7 @@ function keptFilesRow(drift: PreservedFilesDrift): [string, string] {
 
 /** The one line `/context` leaves in the transcript, where the card cannot scroll. */
 export function contextSummaryLine(breakdown: ContextBreakdown, limits: ContextLimits): string {
-	const percentOf = limits.threshold > 0 ? Math.round((breakdown.usedTokens / limits.threshold) * 100) : 0;
+	const percentOf = contextPercentUsed(breakdown.usedTokens, limits.threshold);
 	return (
 		`Context: ${percentOf}% of the auto-compact point ` +
 		`(${formatTokens(breakdown.usedTokens)} of ${formatTokens(limits.threshold)}; ${formatTokens(
@@ -262,7 +262,7 @@ export function isContextLow(usedTokens: number, threshold: number): boolean {
  * tokens at all, `/compact` spends one summarization call.
  */
 export function lowContextWarning(usedTokens: number, threshold: number): string {
-	const percent = threshold > 0 ? Math.min(100, Math.round((usedTokens / threshold) * 100)) : 0;
+	const percent = Math.min(100, contextPercentUsed(usedTokens, threshold));
 	return (
 		`Context is ${percent}% of the auto-compact point (${formatTokens(usedTokens)} of ${formatTokens(threshold)}). ` +
 		"Old tool results become previews before any summary is paid for; /trim does it now, /compact summarizes the conversation."

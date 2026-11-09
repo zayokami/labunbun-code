@@ -4,7 +4,7 @@ import { Text } from "ink";
 import { useEffect, useState } from "react";
 import { formatElapsed } from "../elapsed.ts";
 import { thinkingWord } from "../flavor.ts";
-import { formatTokens } from "../format.ts";
+import { contextPercentUsed, formatTokens } from "../format.ts";
 import { useTheme } from "../theme.ts";
 import type { PendingTool, StatusPhase, UiBackgroundShell, UiRetry } from "../ui-state.ts";
 
@@ -29,7 +29,9 @@ export const BATTERY_CABLE = "+";
  * only means something as a comparison: twenty percent free is the point where
  * a session should be thinking about `/compact`, and the percentage is the one
  * part of that row that is a reading rather than a label — which is what lets
- * it be the one part that leaves the dim.
+ * it be the one part that leaves the dim. The row prints percent used, so the
+ * comparison is `used > 100 - this`; the threshold stays named for the free
+ * headroom it describes.
  */
 export const CONTEXT_LOW_FREE_PERCENT = 20;
 
@@ -181,16 +183,17 @@ export function StatusLine({
 		return () => clearInterval(timer);
 	}, [phase, activity]);
 
-	const freePercent =
+	const usedPercent =
 		contextInfo && contextInfo.threshold > 0
-			? Math.max(0, Math.min(100, Math.round((1 - contextInfo.usedTokens / contextInfo.threshold) * 100)))
+			? contextPercentUsed(contextInfo.usedTokens, contextInfo.threshold)
 			: undefined;
 	// Whole and in its parts: the rows that stay dim take `contextPart` as one
 	// string, and the idle row needs the head and the percentage apart, because
-	// the percentage is the run that may leave the dim.
-	const contextHead = contextInfo ? ` · ctx ${formatTokens(contextInfo.usedTokens)}` : "";
-	const contextFree = freePercent === undefined ? "" : ` (${freePercent}% free)`;
-	const contextPart = `${contextHead}${contextFree}`;
+	// the percentage is the run that may leave the dim. Percent used, like the
+	// card and the summary: one measurement, one direction.
+	const contextHead = contextInfo ? ` · context ${formatTokens(contextInfo.usedTokens)}` : "";
+	const contextUsed = usedPercent === undefined ? "" : ` (${usedPercent}% used)`;
+	const contextPart = `${contextHead}${contextUsed}`;
 	// A setting, not a reading: it belongs in the dim run beside the model name
 	// rather than among the runs that leave the dim to say something live.
 	const thinkingPart = thinkingLevel === undefined ? "" : ` · think:${thinkingLevel}`;
@@ -221,8 +224,10 @@ export function StatusLine({
 				    squashed line, so a nested run could not leave the dim. The low
 				    case is the warning it is; the fine case keeps the row's restful
 				    look by wearing no color at all. */}
-				<Text color={freePercent !== undefined && freePercent < CONTEXT_LOW_FREE_PERCENT ? theme.warning : undefined}>
-					{contextFree}
+				<Text
+					color={usedPercent !== undefined && usedPercent > 100 - CONTEXT_LOW_FREE_PERCENT ? theme.warning : undefined}
+				>
+					{contextUsed}
 				</Text>
 				{battery}
 			</Text>
@@ -261,7 +266,7 @@ export function StatusLine({
 				({formatElapsed(elapsedMs)} · {modelName}
 				{thinkingPart}
 				{outputPart}
-				{contextPart} · esc to interrupt)
+				{contextPart})
 			</Text>
 			<BatterySegment pad={pad} />
 		</Text>

@@ -6,7 +6,7 @@
  * rather than a sample a long way from it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { formatTokens, formatTokenTotal, getTokenUnit, setTokenUnit } from "../src/format.ts";
+import { contextPercentUsed, formatTokens, formatTokenTotal, getTokenUnit, setTokenUnit } from "../src/format.ts";
 
 afterEach(() => setTokenUnit("k"));
 
@@ -57,5 +57,25 @@ describe("formatTokenTotal", () => {
 		expect(formatTokenTotal(999_999, "mtok")).toBe("999,999");
 		expect(formatTokenTotal(1_000_000, "mtok")).toBe("1.0 MTok");
 		expect(formatTokenTotal(1_000_000, "k")).toBe("1,000,000");
+	});
+});
+
+describe("contextPercentUsed", () => {
+	test("is used over threshold, rounded to whole percent", () => {
+		expect(contextPercentUsed(0, 100_000)).toBe(0);
+		expect(contextPercentUsed(55_000, 100_000)).toBe(55);
+		expect(contextPercentUsed(1, 3)).toBe(33);
+		expect(contextPercentUsed(76_000, 200_000)).toBe(38);
+	});
+
+	test("does not clamp: the reading can pass a hundred on purpose", () => {
+		// The bar clamps so it stays a rectangle; the number does not, because a
+		// session that is 106% of the auto-compact point is a fact worth reading,
+		// and reporting 100% would hide how far over it went.
+		expect(contextPercentUsed(106_000, 100_000)).toBe(106);
+	});
+
+	test("an unmeasured threshold reports nothing rather than dividing by zero", () => {
+		expect(contextPercentUsed(10_000, 0)).toBe(0);
 	});
 });

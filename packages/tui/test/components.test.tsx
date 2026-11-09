@@ -115,7 +115,7 @@ describe("MessageList", () => {
 			),
 		);
 		const frame = flatFrame(lastFrame() ?? "");
-		expect(frame).toContain("cache 75% of 4.0k · 3.0k read · 500 written");
+		expect(frame).toContain("cache 75% of 4.0k");
 		// A row the provider charged no cache for is not annotated with zeros.
 		expect(frame.match(/cache /g)).toHaveLength(1);
 	});
@@ -362,11 +362,12 @@ describe("StatusLine", () => {
 		unmount();
 	});
 
-	test("the idle row's context figure reads the same with the percentage split out", () => {
-		// The percentage left the dim so a low one can wear `warning`; what reaches
-		// the screen is the same sentence it was, parentheses and all. The color
-		// itself is not assertable — ink draws no color without a TTY — which is
-		// why the threshold below is checked as a value.
+	test("the idle row's context figure reads percent used, in the card's direction", () => {
+		// One measurement, one direction: the row, the card and `/context` all say
+		// how much is used, so the same context cannot read as 45% in one place and
+		// 55% in another. The percentage is split out of the dim so a high one can
+		// wear `warning`; the color itself is not assertable — ink draws no color
+		// without a TTY — which is why the threshold below is checked as a value.
 		const { lastFrame, unmount } = render(
 			withTheme(
 				<StatusLine
@@ -377,7 +378,7 @@ describe("StatusLine", () => {
 				/>,
 			),
 		);
-		expect(flatFrame(lastFrame() ?? "")).toContain("ctx 55.0k (45% free)");
+		expect(flatFrame(lastFrame() ?? "")).toContain("context 55.0k (55% used)");
 		unmount();
 	});
 
@@ -402,7 +403,11 @@ describe("StatusLine", () => {
 		expect(frame).not.toContain("Thinking…");
 		expect(frame).toContain("12s");
 		expect(frame).toContain("test-model");
-		expect(frame).toContain("esc to interrupt");
+		// The key itself still interrupts; the row no longer advertises it. Its
+		// `esc to interrupt` sat beside hints that say Esc leaves insert mode,
+		// and a row that offers one thing for a key while the prompt offers
+		// another leaves the reader to guess which is true down here.
+		expect(frame).not.toContain("esc to interrupt");
 		// Unmounted, unlike its neighbours: this row spins, and a live interval
 		// belongs to the whole test process — every later file shares it.
 		unmount();
@@ -546,7 +551,7 @@ describe("StatusCard", () => {
 		]) {
 			expect(frame).toContain(text);
 		}
-		expect(frame).toContain("38%");
+		expect(frame).toContain("38% used");
 		expect(frame).toContain("Esc to dismiss");
 	});
 

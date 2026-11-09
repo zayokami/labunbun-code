@@ -54,6 +54,24 @@ export function formatTokens(tokens: number, unit: TokenUnit = activeUnit): stri
 }
 
 /**
+ * Share of the auto-compact point in use, as a whole percent.
+ *
+ * One rounding rule for the number five surfaces print. They used to compute
+ * their own, in two directions: the live row said "45% free", the card said
+ * "55%" (used), and the summary said "of the auto-compact point", so a reader
+ * could see one measurement as several unrelated numbers. Every surface now
+ * says percent used, and names the base where it has room.
+ *
+ * Deliberately not clamped. Past the threshold, "106% of the auto-compact
+ * point" is the fact a summary should print; only a bar clamps, because it has
+ * nowhere to overflow.
+ */
+export function contextPercentUsed(usedTokens: number, threshold: number): number {
+	if (threshold <= 0) return 0;
+	return Math.round((usedTokens / threshold) * 100);
+}
+
+/**
  * A long-form token total for report lines (`/cost`, `/cache`).
  *
  * Reports are where exactness matters, so below a million this keeps every

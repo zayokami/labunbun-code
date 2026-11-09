@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import { formatTokens } from "../format.ts";
+import { contextPercentUsed, formatTokens } from "../format.ts";
 import { useTheme } from "../theme.ts";
 import type { StatusCardData } from "../ui-state.ts";
 
@@ -14,11 +14,14 @@ export const CONTEXT_BAR_SEGMENTS = 20;
  * matters. Both come from the same ratio so they can never disagree.
  */
 export function contextBar(usedTokens: number, threshold: number, segments = CONTEXT_BAR_SEGMENTS) {
-	const ratio = threshold > 0 ? Math.min(1, Math.max(0, usedTokens / threshold)) : 0;
-	const filled = Math.round(ratio * segments);
+	// Clamped because a bar cannot draw past its width; the text reading beside
+	// it may say 106%, which is why the clamp lives here and not in the shared
+	// percent.
+	const percent = Math.max(0, Math.min(100, contextPercentUsed(usedTokens, threshold)));
+	const filled = Math.round((percent / 100) * segments);
 	return {
 		filled,
-		percent: Math.round(ratio * 100),
+		percent,
 		bar: `${"█".repeat(filled)}${"░".repeat(segments - filled)}`,
 	};
 }
@@ -42,7 +45,7 @@ export function StatusCard({ data }: { data: StatusCardData }) {
 		...(data.permissions ? ([["Permissions", data.permissions]] as Array<[string, string]>) : []),
 		...(data.session ? ([["Session", data.session]] as Array<[string, string]>) : []),
 		...(context && data.context
-			? ([["Context", `${context.bar} ${context.percent}%`]] as Array<[string, string]>)
+			? ([["Context", `${context.bar} ${context.percent}% used`]] as Array<[string, string]>)
 			: []),
 		...data.details,
 	];
@@ -64,7 +67,7 @@ export function StatusCard({ data }: { data: StatusCardData }) {
 					</Text>
 				))}
 				{data.context ? (
-					<Text dimColor>{`${" ".repeat(width + 1)}~${formatTokens(data.context.usedTokens)} of ${formatTokens(
+					<Text dimColor>{`${" ".repeat(width + 1)}${formatTokens(data.context.usedTokens)} of ${formatTokens(
 						data.context.threshold,
 					)} — auto-compacts near the top`}</Text>
 				) : (

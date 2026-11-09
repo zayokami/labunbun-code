@@ -372,6 +372,14 @@ export function REPL({
 	const contextActivityCancellable = useStore(store, (s) => s.contextActivityCancellable);
 	const retry = useStore(store, (s) => s.retry);
 	const statusCard = useStore(store, (s) => s.statusCard);
+	// The card prints the model and the context reading in full. The idle row
+	// directly above it printed the same two facts in abbreviated form, so an
+	// open card turned one report into two rows that could even disagree — the
+	// row in percent free, the card in percent used. While the turn is idle and
+	// no compaction is running, the card is the whole report. A running turn
+	// keeps its row: that one carries the clock and the spinner, which the card
+	// does not.
+	const cardOwnsTheRow = statusCard !== null && statusPhase === "idle" && !contextActivity;
 	const activity = useStore(store, (s) => s.activity);
 	const backgroundShells = useStore(store, (s) => s.backgroundShells);
 	// The watch panel's other two stops, published by the app layer on the same
@@ -1317,20 +1325,22 @@ export function REPL({
 					/>
 				)}
 				<Box marginBottom={1} flexDirection="column">
-					<LiveStatusLine
-						store={store}
-						phase={statusPhase}
-						modelName={modelName}
-						thinkingLevel={thinkingLevel}
-						elapsedMs={elapsedMs}
-						contextInfo={contextInfo}
-						activity={contextActivity}
-						activitySince={contextActivitySince}
-						activityCancellable={contextActivityCancellable}
-						retry={retry}
-						thinkingMs={thinkingMs}
-						pad={padStatus}
-					/>
+					{cardOwnsTheRow ? null : (
+						<LiveStatusLine
+							store={store}
+							phase={statusPhase}
+							modelName={modelName}
+							thinkingLevel={thinkingLevel}
+							elapsedMs={elapsedMs}
+							contextInfo={contextInfo}
+							activity={contextActivity}
+							activitySince={contextActivitySince}
+							activityCancellable={contextActivityCancellable}
+							retry={retry}
+							thinkingMs={thinkingMs}
+							pad={padStatus}
+						/>
+					)}
 					{/* "Running tools…" for twenty seconds says nothing about what is
 						    running; the row underneath is what makes the wait legible. */}
 					{pendingTools.length > 0 && (

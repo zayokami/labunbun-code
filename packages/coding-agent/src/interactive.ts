@@ -197,6 +197,7 @@ import {
 	resolveCompactionSummarizer,
 } from "./compaction-wiring.ts";
 import {
+	contextPercentUsed,
 	contextRows,
 	contextSummaryLine,
 	formatTokens,
@@ -2780,10 +2781,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// The same readings `/status` renders, in the same words: the reason the
 		// cost/context stop exists is that reading them here costs no command,
 		// and two vocabularies for one fact would undercut exactly that.
-		const free =
-			info.threshold > 0
-				? ` (${Math.max(0, Math.min(100, Math.round((1 - info.usedTokens / info.threshold) * 100)))}% free)`
-				: "";
+		const used = info.threshold > 0 ? ` (${contextPercentUsed(info.usedTokens, info.threshold)}% used)` : "";
 		const fact = (label: string, value: string) => `${label.padEnd(8)} ${value}`;
 		handle?.setWatchStatus?.([
 			fact("model", `${target.model.provider}/${target.model.id}`),
@@ -2791,7 +2789,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				"cost",
 				`$${costTracker.sessionState.totalCostUSD.toFixed(4)} this session · $${costTracker.state.totalCostUSD.toFixed(4)} this project`,
 			),
-			fact("context", `~${formatTokens(info.usedTokens)} of ${formatTokens(info.threshold)}${free}`),
+			fact("context", `${formatTokens(info.usedTokens)} of ${formatTokens(info.threshold)}${used}`),
 			fact("cache", cacheStatusLine(cacheTracker.records(), target.model)),
 		]);
 	};

@@ -43,13 +43,16 @@ function UserMessageView({ text, steered = false }: { text: string; steered?: bo
  * One line under the answer: what the provider served from cache for this turn.
  *
  * The share is the number that moves — a session "getting faster" is really a
- * rising read share on a shrinking full-price remainder — and the token counts
- * beside it are what the share is a share of, so a 100% line on a tiny prompt
- * cannot be mistaken for a large win.
+ * rising read share on a shrinking full-price remainder — and the prompt size
+ * beside it is what the share is a share of, so a 100% line on a tiny prompt
+ * cannot be mistaken for a large win. The read and written counts are left to
+ * `/cost` and the watch panel: a tool-heavy turn leaves one of these lines
+ * under every narration segment, and repeating three counts that already have
+ * a report made the transcript the noisiest place to read them.
  */
 function cacheFooter(cache: CacheChannels): string {
 	const share = Math.round((cache.read / cache.prompt) * 100);
-	return `cache ${share}% of ${formatTokens(cache.prompt)} · ${formatTokens(cache.read)} read · ${formatTokens(cache.write)} written`;
+	return `cache ${share}% of ${formatTokens(cache.prompt)}`;
 }
 
 function AssistantMessageView({

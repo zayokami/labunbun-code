@@ -457,6 +457,41 @@ describe("the status card and the host", () => {
 		await delay(150);
 		h.unmount();
 	}, 20_000);
+
+	test("an idle card is the whole report, so the row above it is gone", async () => {
+		const h = setup();
+		await delay(40);
+		// Idle, with the measurement both the row and the card used to print.
+		h.store.set((s) => ({
+			...s,
+			statusPhase: "idle",
+			contextInfo: { usedTokens: 55_000, threshold: 100_000 },
+			statusCard: { ...card, context: { usedTokens: 55_000, threshold: 100_000 } },
+		}));
+		await delay(40);
+		const frame = h.frame();
+		// The card draws the reading once; the idle row that repeated it in
+		// abbreviated form is not drawn while the card is up.
+		expect(frame).toContain("55% used");
+		expect(frame.match(/55% used/g)).toHaveLength(1);
+		expect(frame).not.toContain("context 55.0k");
+		h.unmount();
+	}, 20_000);
+
+	test("a running turn keeps its row under the card: the clock is only there", async () => {
+		const h = setup();
+		await delay(40);
+		// `setup` seeds a running phase; the card on its own has no clock and no
+		// spinner, so hiding the row here would hide the turn's progress.
+		h.store.set((s) => ({
+			...s,
+			contextInfo: { usedTokens: 55_000, threshold: 100_000 },
+			statusCard: { ...card, context: { usedTokens: 55_000, threshold: 100_000 } },
+		}));
+		await delay(40);
+		expect(h.frame()).toContain("Responding…");
+		h.unmount();
+	}, 20_000);
 });
 
 /**

@@ -61,6 +61,7 @@ export {
 } from "./editing-mode.ts";
 export { formatElapsed } from "./elapsed.ts";
 export {
+	contextPercentUsed,
 	formatTokens,
 	formatTokenTotal,
 	getTokenUnit,
