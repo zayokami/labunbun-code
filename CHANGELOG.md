@@ -7,6 +7,18 @@ commands, and SHA-256 checksums.
 
 ### Added
 
+- **Claude Fable 5.2 and Claude Mythos 5.2 are in the catalog.** Both carry the
+  1M-token window, 128K output, always-on adaptive thinking, and $8/$40 pricing
+  with the 0.025x cache read. Their pages are the first to name all five effort
+  levels, so `xhigh` and `max` now reach those two rows. The same notes state
+  that the prefix check runs on every account, which also moves Mythos 5.1 into
+  the rows that opt into dropping a mismatched thinking block. Fable 5.2 is
+  pinned on OpenCode Zen and OpenRouter as well, and the `fable` migration alias
+  resolves to it.
+
+- **A logo.** `docs/assets/labunbun-logo.png` is the new mark, shown at the top
+  of the README.
+
 - **The system prompt adapts to the model family.** Every session now resolves
   its model to a profile: Claude, GPT, Gemini, DeepSeek, Kimi, Qwen, GLM,
   MiniMax, Mistral, Meta, Hunyuan, MiMo, NVIDIA, a local Ollama model, or an

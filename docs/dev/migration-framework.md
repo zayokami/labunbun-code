@@ -88,7 +88,7 @@ The import writes session files for past conversations below `~/.labunbun/projec
 
 - `MigrationAction` is `map`, `downgrade` or `skip`. `PlannedWrite.kind` is one of `settings`, `mcp`, `skill`, `rule`, `memory`, `agent`, `history` or `prompt-history`. `MigrationCategory` is `settings`, `assets` or `history`, and `categoryOfKind` maps a kind to its category.
 - `SECRET_ENV_MARKERS` lists `TOKEN`, `KEY`, `SECRET`, `PASSWORD` and `CREDENTIAL`. The match ignores case and applies to any text in the name, so it catches every `*_API_KEY` spelling. `looksLikeSecretName` is the check built on it.
-- `MODEL_ALIASES` maps four short names. `opus` maps to `anthropic/claude-opus-5`, `sonnet` to `anthropic/claude-sonnet-5`, `haiku` to `anthropic/claude-haiku-4-5` and `fable` to `anthropic/claude-fable-5-1`. `resolveModelReference` is the lookup.
+- `MODEL_ALIASES` maps four short names. `opus` maps to `anthropic/claude-opus-5`, `sonnet` to `anthropic/claude-sonnet-5`, `haiku` to `anthropic/claude-haiku-4-5` and `fable` to `anthropic/claude-fable-5-2`. `resolveModelReference` is the lookup.
 - `STATE_TELEMETRY_KEYS` names three keys of `~/.claude.json`: `tipsHistory`, `promptQueueUseCount` and `cachedChangelog`.
 - `CLAUDE_SETTINGS_HANDLED` lists what the importer claims from `~/.claude/settings.json`: `env`, `model`, `permissions`, `sandbox`, `hooks`, `fallbackModel`, `effortLevel` and `enabledPlugins`. `CLAUDE_STATE_HANDLED` lists what it claims from the state file: `env`, `model`, `mcpServers`, `projects` and the telemetry keys.
 - The two write targets are `~/.labunbun/settings.json` and `~/.labunbun/.mcp.json`.

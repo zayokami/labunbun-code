@@ -1,5 +1,9 @@
 # LaBunbun Code
 
+<p align="center">
+  <img src="docs/assets/labunbun-logo.png" alt="LaBunbun Code" width="200">
+</p>
+
 [![CI](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml/badge.svg)](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml)
 
 LaBunbun Code is a terminal coding agent.

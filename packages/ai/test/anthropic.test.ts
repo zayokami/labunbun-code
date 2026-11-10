@@ -254,9 +254,9 @@ describe("thinking-block binding", () => {
 		// and the tests below use the constant on both sides.
 		expect(THINKING_BLOCK_BINDING_BETA).toBe("thinking-binding-controls-2026-08-01");
 		expect(anthropicBetaHeaders(BINDING_MODEL)).toEqual({ "anthropic-beta": THINKING_BLOCK_BINDING_BETA });
-		// Mythos 5.1 records the same signatures and runs no check; asking it to
-		// honour a parameter it does not know is the other way to get a 400.
-		expect(anthropicBetaHeaders({ ...MODEL, id: "claude-mythos-5-1" })).toEqual({});
+		// The older Fable 5 runs no check; asking it to honour a parameter it does
+		// not know is the other way to get a 400.
+		expect(anthropicBetaHeaders({ ...MODEL, id: "claude-fable-5" })).toEqual({});
 		expect(anthropicBetaHeaders(MODEL)).toEqual({});
 	});
 

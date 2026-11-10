@@ -98,6 +98,10 @@ export const ANTHROPIC_MIN_PREFIX: ReadonlyArray<readonly [RegExp, number]> = [
 	// matches both is the one that would be wrong, and inheriting it is the
 	// expensive direction — see the note on `ANTHROPIC_UNKNOWN_MIN`.
 	[/^claude-sonnet-5-5/, 512],
+	// The 5.2 pair keeps the 5.1 pair's floor; the vendor's table puts all four
+	// in one 512-token tier.
+	[/^claude-fable-5-2/, 512],
+	[/^claude-mythos-5-2/, 512],
 	[/^claude-fable-5-1/, 512],
 	[/^claude-mythos-5-1/, 512],
 	[/^claude-opus-5/, 512],

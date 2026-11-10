@@ -396,7 +396,7 @@ const MODEL_ALIASES: Record<string, string> = {
 	opus: "anthropic/claude-opus-5",
 	sonnet: "anthropic/claude-sonnet-5",
 	haiku: "anthropic/claude-haiku-4-5",
-	fable: "anthropic/claude-fable-5-1",
+	fable: "anthropic/claude-fable-5-2",
 };
 
 /** Resolve a source `model` value to a reference labunbun can actually load. */

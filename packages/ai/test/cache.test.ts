@@ -153,6 +153,10 @@ describe("cacheCapability", () => {
 		expect(anthropicMinPrefixTokens("gpt-6-sol")).toBe(anthropicMinPrefixTokens("claude-something-new"));
 		expect(anthropicMinPrefixTokens("gpt-6-astra")).toBe(anthropicMinPrefixTokens("claude-something-new"));
 		expect(anthropicMinPrefixTokens("claude-sonnet-5-5")).toBe(512);
+		// The 5.2 pair shares the 5.1 pair's floor, and the specific rows keep
+		// the ordering honest even though the broad family patterns agree today.
+		expect(anthropicMinPrefixTokens("claude-fable-5-2")).toBe(512);
+		expect(anthropicMinPrefixTokens("claude-mythos-5-2")).toBe(512);
 		// Which is the form of that assertion that could not be trusted on its
 		// own: the fallback is 512, and so is half the table, so a pattern added
 		// for a `gpt-*` id at 512 is invisible from the outside and a mutation

@@ -86,6 +86,8 @@ const KEY_VARS = [
  * that omits one drops it from the picker, so these are the ids at stake. */
 const ANTHROPIC_TABLE = [
 	"claude-opus-5-5",
+	"claude-fable-5-2",
+	"claude-mythos-5-2",
 	"claude-fable-5-1",
 	"claude-mythos-5-1",
 	"claude-fable-5",

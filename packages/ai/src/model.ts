@@ -372,6 +372,16 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		128_000,
 		{ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
 	],
+	// Added 2026-11-09, the day it shipped. Zen's listing serves it and
+	// models.dev prices it, both at the vendor's own figures. No Go twin: the Go
+	// listing carries no Claude id at all.
+	[
+		"claude-fable-5-2",
+		"Claude Fable 5.2",
+		1_000_000,
+		128_000,
+		{ input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 },
+	],
 	["claude-haiku-4-5", "Claude Haiku 4.5", 200_000, 64_000, { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }],
 	// Added 2026-10-08, the day after it shipped. Same sourcing as the
 	// `claude-sonnet-5-5` row below — the gateway lists it and models.dev prices
@@ -806,27 +816,51 @@ const BUILT_IN_MODELS: Model[] = [
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
-		// One of the four models whose thinking blocks are checked against the
+		// One of the models whose thinking blocks are checked against the
 		// conversation that produced them; see `thinkingBlockBinding`.
 		thinkingBlockBinding: true,
-		// The 0.05x cache-read regime, between the 0.025x pair below and the
+		// The 0.05x cache-read regime, between the 0.025x rows below and the
 		// standard tenth everywhere else.
 		pricing: anthropicPricing(4, 20, 0.05),
+	}),
+	// The 5.2 pair, checked 2026-11-09, the day it shipped. The prefix check now
+	// runs on every account, not only those created after a date, so both rows
+	// are flagged and both opt into dropping a block instead of failing the
+	// request. Their pages are also the first to name all five effort rungs,
+	// which is what `reasoningEfforts` is for.
+	// Long-form design notes: docs/dev/ai-layer.md
+	anthropicModel("claude-fable-5-2", "Claude Fable 5.2", {
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
+		thinkingBlockBinding: true,
+		reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+		// Still the 0.025x regime, on the lower $8/$40 base.
+		pricing: anthropicPricing(8, 40, 0.025),
+	}),
+	anthropicModel("claude-mythos-5-2", "Claude Mythos 5.2", {
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
+		thinkingBlockBinding: true,
+		reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+		pricing: anthropicPricing(8, 40, 0.025),
 	}),
 	anthropicModel("claude-fable-5-1", "Claude Fable 5.1", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
-		// One of the other three. Mythos 5.1 records the same signatures but runs no
-		// such check, so it is deliberately not flagged.
 		thinkingBlockBinding: true,
-		// One of the two rows whose cache reads are not a tenth of input.
+		// One of the rows whose cache reads are not a tenth of input.
 		pricing: anthropicPricing(10, 50, 0.025),
 	}),
+	// The check has returned an error on every Mythos 5.1 account since the
+	// 5.2 notes were published, which is why this row is flagged too.
 	anthropicModel("claude-mythos-5-1", "Claude Mythos 5.1", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
+		thinkingBlockBinding: true,
 		pricing: anthropicPricing(10, 50, 0.025),
 	}),
 	// Fable 5 is legacy — still served, and still what a settings file may name.
@@ -1607,13 +1641,13 @@ const BUILT_IN_MODELS: Model[] = [
 		}),
 	),
 	// OpenRouter, last: one host on OpenAI's wire, selling other vendors' models
-	// under ids that spell the vendor first. Seven flagships, not a catalog — the
+	// under ids that spell the vendor first. Nine flagships, not a catalog — the
 	// host lists hundreds, and the startup probe reads the rest out of its own
 	// listing, which answers without a key while the calls these rows carry do
 	// not. Swept 2026-10-12 from `https://openrouter.ai/api/v1/models`; the K3.1
-	// Pro row joined on 2026-10-24, the day it shipped. Cache
-	// columns are the host's own numbers, and where a row differs from the
-	// vendor's own card the comment on the row says so. `reasoning: false`
+	// Pro row joined on 2026-10-24, and the Fable 5.2 row on 2026-11-09, each the
+	// day it shipped. Cache columns are the host's own numbers, and where a row
+	// differs from the vendor's own card the comment on the row says so. `reasoning: false`
 	// everywhere: the listing names `reasoning_effort` among each id's accepted
 	// parameters, but nothing there states what an effort maps to behind the
 	// route, and a field left off leaves each model at the host's default.
@@ -1630,6 +1664,21 @@ const BUILT_IN_MODELS: Model[] = [
 			maxOutputTokens: 128_000,
 			reasoning: false,
 			pricing: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
+		},
+	),
+	// The listing carried it on 2026-11-09, priced at the vendor's $8/$40 with
+	// the host's own cache columns, which are the vendor's too.
+	openAICompatModel(
+		"openrouter",
+		OPENROUTER_BASE,
+		"OPENROUTER_API_KEY",
+		"anthropic/claude-fable-5.2",
+		"Claude Fable 5.2",
+		{
+			contextWindow: 1_000_000,
+			maxOutputTokens: 128_000,
+			reasoning: false,
+			pricing: { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 },
 		},
 	),
 	// The host's base is 0.15/0.6/0.003, doubled on DeepSeek's weekday peak

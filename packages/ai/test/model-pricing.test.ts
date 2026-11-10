@@ -94,6 +94,8 @@ function withoutBaseUrlOverrides<T>(body: () => T): T {
  * carries whatever custom providers other test files registered. */
 const BUILT_IN_REFS = [
 	"anthropic/claude-opus-5-5",
+	"anthropic/claude-fable-5-2",
+	"anthropic/claude-mythos-5-2",
 	"anthropic/claude-fable-5-1",
 	"anthropic/claude-mythos-5-1",
 	"anthropic/claude-fable-5",
@@ -238,6 +240,7 @@ const BUILT_IN_REFS = [
 	"opencode-zen/big-pickle",
 	"opencode-zen/claude-fable-5",
 	"opencode-zen/claude-fable-5-1",
+	"opencode-zen/claude-fable-5-2",
 	"opencode-zen/claude-haiku-4-5",
 	"opencode-zen/claude-haiku-5-5",
 	"opencode-zen/claude-opus-4-5",
@@ -358,6 +361,7 @@ const BUILT_IN_REFS = [
 	"opencode-zen-oai/big-pickle",
 	"opencode-zen-oai/claude-fable-5",
 	"opencode-zen-oai/claude-fable-5-1",
+	"opencode-zen-oai/claude-fable-5-2",
 	"opencode-zen-oai/claude-haiku-4-5",
 	"opencode-zen-oai/claude-haiku-5-5",
 	"opencode-zen-oai/claude-opus-4-5",
@@ -475,9 +479,10 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/qwen3.8-flash",
 	"opencode-go-oai/qwen3.8-max",
 	"opencode-go-oai/space-bunny",
-	// OpenRouter's seven, in the table's own order: the sweep described beside the
+	// OpenRouter's nine, in the table's own order: the sweep described beside the
 	// rows in `model.ts`.
 	"openrouter/anthropic/claude-fable-5.1",
+	"openrouter/anthropic/claude-fable-5.2",
 	"openrouter/deepseek/deepseek-v4.1-flash",
 	"openrouter/google/gemini-3.8-flash",
 	"openrouter/moonshotai/kimi-k3",
@@ -541,7 +546,23 @@ describe("the built-in catalog", () => {
 			cacheWrite: 5,
 			cacheWrite1h: 8,
 		});
-		// Fable 5.1 is the current Fable, and one of the two models in the catalog
+		// The 5.2 pair keeps the 0.025x read multiplier on a lower $8/$40 base,
+		// and the standard 1.25x write and 2x one-hour write follow from it.
+		expect(resolveModel("anthropic/claude-fable-5-2")?.pricing).toEqual({
+			input: 8,
+			output: 40,
+			cacheRead: 0.2,
+			cacheWrite: 10,
+			cacheWrite1h: 16,
+		});
+		expect(resolveModel("anthropic/claude-mythos-5-2")?.pricing).toEqual({
+			input: 8,
+			output: 40,
+			cacheRead: 0.2,
+			cacheWrite: 10,
+			cacheWrite1h: 16,
+		});
+		// Fable 5.1 is the previous Fable, and one of the models in the catalog
 		// whose cache reads are billed at 0.025x input rather than 0.1x.
 		expect(resolveModel("anthropic/claude-fable-5-1")?.pricing).toEqual({
 			input: 10,
@@ -550,8 +571,10 @@ describe("the built-in catalog", () => {
 			cacheWrite: 12.5,
 			cacheWrite1h: 20,
 		});
-		// Mythos 5.1 is the other, and Mythos 5 is not: the 0.025x rate followed the
-		// ".1" releases, so the pair is where a copy-paste error would hide.
+		// Mythos 5.1 is the other, and Mythos 5 is not: the 0.025x rate followed
+		// the ".1" releases, so the pair is where a copy-paste error would hide.
+		// The 5.2 pair above carries the same multiplier on a different base,
+		// which is exactly the kind of copy that can carry the wrong number.
 		expect(resolveModel("anthropic/claude-mythos-5-1")?.pricing).toEqual({
 			input: 10,
 			output: 50,
@@ -651,6 +674,8 @@ describe("the built-in catalog", () => {
 		]);
 		expect(regimes).toEqual([
 			["anthropic/claude-opus-5-5", "adaptive"],
+			["anthropic/claude-fable-5-2", "adaptive"],
+			["anthropic/claude-mythos-5-2", "adaptive"],
 			["anthropic/claude-fable-5-1", "adaptive"],
 			["anthropic/claude-mythos-5-1", "adaptive"],
 			["anthropic/claude-fable-5", "adaptive"],
@@ -667,39 +692,48 @@ describe("the built-in catalog", () => {
 		]);
 	});
 
-	test("no shipped row declares the effort rungs above high yet", () => {
+	test("only the rows whose page names the rungs above high declare them", () => {
 		// The adapter's gate sends xhigh and max only to a row whose
-		// `reasoningEfforts` names the rung; this is the conservative half of it.
-		// No vendor page read for this catalog states that any of these ids takes
-		// either rung, so no row declares one — the rungs are expressible, and a
-		// row that starts naming one has to show up here, because the adapter's
-		// fallback keeps the rest of the wire silent either way.
+		// `reasoningEfforts` names the rung. The 5.2 pages are the first vendor
+		// pages read for this catalog that name all five levels, so those two
+		// rows declare the full ladder and every other row stays silent. A row
+		// that starts naming a top rung has to show up here, because the
+		// adapter's fallback keeps the rest of the wire silent either way.
 		const declared = BUILT_IN_REFS.filter((ref) => {
 			const efforts = resolveModel(ref)?.reasoningEfforts;
 			return efforts?.includes("xhigh") || efforts?.includes("max");
 		});
-		expect(declared).toEqual([]);
+		expect(declared).toEqual(["anthropic/claude-fable-5-2", "anthropic/claude-mythos-5-2"]);
+		expect(resolveModel("anthropic/claude-fable-5-2")?.reasoningEfforts).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
 		// Not a vacuous pass: rows do carry declared sets — the OpenAI pair pins
-		// its subset in the provider's own test — so the empty list above is an
-		// absence of the top rungs and not a lookup that found no field anywhere.
+		// its subset in the provider's own test — so the list above is about the
+		// top rungs and not a lookup that found no field anywhere.
 		expect(BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.reasoningEfforts)).not.toHaveLength(0);
 	});
 
 	test("the models that check thinking-block binding are named one by one", () => {
 		// The parameter the adapter sends on their behalf is one the API rejects on
-		// a model that runs no such check, so this flag is not a tier: Mythos 5.1
-		// records the same signatures as Fable 5.1 and runs no check, and is
-		// deliberately absent. Sonnet 5.5 joins the two that do run it — its own
-		// release notes say the check is enforced by default on accounts created
-		// from 2026-08-31, which is a different reason from "it is the newest".
-		// Haiku 5.5 is the fourth, and read rather than inferred: the
-		// preserved-thinking guide names it in the same sentence as the other
-		// three, while its own migration guide states Haiku 4.5 does not run the
-		// check — so the boundary between the two falls inside the family.
+		// a model that runs no such check, so this flag is not a tier. The 5.2
+		// notes name Mythos 5.1 in the opposite direction from the earlier
+		// reading: the check has returned an error on every Mythos 5.1 account,
+		// so it is flagged beside Fable 5.1. Sonnet 5.5 runs it by account age,
+		// which is a different reason from "it is the newest". Haiku 5.5 is read
+		// rather than inferred: the preserved-thinking guide names it in the same
+		// sentence as the others, while its own migration guide states Haiku 4.5
+		// does not run the check — so the boundary falls inside the family.
 		const flagged = BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.thinkingBlockBinding);
 		expect(flagged).toEqual([
 			"anthropic/claude-opus-5-5",
+			"anthropic/claude-fable-5-2",
+			"anthropic/claude-mythos-5-2",
 			"anthropic/claude-fable-5-1",
+			"anthropic/claude-mythos-5-1",
 			"anthropic/claude-sonnet-5-5",
 			"anthropic/claude-haiku-5-5",
 		]);
@@ -764,6 +798,8 @@ describe("the built-in catalog", () => {
 		// with it, and a hand-typed table is exactly where that goes wrong.
 		const offTheRule = new Map([
 			["anthropic/claude-opus-5-5", 0.05],
+			["anthropic/claude-fable-5-2", 0.025],
+			["anthropic/claude-mythos-5-2", 0.025],
 			["anthropic/claude-fable-5-1", 0.025],
 			["anthropic/claude-mythos-5-1", 0.025],
 		]);
@@ -980,6 +1016,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/big-pickle", 0, 0, 0, 0],
 			["opencode-zen/claude-fable-5", 10, 50, 1, 12.5],
 			["opencode-zen/claude-fable-5-1", 10, 50, 0.25, 12.5],
+			["opencode-zen/claude-fable-5-2", 8, 40, 0.2, 10],
 			["opencode-zen/claude-haiku-4-5", 1, 5, 0.1, 1.25],
 			["opencode-zen/claude-haiku-5-5", 0.1, 0.5, 0.01, 0.125],
 			["opencode-zen/claude-opus-4-5", 5, 25, 0.5, 6.25],
@@ -1100,6 +1137,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/big-pickle", 0, 0, 0, 0],
 			["opencode-zen-oai/claude-fable-5", 10, 50, 1, 12.5],
 			["opencode-zen-oai/claude-fable-5-1", 10, 50, 0.25, 12.5],
+			["opencode-zen-oai/claude-fable-5-2", 8, 40, 0.2, 10],
 			["opencode-zen-oai/claude-haiku-4-5", 1, 5, 0.1, 1.25],
 			["opencode-zen-oai/claude-haiku-5-5", 0.1, 0.5, 0.01, 0.125],
 			["opencode-zen-oai/claude-opus-4-5", 5, 25, 0.5, 6.25],
@@ -1218,6 +1256,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/qwen3.8-max", 2, 6, 0.25, 2.5],
 			["opencode-go-oai/space-bunny", 0.15, 0.6, 0.03, 0],
 			["openrouter/anthropic/claude-fable-5.1", 10, 50, 0.25, 12.5],
+			["openrouter/anthropic/claude-fable-5.2", 8, 40, 0.2, 10],
 			["openrouter/deepseek/deepseek-v4.1-flash", 0.3, 1.2, 0.006, 0],
 			["openrouter/google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0.0417],
 			["openrouter/moonshotai/kimi-k3", 0.73, 10, 0.55, 0],
@@ -1239,6 +1278,8 @@ describe("the built-in catalog", () => {
 			}),
 		).toEqual([
 			["anthropic/claude-opus-5-5", 1_000_000, 128_000],
+			["anthropic/claude-fable-5-2", 1_000_000, 128_000],
+			["anthropic/claude-mythos-5-2", 1_000_000, 128_000],
 			["anthropic/claude-fable-5-1", 1_000_000, 128_000],
 			["anthropic/claude-mythos-5-1", 1_000_000, 128_000],
 			["anthropic/claude-fable-5", 1_000_000, 128_000],
@@ -1389,6 +1430,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/big-pickle", 200_000, 32_000],
 			["opencode-zen/claude-fable-5", 1_000_000, 128_000],
 			["opencode-zen/claude-fable-5-1", 1_000_000, 128_000],
+			["opencode-zen/claude-fable-5-2", 1_000_000, 128_000],
 			["opencode-zen/claude-haiku-4-5", 200_000, 64_000],
 			["opencode-zen/claude-haiku-5-5", 1_000_000, 128_000],
 			["opencode-zen/claude-opus-4-5", 200_000, 64_000],
@@ -1509,6 +1551,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/big-pickle", 200_000, 32_000],
 			["opencode-zen-oai/claude-fable-5", 1_000_000, 128_000],
 			["opencode-zen-oai/claude-fable-5-1", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-fable-5-2", 1_000_000, 128_000],
 			["opencode-zen-oai/claude-haiku-4-5", 200_000, 64_000],
 			["opencode-zen-oai/claude-haiku-5-5", 1_000_000, 128_000],
 			["opencode-zen-oai/claude-opus-4-5", 200_000, 64_000],
@@ -1627,6 +1670,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/qwen3.8-max", 1_000_000, 131_072],
 			["opencode-go-oai/space-bunny", 1_048_576, 524_288],
 			["openrouter/anthropic/claude-fable-5.1", 1_000_000, 128_000],
+			["openrouter/anthropic/claude-fable-5.2", 1_000_000, 128_000],
 			["openrouter/deepseek/deepseek-v4.1-flash", 1_048_576, 393_216],
 			["openrouter/google/gemini-3.8-flash", 1_048_576, 65_536],
 			["openrouter/moonshotai/kimi-k3", 1_048_576, 943_718],
@@ -1658,7 +1702,7 @@ describe("the built-in catalog", () => {
 		// all (MiniMax), or six depths with only the ends described (Mistral) —
 		// and the resellers are the ones whose vendor published nothing about
 		// thinking at all. Both are right to say "not medium", for reasons that
-		// have nothing to do with each other, and the second group is 240 rows
+		// have nothing to do with each other, and the second group is 242 rows
 		// long — a third of the catalog — which would bury the first. The gateway
 		// rows are held by the assertion directly below, which is exhaustive over
 		// the same set.
@@ -1746,11 +1790,12 @@ describe("the built-in catalog", () => {
 			"ollama-cloud/gemma4:31b",
 			"ollama-cloud/glm-5.3",
 			"ollama-cloud/mistral-large-3:675b",
-			// OpenRouter's eight, and the reason is one layer up from the plans': the
+			// OpenRouter's nine, and the reason is one layer up from the plans': the
 			// host's listing names `reasoning_effort` among every one of these ids'
 			// accepted parameters, but nothing states what an effort maps to behind
 			// the route, so no row claims "medium" and the default sends nothing.
 			"openrouter/anthropic/claude-fable-5.1",
+			"openrouter/anthropic/claude-fable-5.2",
 			"openrouter/deepseek/deepseek-v4.1-flash",
 			"openrouter/google/gemini-3.8-flash",
 			"openrouter/moonshotai/kimi-k3",
@@ -1774,7 +1819,7 @@ describe("the built-in catalog", () => {
 		// without the flag set is a 400 on its first request, and nothing else in
 		// the suite would notice.
 		const gateway = BUILT_IN_REFS.filter(isReseller);
-		expect(gateway).toHaveLength(240);
+		expect(gateway).toHaveLength(242);
 		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
 		// And none of them claims a thinking shape either, for the same reason:
 		// the shape is what the 400 is about.
