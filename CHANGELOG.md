@@ -19,10 +19,12 @@ commands, and SHA-256 checksums.
   question that asks for advice ("should I refactor this?", "该不该重构整个
   项目？") is an answer even when it names a change verb, while "can you fix
   it?" is still a request; a later imperative sentence makes the message a
-  change ("why does it fail? fix it."). The paths it counts ignore URLs and
-  accept both separators, and a negated scope word adds nothing ("don't
-  refactor everything, just fix the typo" stays trivial). `standard` adds
-  nothing, so an ordinary request keeps the bytes and the effort it had. The same read sets thinking effort — `low` for
+  change ("why does it fail? fix it."), and so does a split request ("explain
+  first, then fix it", "先解释一下，然后修复这个 bug"). The paths it counts
+  ignore URLs and accept both separators, and a negated scope word adds nothing
+  ("don't refactor everything, just fix the typo" stays trivial). `standard`
+  adds nothing, so an ordinary request keeps the bytes and the effort it had.
+  The same read sets thinking effort — `low` for
   trivial, `high` for complex — unless you set a level yourself. The
   instruction is part of the stored message, keeping the cache prefix stable,
   and is stripped from the transcript, the resume preview, export, and the

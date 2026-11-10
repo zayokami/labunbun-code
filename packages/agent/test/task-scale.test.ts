@@ -138,6 +138,30 @@ const CASES: Array<{ text: string; kind: TaskKind; scale: TaskScale; why: string
 	{ text: "is the build failing?", kind: "answer", scale: "standard", why: "build is the subject here" },
 	{ text: "麻烦看下为什么构建失败", kind: "answer", scale: "standard", why: "看下 asks for an investigation" },
 	{
+		text: "explain first, then fix the flaky test",
+		kind: "change",
+		scale: "standard",
+		why: "the second half of a two-step request",
+	},
+	{
+		text: "先解释一下，然后修复这个 bug",
+		kind: "change",
+		scale: "standard",
+		why: "然后 after a comma opens a request clause",
+	},
+	{
+		text: "why did you then change it?",
+		kind: "answer",
+		scale: "standard",
+		why: "a bare then is a question about the past, not a request",
+	},
+	{
+		text: "this is not a change, just explain the failure",
+		kind: "answer",
+		scale: "trivial",
+		why: "a plain not negates the noun-like verb",
+	},
+	{
 		text: "explain how the whole pipeline works",
 		kind: "answer",
 		scale: "complex",
@@ -170,6 +194,7 @@ describe("classifyTask", () => {
 		expect(classifyTask("should I refactor this?").signals).toContain("advice-question");
 		expect(classifyTask("don't refactor everything").signals).not.toContain("explicit-large");
 		expect(classifyTask("fix the typo").signals).toContain("request");
+		expect(classifyTask("explain first, then fix it").signals).toContain("request");
 	});
 
 	test("URLs are links, not files the request names", () => {

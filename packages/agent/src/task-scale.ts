@@ -53,9 +53,9 @@ export interface TaskShape {
 const CHANGE_VERB_EN =
 	"fix|add|implement|refactor|rewrite|rename|update|remove|delete|change|write|create|make|build|migrate|upgrade|replace|adjust|tweak|move|split|merge|port|bump|wire|support|adapt|edit|modify|patch|apply|introduce|extract|inline|changing|editing|modifying|patching|renaming|updating|adding|removing|deleting|refactoring|rewriting";
 
-/** The Chinese verbs. `改`, `加` and `删` are listed bare because a Chinese verb is not space-delimited. */
+/** The Chinese verbs. `改`, `修`, `加`, `删` and `补` are listed bare because a Chinese verb is not space-delimited. */
 const CHANGE_VERB_ZH =
-	"修复|修改|改成|改为|改一下|改下|添加|增加|实现|重构|重写|迁移|升级|替换|调整|删除|移除|创建|新建|写一个|写个|加上|加个|支持|接入|合并|拆|适配|对接|改|加|删";
+	"修复|修改|改成|改为|改一下|改下|添加|增加|实现|重构|重写|迁移|升级|替换|调整|删除|移除|创建|新建|写一个|写个|加上|加个|支持|接入|合并|拆|适配|对接|修|加|删|补";
 
 /** The same pattern with `g`, for walking every occurrence; `test` on a `g` pattern would carry `lastIndex`. */
 const CHANGE_VERB_ALL = new RegExp(`\\b(?:${CHANGE_VERB_EN})\\b|(?:${CHANGE_VERB_ZH})`, "giu");
@@ -69,7 +69,7 @@ const CHANGE_VERB_ALL = new RegExp(`\\b(?:${CHANGE_VERB_EN})\\b|(?:${CHANGE_VERB
  * non-negation character after it cancels the match.
  */
 const NEGATION_BEFORE =
-	/(?:\b(?:do not|don't|dont|never|without|no need to|avoid)\b(?:\s+[a-z]+){0,2}|(?:不要|别|无需|不用|不需要|不必|勿)(?:再|去|乱|随便)?)\s*$/iu;
+	/(?:\b(?:do not|not|don't|dont|never|without|no need to|avoid)\b(?:\s+[a-z]+){0,2}|(?:不要|别|无需|不用|不需要|不必|勿)(?:再|去|乱|随便)?)\s*$/iu;
 
 /** "change nothing" negates from the other side. Kept to unambiguous objects. */
 const NEGATION_AFTER = /^\s*(?:nothing|no files?|no code|none of)\b/iu;
@@ -152,6 +152,21 @@ function isSentenceInitial(text: string, index: number): boolean {
 }
 
 /**
+ * A change clause after "first, then" / "先…然后".
+ *
+ * The connector alone is not enough: "why did you then change it?" is a
+ * question about the past, while "explain first, then fix it" is a two-step
+ * request. A preceding comma or `first`/`先` is what separates them.
+ */
+function isLaterRequest(text: string, index: number): boolean {
+	const before = text.slice(Math.max(0, index - 48), index);
+	const connector = before.match(/(?:\bthen\b|然后|接着|之后|再)\s*$/iu);
+	if (!connector) return false;
+	const head = before.slice(0, connector.index);
+	return /\bfirst\b|先|首先/iu.test(head) || /[，,；;]\s*$/u.test(head);
+}
+
+/**
  * Classify one user request.
  *
  * The scoring is deliberately small enough to read in one sitting: explicit
@@ -172,7 +187,8 @@ export function classifyTask(text: string): TaskShape {
 	const positive = changeMatches.filter((match) => !negatedAt(trimmed, match.index ?? 0, match[0].length));
 	const changeVerb = positive.length > 0;
 	const imperative = positive.some((match) => isSentenceInitial(trimmed, match.index ?? 0));
-	const request = REQUEST_SHAPE.test(trimmed) || imperative;
+	const later = positive.some((match) => isLaterRequest(trimmed, match.index ?? 0));
+	const request = REQUEST_SHAPE.test(trimmed) || imperative || later;
 	const broad = [...trimmed.matchAll(EXPLICIT_LARGE_ALL)].some(
 		(match) => !negatedAt(trimmed, match.index ?? 0, match[0].length),
 	);
@@ -214,7 +230,9 @@ export function classifyTask(text: string): TaskShape {
 	if (!changeVerb && changeMatches.length > 0) signals.push("negated-change");
 
 	const kind: TaskKind =
-		(advice && !imperative) || (changeVerb ? question && !request : question || answerVerb) ? "answer" : "change";
+		(advice && !imperative && !later) || (changeVerb ? question && !request : question || answerVerb)
+			? "answer"
+			: "change";
 	const scale: TaskScale = score >= 3 ? "complex" : score <= -2 ? "trivial" : "standard";
 	return { kind, scale, signals };
 }

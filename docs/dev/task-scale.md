@@ -53,7 +53,10 @@ Two independent facts:
   “能不能帮我修复一下？” ask for the fix and stay changes. Outside those
   shapes, a question is answered unless it is a request — a sentence-initial
   imperative makes it one: “why does it fail? fix it.” is a change, while
-  “why did you change it?” and “is the build failing?” only name a verb.
+  “why did you change it?” and “is the build failing?” only name a verb. A
+  split request counts as one too: “explain first, then fix it” and “先解释一
+  下，然后修复这个 bug” are changes, while a bare “then” in “why did you then
+  change it?” is not a request.
 - **Scale** — `trivial`, `standard`, or `complex`, scored from explicit cues
   rather than inferred from length alone.
 
@@ -146,12 +149,12 @@ This is a heuristic, not a judgment. It reads English and Chinese cue words and
 file-shaped tokens; it does not read the repository, the conversation, or the
 model's confidence. The negation reader looks at a short window before and
 after a verb, so a long, winding sentence can still fool it, and it knows the
-common shapes (`do not`, `don't`, `without`, `不要`, `别`, `无需`, and the
-“don't forget” reversal) rather than parsing the clause. It can be wrong in both
-directions, which is why the unknown case is `standard`, why the contract is
-phrased as scope rather than as a hard limit on tool use, and why the user's own
-effort choice outranks it. It is also not a security decision: permissions and
-the sandbox remain the only layers that admit or refuse a call.
+common shapes (`do not`, `not`, `don't`, `without`, `不要`, `别`, `无需`, and
+the “don't forget” reversal) rather than parsing the clause. It can be wrong in
+both directions, which is why the unknown case is `standard`, why the contract
+is phrased as scope rather than as a hard limit on tool use, and why the user's
+own effort choice outranks it. It is also not a security decision: permissions
+and the sandbox remain the only layers that admit or refuse a call.
 
 The alternative — a model call that classifies the request — is the design the
 difficulty-routing literature uses (for example RoutingGen, AAAI 2026, routes
