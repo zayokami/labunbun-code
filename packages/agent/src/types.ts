@@ -401,11 +401,12 @@ export interface LoopHooks {
 	 * anywhere, and a throw here loses the prompt.
 	 *
 	 * `origin` says which of the three queues produced the message, because a
-	 * hook that attaches task context wants the user's own prompt and not the
-	 * harness's own nudges: a steer is the session talking to the model, and
-	 * classifying it as a new request would let a board reminder pick the
-	 * run's effort. The parameter is additive — a hook written for the text
-	 * alone still type-checks and still runs.
+	 * hook that attaches task context wants the user's own prompt and not a
+	 * mid-run injection: a steer is as often a harness nudge (a task-board
+	 * reminder) as a user correction, and classifying one as a new request
+	 * would let a one-line reminder pick the effort for a run already under
+	 * way. The parameter is additive — a hook written for the text alone still
+	 * type-checks and still runs.
 	 */
 	composeUserMessage?: (text: string, origin: UserMessageOrigin) => string | Promise<string>;
 	/**

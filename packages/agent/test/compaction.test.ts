@@ -44,6 +44,7 @@ import {
 } from "../src/compaction.ts";
 import type { SpillRequest, SpillWriter } from "../src/output-limits.ts";
 import { SessionStore } from "../src/session-store.ts";
+import { classifyTask, composeTaskScale } from "../src/task-scale.ts";
 
 const CONFIG = { contextWindow: 100_000, maxOutputTokens: 32_000 };
 
@@ -579,6 +580,16 @@ describe("what a boundary keeps", () => {
 			assistantMessage({}),
 		];
 		expect(retainedRequests(messages)).toEqual(["the first ask", "the second ask"]);
+	});
+
+	test("a stored task contract is not one of the user's words", () => {
+		// The block leads the stored message so the cache prefix can stay stable.
+		// Retained verbatim it would outlive the request it described and read as
+		// a standing instruction in the next context.
+		const composed = composeTaskScale("fix the typo in README.md", classifyTask("fix the typo in README.md"));
+		expect(retainedRequests([userMessage(composed)])).toEqual(["fix the typo in README.md"]);
+		// The summarizer is told the same thing about the block it still sees.
+		expect(SUMMARY_PROMPT).toContain("<task-scale>");
 	});
 
 	test("the one that does not fit is truncated, not skipped", () => {

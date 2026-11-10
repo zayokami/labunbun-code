@@ -22,7 +22,9 @@
  * all/every/whole, refactor/migrate/audit, or three file paths. Everything else
  * is `standard`, which adds no text and changes no effort. A wrong guess
  * toward trivial costs a check; a classifier that read silence as trivial
- * would cost correctness, so silence stays standard.
+ * would cost correctness, so silence stays standard. A negated verb is not a
+ * request: "don't change anything, explain it" is an answer, while "don't
+ * forget to change it" is still a change.
  *
  * Long-form design notes: docs/dev/task-scale.md
  */
@@ -43,27 +45,78 @@ export interface TaskShape {
 	readonly signals: readonly string[];
 }
 
-const CHANGE_VERB =
-	/\b(?:fix|add|implement|refactor|rewrite|rename|update|remove|delete|change|write|create|make|build|migrate|upgrade|replace|adjust|tweak|move|split|merge|port|bump|wire|support|adapt)\b|(?:修复|修改|改成|改为|改一下|改下|添加|增加|实现|重构|重写|迁移|升级|替换|调整|删除|移除|创建|新建|写一个|写个|加上|加个|支持|接入|合并|拆|适配|对接|改)/iu;
+/**
+ * The English verbs, kept as source so the negating reader below can compile
+ * its own global copy. Gerunds are included because that is the form a negation
+ * takes: "without changing the API".
+ */
+const CHANGE_VERB_EN =
+	"fix|add|implement|refactor|rewrite|rename|update|remove|delete|change|write|create|make|build|migrate|upgrade|replace|adjust|tweak|move|split|merge|port|bump|wire|support|adapt|edit|modify|patch|apply|introduce|extract|inline|changing|editing|modifying|patching|renaming|updating|adding|removing|deleting|refactoring|rewriting";
+
+/** The Chinese verbs. `改`, `加` and `删` are listed bare because a Chinese verb is not space-delimited. */
+const CHANGE_VERB_ZH =
+	"修复|修改|改成|改为|改一下|改下|添加|增加|实现|重构|重写|迁移|升级|替换|调整|删除|移除|创建|新建|写一个|写个|加上|加个|支持|接入|合并|拆|适配|对接|改|加|删";
+
+/** The same pattern with `g`, for walking every occurrence; `test` on a `g` pattern would carry `lastIndex`. */
+const CHANGE_VERB_ALL = new RegExp(`\\b(?:${CHANGE_VERB_EN})\\b|(?:${CHANGE_VERB_ZH})`, "giu");
+
+/**
+ * A negation that ends the text just before a change verb.
+ *
+ * English allows up to two words between the negation and the verb ("without
+ * ever changing"), Chinese takes one of the common particles ("不要再改").
+ * `别` is deliberately narrow: a bare match would also hit `区别`, so a
+ * non-negation character after it cancels the match.
+ */
+const NEGATION_BEFORE =
+	/(?:\b(?:do not|don't|dont|never|without|no need to|avoid)\b(?:\s+[a-z]+){0,2}|(?:不要|别|无需|不用|不需要|不必|勿)(?:再|去|乱|随便)?)\s*$/iu;
+
+/** "change nothing" negates from the other side. Kept to unambiguous objects. */
+const NEGATION_AFTER = /^\s*(?:nothing|no files?|no code|none of)\b/iu;
 
 const ANSWER_VERB =
-	/\b(?:explain|describe|summari[sz]e|review|analy[sz]e|compare|list|show|tell|find|look|check|investigate|diagnose|assess)\b|(?:解释|说明|分析|对比|列出|看看|看一下|查查|查一下|找一下|检查|调查|诊断|评估|总结)/iu;
+	/\b(?:explain|describe|summari[sz]e|review|analy[sz]e|compare|list|show|tell|find|search|grep|locate|trace|look|check|investigate|diagnose|assess)\b|(?:解释|说明|分析|对比|列出|看看|看下|查查|查下|查一下|找一下|检查|调查|诊断|评估|总结|介绍|说说|讲讲)/iu;
 
 /** A leading interrogative, a trailing question mark, or both. */
 const QUESTION_SHAPE =
 	/^\s*(?:what|why|how|where|when|who|which|whose|does|do|did|is|are|was|were|can|could|should|would|will|has|have|explain|describe|list|show|tell|find|please)\b|^\s*(?:为什么|怎么|如何|哪|什么|是否|能否|可以|请问|解释|说明|列出|看看)|[?？]\s*$/iu;
 
+/**
+ * A question that asks for advice or an explanation, even when it names a
+ * change. "Should I refactor this?" carries the verb `refactor` but asks what
+ * to do, not for the refactor; reading it as a broad change would attach a plan
+ * the user did not request. "Can you fix it?" is the opposite — a request —
+ * and is not matched here.
+ */
+const ADVICE_QUESTION =
+	/^\s*(?:how (?:do|does|did|should|would|can|could) (?:i|we|you|it)\b|how to\b|what(?:'s| is) the (?:best|right|proper|usual) way\b|what would you (?:recommend|suggest)\b|should (?:i|we)\b|is it (?:worth|better|a good idea)\b|why\b|where\b|which\b|who\b)|^\s*(?:怎么|怎样|如何|为什么|为何|哪(?:里|个|些)?|什么|要不要|该不该|值不值得|值得|你觉得|你认为)/iu;
+
+/**
+ * A second-person or polite request. It is what tells "fix it?" — a request
+ * wearing a question mark — apart from "why did it fail?" — a question that
+ * happens to name a verb. A sentence-initial change verb counts too
+ * ("…? fix it."), which is why the caller checks the position of each match.
+ */
+const REQUEST_SHAPE =
+	/^\s*(?:please\b|can you\b|could you\b|would you\b|will you\b|help me\b|能否|能不能|可以帮|帮我|帮忙|麻烦|请(?!问))/iu;
+
 /** The explicit "this is small" cues. Alone they are enough for `trivial`. */
 const EXPLICIT_SMALL =
-	/\b(?:just|only|quick(?:ly)?|tiny|small|one[- ]liner|one line|typo|nit|tweak)\b|(?:简单|只需|只要|只改|只加|只删|小改|一行|顺手|稍微|微调|小修|小问题)/iu;
+	/\b(?:just|only|quick(?:ly)?|tiny|small|simple|minor|trivial|one[- ]liner|one line|typo|nit|tweak)\b|(?:简单|只需|只要|只改|只加|只删|只动|只碰|只调整|小改|一行|顺手|稍微|微调|小修|小问题)/iu;
 
 /** The scope words that make a request broad regardless of how short it is. */
 const EXPLICIT_LARGE =
-	/\b(?:all|every|each|entire|whole|across|throughout|codebase|project-?wide|system-?wide|refactor|rewrite|redesign|overhaul|migrat(?:e|ion)|architecture|audit|comprehensive|end-to-end)\b|(?:所有|全部|每个|整个|全项目|代码库|全面|整体|重构|重写|迁移|架构|审计|彻底|端到端)/iu;
+	/\b(?:all|every|each|entire|whole|across|throughout|everything|everywhere|all of|codebase|project-?wide|system-?wide|refactor|rewrite|redesign|overhaul|migrat(?:e|ion)|architecture|audit|comprehensive|end-to-end)\b|(?:所有|全部|每个|整个|全项目|代码库|全面|整体|重构|重写|迁移|架构|审计|彻底|端到端|一切|每处|各处)/iu;
 
-/** File-ish tokens, so "three paths" can be counted without a filesystem. */
+/** The same scope words with `g`, so a negated clause can be passed over. */
+const EXPLICIT_LARGE_ALL = new RegExp(EXPLICIT_LARGE.source, "giu");
+
+/** Anything URL-shaped, so a documentation link is not counted as a file the request names. */
+const URL_TOKEN = /\b[a-z][a-z0-9+.-]*:\/\/\S+/giu;
+
+/** File-ish tokens, so "three paths" can be counted without a filesystem. Both separators count. */
 const PATH_TOKEN =
-	/\b[\w@.-]+(?:\/[\w@.-]+)+\b|\b[\w-]+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|swift|rb|php|cs|c|cc|cpp|h|hpp|json|jsonc|md|mdx|ya?ml|toml|css|scss|sass|less|html|sh|ps1|bat|lua|sql)\b/giu;
+	/\b[\w@.~-]+(?:[\\/][\w@.~-]+)+\b|\b[\w-]+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|swift|rb|php|cs|c|cc|cpp|h|hpp|json|jsonc|md|mdx|ya?ml|toml|css|scss|sass|less|html|sh|ps1|bat|lua|sql)\b/giu;
 
 /** Words plus half the CJK characters: Chinese says in one character what English says in a syllable. */
 function sizeOf(text: string): number {
@@ -72,14 +125,30 @@ function sizeOf(text: string): number {
 	return words + Math.ceil(cjk / 2);
 }
 
+/** "Remember to …" and "don't forget to …" end a negation rather than start one. */
+const NEGATION_CANCEL = /\b(?:forget|remember)\s+(?:to\s+)?$|忘(?:了)?\s*$/iu;
+
 /** Distinct path-shaped tokens, URLs excluded. */
 function countPaths(text: string): number {
 	const seen = new Set<string>();
-	for (const match of text.matchAll(PATH_TOKEN)) {
-		const token = match[0];
-		if (!token.includes("://")) seen.add(token.toLowerCase());
+	for (const match of text.replace(URL_TOKEN, " ").matchAll(PATH_TOKEN)) {
+		seen.add(match[0].toLowerCase());
 	}
 	return seen.size;
+}
+
+/** Whether the verb at `index` is negated by the words around it. */
+function negatedAt(text: string, index: number, length: number): boolean {
+	const before = text.slice(Math.max(0, index - 48), index);
+	if (NEGATION_CANCEL.test(before)) return false;
+	const after = text.slice(index + length, index + length + 24);
+	return NEGATION_BEFORE.test(before) || NEGATION_AFTER.test(after);
+}
+
+/** Whether the verb at `index` opens its sentence, which is the shape an imperative takes. */
+function isSentenceInitial(text: string, index: number): boolean {
+	const before = text.slice(0, index);
+	return /^\s*$/u.test(before) || /[.!?;。！？；]\s*$/u.test(before);
 }
 
 /**
@@ -98,7 +167,15 @@ export function classifyTask(text: string): TaskShape {
 	const size = sizeOf(trimmed);
 	const paths = countPaths(trimmed);
 	const question = QUESTION_SHAPE.test(trimmed);
-	const changeVerb = CHANGE_VERB.test(trimmed);
+	const advice = ADVICE_QUESTION.test(trimmed);
+	const changeMatches = [...trimmed.matchAll(CHANGE_VERB_ALL)];
+	const positive = changeMatches.filter((match) => !negatedAt(trimmed, match.index ?? 0, match[0].length));
+	const changeVerb = positive.length > 0;
+	const imperative = positive.some((match) => isSentenceInitial(trimmed, match.index ?? 0));
+	const request = REQUEST_SHAPE.test(trimmed) || imperative;
+	const broad = [...trimmed.matchAll(EXPLICIT_LARGE_ALL)].some(
+		(match) => !negatedAt(trimmed, match.index ?? 0, match[0].length),
+	);
 	const answerVerb = ANSWER_VERB.test(trimmed);
 
 	let score = 0;
@@ -112,7 +189,7 @@ export function classifyTask(text: string): TaskShape {
 		score -= 1;
 		signals.push("short");
 	}
-	if (EXPLICIT_LARGE.test(trimmed)) {
+	if (broad) {
 		score += 4;
 		signals.push("explicit-large");
 	}
@@ -129,11 +206,15 @@ export function classifyTask(text: string): TaskShape {
 		signals.push("several-paths");
 	}
 
-	if (question) signals.push("question");
+	if (question || advice) signals.push("question");
+	if (advice) signals.push("advice-question");
+	if (request) signals.push("request");
 	if (changeVerb) signals.push("change-verb");
 	else if (answerVerb) signals.push("answer-verb");
+	if (!changeVerb && changeMatches.length > 0) signals.push("negated-change");
 
-	const kind: TaskKind = !changeVerb && (question || answerVerb) ? "answer" : "change";
+	const kind: TaskKind =
+		(advice && !imperative) || (changeVerb ? question && !request : question || answerVerb) ? "answer" : "change";
 	const scale: TaskScale = score >= 3 ? "complex" : score <= -2 ? "trivial" : "standard";
 	return { kind, scale, signals };
 }
@@ -209,9 +290,10 @@ export interface TaskCalibration {
  * `compose` runs at the one moment a user message is created, which is also
  * before the first request of the run: the effort reader therefore has the
  * run's shape by the time the adapter asks for it. Steering messages are
- * skipped — they are the harness talking to the model, not a new task — and a
- * `LBB_TASK_SCALE=off` in the environment turns the whole feature off without
- * changing the prompt bytes or the effort.
+ * skipped — they land mid-run and are as often a harness nudge as a user
+ * correction, so one must not choose the effort for a run already under way —
+ * and a `LBB_TASK_SCALE=off` in the environment turns the whole feature off
+ * without changing the prompt bytes or the effort.
  */
 export function createTaskCalibration(
 	options: { env?: { LBB_TASK_SCALE?: string | undefined } } = {},

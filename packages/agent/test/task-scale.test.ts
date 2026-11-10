@@ -36,6 +36,37 @@ const CASES: Array<{ text: string; kind: TaskKind; scale: TaskScale; why: string
 		why: "a short feature is still a feature",
 	},
 	{
+		text: "do not change anything and explain the failure",
+		kind: "answer",
+		scale: "standard",
+		why: "the only change verb is negated",
+	},
+	{
+		text: "don't forget to update the changelog",
+		kind: "change",
+		scale: "standard",
+		why: "forget cancels the negation and leaves a change",
+	},
+	{
+		text: "don't change the API, but rename the file",
+		kind: "change",
+		scale: "standard",
+		why: "one negated verb does not cancel a positive one",
+	},
+	{ text: "不要改配置，只加一行日志", kind: "change", scale: "trivial", why: "改 is negated, 加 is not" },
+	{
+		text: "change everything everywhere",
+		kind: "change",
+		scale: "complex",
+		why: "everything is scope evidence",
+	},
+	{
+		text: "update src\\a.ts, src\\b.ts and src\\c.ts",
+		kind: "change",
+		scale: "complex",
+		why: "three Windows paths",
+	},
+	{
 		text: "refactor the permission engine across the whole codebase",
 		kind: "change",
 		scale: "complex",
@@ -56,10 +87,56 @@ const CASES: Array<{ text: string; kind: TaskKind; scale: TaskScale; why: string
 	},
 	{
 		text: "how do I fix the flaky test?",
+		kind: "answer",
+		scale: "standard",
+		why: "advice about a fix, not a request to make one",
+	},
+	{
+		text: "should I refactor this?",
+		kind: "answer",
+		scale: "complex",
+		why: "advice wins over the scope word it mentions",
+	},
+	{
+		text: "can you fix the flaky test?",
 		kind: "change",
 		scale: "standard",
-		why: "the question carries a change verb",
+		why: "a second-person request is not advice",
 	},
+	{ text: "怎么修复这个 bug", kind: "answer", scale: "standard", why: "怎么 asks how, not for the fix" },
+	{
+		text: "该不该重构整个项目？",
+		kind: "answer",
+		scale: "complex",
+		why: "该不该 asks for a judgment",
+	},
+	{
+		text: "能不能帮我修复一下？",
+		kind: "change",
+		scale: "standard",
+		why: "能不能帮我 is a polite request",
+	},
+	{
+		text: "don't refactor everything, just fix the typo",
+		kind: "change",
+		scale: "trivial",
+		why: "a negated scope word is not scope evidence",
+	},
+	{
+		text: "why does the entire build fail?",
+		kind: "answer",
+		scale: "complex",
+		why: "the verb is a noun in the question, not a request",
+	},
+	{ text: "what did you change?", kind: "answer", scale: "standard", why: "a question about a past change" },
+	{
+		text: "why does it fail? fix it.",
+		kind: "change",
+		scale: "standard",
+		why: "a later imperative sentence makes it a request",
+	},
+	{ text: "is the build failing?", kind: "answer", scale: "standard", why: "build is the subject here" },
+	{ text: "麻烦看下为什么构建失败", kind: "answer", scale: "standard", why: "看下 asks for an investigation" },
 	{
 		text: "explain how the whole pipeline works",
 		kind: "answer",
@@ -88,6 +165,18 @@ describe("classifyTask", () => {
 			expect.arrayContaining(["explicit-small", "short", "change-verb"]),
 		);
 		expect(classifyTask("why does this fail?").signals).toContain("question");
+		expect(classifyTask("do not change anything and explain").signals).toContain("negated-change");
+		expect(classifyTask("edit src/a.ts").signals).toContain("change-verb");
+		expect(classifyTask("should I refactor this?").signals).toContain("advice-question");
+		expect(classifyTask("don't refactor everything").signals).not.toContain("explicit-large");
+		expect(classifyTask("fix the typo").signals).toContain("request");
+	});
+
+	test("URLs are links, not files the request names", () => {
+		const text = "look at https://example.com/src/a.ts, https://example.com/src/b.ts and https://example.com/src/c.ts";
+		const shape = classifyTask(text);
+		expect(shape.signals).not.toContain("several-paths");
+		expect(shape.scale).toBe("standard");
 	});
 });
 

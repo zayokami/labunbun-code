@@ -13,13 +13,21 @@ commands, and SHA-256 checksums.
   `所有`, or three named files), or `standard`. A trivial change is told to make
   the smallest edit, run the one check that covers it, and add no tests, docs,
   or defensive handling; a complex one to read first, state a short plan, and
-  stop once the relevant checks pass. A question with no change verb is read as
-  an answer, not an edit. `standard` adds nothing, so an ordinary request keeps
-  the bytes and the effort it had. The same read sets thinking effort — `low`
-  for trivial, `high` for complex — unless you set a level yourself. The
+  stop once the relevant checks pass. A question with no change verb — or only
+  a negated one, as in "do not change anything, explain it" — is read as an
+  answer, not an edit, while "don't forget to change it" stays a change; a
+  question that asks for advice ("should I refactor this?", "该不该重构整个
+  项目？") is an answer even when it names a change verb, while "can you fix
+  it?" is still a request; a later imperative sentence makes the message a
+  change ("why does it fail? fix it."). The paths it counts ignore URLs and
+  accept both separators, and a negated scope word adds nothing ("don't
+  refactor everything, just fix the typo" stays trivial). `standard` adds
+  nothing, so an ordinary request keeps the bytes and the effort it had. The same read sets thinking effort — `low` for
+  trivial, `high` for complex — unless you set a level yourself. The
   instruction is part of the stored message, keeping the cache prefix stable,
-  and is stripped from the transcript, the resume preview, and export.
-  `LBB_TASK_SCALE=off` turns it off. See `docs/dev/task-scale.md`.
+  and is stripped from the transcript, the resume preview, export, and the
+  requests a compaction keeps verbatim. `LBB_TASK_SCALE=off` turns it off. See
+  `docs/dev/task-scale.md`.
 
 - **Claude Fable 5.2 and Claude Mythos 5.2 are in the catalog.** Both carry the
   1M-token window, 128K output, always-on adaptive thinking, and $8/$40 pricing

@@ -305,7 +305,7 @@ The read has three sizes. A `trivial` request names a small cue, such as `just`,
 
 A `standard` request gets no extra text. The base prompt already covers it, and a block on every turn is the prompt bloat this feature exists to prevent.
 
-A question is read as `answer` when it carries no change verb. The model answers it and does not edit files or run builds for it. "How do I fix the flaky test?" names a change verb, so it stays a change.
+A question is read as `answer` when it carries no change verb, or when it asks for advice. The model answers it and does not edit files or run builds for it. "Should I refactor this?" and "怎么修复这个 bug" ask what to do, so they are answers. A real request stays a change: "can you fix the flaky test?" and "能不能帮我修复一下？". A later imperative sentence also makes the message a change: "why does it fail? fix it."
 
 The same read sets the thinking effort. A trivial change runs at `low`, and a broad change runs at `high`. A standard request, a question, and every tier above `high` keep the model's own default. A level you set with `/think` or `thinkingLevel` always wins.
 

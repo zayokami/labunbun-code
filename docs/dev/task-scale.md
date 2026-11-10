@@ -43,7 +43,17 @@ Two independent facts:
 
 - **Kind** — `answer` or `change`. A question that carries no change verb is
   answered from what is read; it does not become an edit. “How do I fix the
-  flaky test?” carries `fix` and is a change.
+  flaky test?” carries `fix` and is a change. A negated verb does not count:
+  “do not change anything, explain the failure” is an answer, while “don't
+  forget to change it” still is a change — `forget` and `remember` cancel the
+  negation. Every occurrence is read, not just the first, so “don't change the
+  API, but rename the file” stays a change. A question that asks for advice is
+  an answer even when it names a change verb: “should I refactor this?” and
+  “该不该重构整个项目？” ask what to do, while “can you fix it?” and
+  “能不能帮我修复一下？” ask for the fix and stay changes. Outside those
+  shapes, a question is answered unless it is a request — a sentence-initial
+  imperative makes it one: “why does it fail? fix it.” is a change, while
+  “why did you change it?” and “is the build failing?” only name a verb.
 - **Scale** — `trivial`, `standard`, or `complex`, scored from explicit cues
   rather than inferred from length alone.
 
@@ -52,19 +62,24 @@ The classifier is conservative in the direction that costs correctness least:
 | Reading | Needs | Contract |
 |---|---|---|
 | `trivial` | an explicit small cue: `just`, `only`, `quick`, `typo`, `只改`, `简单`, … | no plan, no delegation, smallest edit, one targeted check, no extra tests/docs/defences |
-| `complex` | explicit scope evidence: `all`, `every`, `whole`, `across`, `refactor`, `migrate`, `audit`, `所有`, `重构`, …; or three file paths; or a long, many-sentence request | read first, short plan before the first edit, one focused pass, relevant checks, then stop |
+| `complex` | explicit scope evidence: `all`, `every`, `everything`, `whole`, `across`, `refactor`, `migrate`, `audit`, `所有`, `重构`, …; or three file paths; or a long, many-sentence request | read first, short plan before the first edit, one focused pass, relevant checks, then stop |
 | `standard` | none of the above | nothing is added; the base prompt and the model's own default apply |
 
 `trivial` needs the cue, not merely a short text. “Implement retry with backoff
 and jitter” is short and is not trivial; “fix the typo” is. A classifier that
 read brevity as simplicity would be the same failure in the other direction.
 Three paths is complex because a change that names three files is not a
-one-file change, even when its wording is modest.
+one-file change, even when its wording is modest. Paths are counted from the
+text, case-insensitively, with both separators (`src/a.ts` and `src\a.ts`), and
+URLs are removed first: a documentation link is a link, not a file the request
+asks to touch. A scope word the request negates is not evidence of scope, so
+“don't refactor everything, just fix the typo” stays trivial.
 
 The full rule set and its weights are in `classifyTask`. The signals that
 decided a request are returned as stable names (`explicit-small`, `short`,
 `explicit-large`, `long`, `many-sentences`, `several-paths`, `question`,
-`change-verb`, `answer-verb`), so a test can assert why a boundary moved.
+`advice-question`, `request`, `change-verb`, `answer-verb`, `negated-change`,
+`empty`), so a test can assert why a boundary moved.
 
 ## Where the contract goes
 
@@ -90,6 +105,13 @@ The block is composed last, after any hook context, so it is always the head of
 the stored message. That is what lets the transcript rebuild (`ui-state.ts`),
 the `/resume` preview and the Markdown export strip it by prefix with
 `stripTaskScale`: the model sees machine guidance, the user does not.
+
+Compaction reads the same rule from the other side. `retainedRequests` carries
+the user's own requests verbatim into the boundary it writes, so it strips the
+block before counting or keeping a request; otherwise “this is a small change”
+would survive the request it described and come back as a standing instruction
+for the next context. The summary prompt's definition of a user message names
+`<task-scale>` blocks for the same reason.
 
 `standard` adds nothing. The base prompt already says the ordinary things, and
 a block repeated on every request is the prompt bloat this feature is meant to
@@ -122,11 +144,14 @@ A/B switch, like `LBB_TASK_REMINDER`.
 
 This is a heuristic, not a judgment. It reads English and Chinese cue words and
 file-shaped tokens; it does not read the repository, the conversation, or the
-model's confidence. It can be wrong in both directions, which is why the
-unknown case is `standard`, why the contract is phrased as scope rather than as
-a hard limit on tool use, and why the user's own effort choice outranks it.
-It is also not a security decision: permissions and the sandbox remain the only
-layers that admit or refuse a call.
+model's confidence. The negation reader looks at a short window before and
+after a verb, so a long, winding sentence can still fool it, and it knows the
+common shapes (`do not`, `don't`, `without`, `不要`, `别`, `无需`, and the
+“don't forget” reversal) rather than parsing the clause. It can be wrong in both
+directions, which is why the unknown case is `standard`, why the contract is
+phrased as scope rather than as a hard limit on tool use, and why the user's own
+effort choice outranks it. It is also not a security decision: permissions and
+the sandbox remain the only layers that admit or refuse a call.
 
 The alternative — a model call that classifies the request — is the design the
 difficulty-routing literature uses (for example RoutingGen, AAAI 2026, routes
