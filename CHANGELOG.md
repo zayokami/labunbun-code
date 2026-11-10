@@ -43,6 +43,15 @@ commands, and SHA-256 checksums.
 - **A logo.** `docs/assets/labunbun-logo.png` is the new mark, shown at the top
   of the README.
 
+- **The Windows build carries the mark.** `docs/assets/labunbun-icon.ico` is the
+  logo trimmed to its content, set on a white rounded square, and rendered at
+  nine sizes from 16 to 256 pixels, so Explorer picks a sharp frame at every
+  zoom. `bin:build` embeds it with `--windows-icon` and fills the executable's
+  version resource — title and description `LaBunbun Code`, publisher
+  `zayokami`, version `0.1.0.4`, and the MIT copyright line — instead of
+  leaving Bun's own metadata on the file. The installer takes its setup icon
+  from the same file.
+
 - **The system prompt adapts to the model family.** Every session now resolves
   its model to a profile: Claude, GPT, Gemini, DeepSeek, Kimi, Qwen, GLM,
   MiniMax, Mistral, Meta, Hunyuan, MiMo, NVIDIA, a local Ollama model, or an

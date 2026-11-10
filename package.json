@@ -16,7 +16,7 @@
 		"lint": "biome check --error-on-warnings .",
 		"fmt": "biome format --write .",
 		"skills:bundle": "bun run scripts/bundle-skills.ts",
-		"bin:build": "bun run scripts/bundle-skills.ts && bun build --compile --minify packages/coding-agent/src/main.ts packages/tools/src/repomap-worker.ts --outfile dist/labunbun-x64.exe",
+		"bin:build": "bun run scripts/bundle-skills.ts && bun build --compile --minify --windows-icon=docs/assets/labunbun-icon.ico --windows-title=\"LaBunbun Code\" --windows-description=\"LaBunbun Code\" --windows-publisher=zayokami --windows-version=0.1.0.4 --windows-copyright=\"Copyright (c) 2026 zayoka\" packages/coding-agent/src/main.ts packages/tools/src/repomap-worker.ts --outfile dist/labunbun-x64.exe",
 		"installer:build": "bun run scripts/build-installer.ts",
 		"release:package": "bun run scripts/package-release.ts"
 	},

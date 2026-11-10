@@ -36,6 +36,7 @@ OutputBaseFilename=LaBunbun-Code-{#AppVersion}-{#Alpha}-x64-setup
 Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\docs\assets\labunbun-icon.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#ExeName}
