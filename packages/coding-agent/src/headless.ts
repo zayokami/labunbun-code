@@ -12,6 +12,7 @@ import type { AgentEvent, NetworkSandboxPolicy, PermissionMode, SandboxMode } fr
 import {
 	AgentSession,
 	collectReadOnlyToolNames,
+	createTaskCalibration,
 	evaluatePermissions,
 	formatRetryNotice,
 	SessionReadError,
@@ -943,7 +944,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// the line goes out when the write fails.
 		onWarning: (failure) => console.error(formatLedgerFailureNotice(failure)),
 	});
-	const hookDeps = sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd });
+	// The `-p` run gets the same task-scale read as the REPL: a scripted run is
+	// often exactly the one asked to "just fix the typo", and it has no `/think`
+	// to correct an effort afterward.
+	const taskCalibration = createTaskCalibration();
+	const hookDeps = sessionHookDeps({
+		runtime: hooksRuntime,
+		context: hookContext,
+		cwd,
+		calibration: taskCalibration,
+	});
 
 	const outputStyles = loadOutputStylesWithNotes(cwd, home);
 	for (const note of outputStyles.notes) console.error(`Output style: ${note}`);
@@ -977,8 +987,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			streamFn,
 			// Constant in a `-p` run — nothing moves it mid-run — but read per request
 			// like the REPL's, so the settings value lands on the wire through the
-			// same seam in both modes.
-			thinkingLevel: () => settings.thinkingLevel,
+			// same seam in both modes. The task calibration answers only when the
+			// settings key is unset, so a script that pins a level still gets it.
+			thinkingLevel: () => taskCalibration.level(settings.thinkingLevel),
 			checkCompaction: compactionWiring.checkCompaction,
 			// The spending ceiling, asked before every request of this run's own
 			// loop. The model about to answer names the seat (a model no seat

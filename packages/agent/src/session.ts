@@ -43,6 +43,7 @@ import type {
 	PermissionMode,
 	ResolvedToolCall,
 	SandboxMode,
+	UserMessageOrigin,
 } from "./types.ts";
 import { DEFAULT_MODE_CHOICE, DEFAULT_SANDBOX_FOR_MODE, toWireTools } from "./types.ts";
 
@@ -331,9 +332,9 @@ export class AgentSession {
 	 * later in the same conversation byte-identical to the one before it. See
 	 * `LoopHooks.composeUserMessage` for why that timing is the point.
 	 */
-	async #userText(text: string): Promise<string> {
+	async #userText(text: string, origin: UserMessageOrigin): Promise<string> {
 		const compose = this.#deps.hooks?.composeUserMessage;
-		return compose ? await compose(text) : text;
+		return compose ? await compose(text, origin) : text;
 	}
 
 	/**
@@ -449,12 +450,12 @@ export class AgentSession {
 				// for the next run instead of vanishing with the error.
 				const queued = this.#followUp[0];
 				if (queued === undefined) break;
-				const queuedMsg = userMessage(await this.#userText(queued));
+				const queuedMsg = userMessage(await this.#userText(queued, "followUp"));
 				this.#admitMessage(queuedMsg);
 				this.#followUp.shift();
 			}
 
-			const userMsg = userMessage(await this.#userText(text));
+			const userMsg = userMessage(await this.#userText(text, "prompt"));
 			this.#admitMessage(userMsg);
 
 			while (true) {
@@ -528,7 +529,7 @@ export class AgentSession {
 				while (this.#steering.length > 0) {
 					const text = this.#steering[0];
 					if (text === undefined) break;
-					const steerMsg = userMessage(await this.#userText(text));
+					const steerMsg = userMessage(await this.#userText(text, "steer"));
 					this.#admitMessage(steerMsg);
 					this.#steering.shift();
 				}
@@ -772,7 +773,7 @@ export class AgentSession {
 					}
 					const followUpText = this.#followUp[0];
 					if (followUpText !== undefined) {
-						const followUpMsg = userMessage(await this.#userText(followUpText));
+						const followUpMsg = userMessage(await this.#userText(followUpText, "followUp"));
 						this.#admitMessage(followUpMsg);
 						this.#followUp.shift();
 						continue;

@@ -48,6 +48,7 @@ import {
 	type AgentEvent,
 	AgentSession,
 	collectReadOnlyToolNames,
+	createTaskCalibration,
 	DEFAULT_MODE_CHOICE,
 	evaluatePermissions,
 	MODE_CHOICES,
@@ -1326,6 +1327,10 @@ class AcpAgent {
 				model,
 				repoMap: repoMapText,
 			});
+		// The same task-scale read as the REPL and `-p`: the editor host has no
+		// `/think` either, so a small request that arrives here would otherwise
+		// run at the session's default depth for its whole conversation.
+		const taskCalibration = createTaskCalibration();
 		const session: AgentSession = new AgentSession({
 			model,
 			systemPrompt: buildPrompt(),
@@ -1338,7 +1343,7 @@ class AcpAgent {
 			network: effectiveNetwork,
 			deps: {
 				streamFn,
-				thinkingLevel: () => settings.thinkingLevel,
+				thinkingLevel: () => taskCalibration.level(settings.thinkingLevel),
 				checkCompaction: compactionWiring.checkCompaction,
 				// The spending ceiling, asked before every request: the model
 				// about to answer names the seat (a model no seat owns is never
@@ -1359,7 +1364,7 @@ class AcpAgent {
 				// unresolved "ask" becomes a question with four answers instead of a
 				// silent denial.
 				canUseTool: (toolName, input, ctx) => this.#canUseTool(sessionId, permissions, toolName, input, ctx),
-				hooks: sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd }),
+				hooks: sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd, calibration: taskCalibration }),
 			},
 		});
 		// From here the confiner's getters answer with this session's axes,

@@ -297,6 +297,22 @@ Plan mode is interactive. A headless run and an editor session have no plan tool
 
 The tool restores the two axes that were in force before you entered plan mode.
 
+### Task scale
+
+The tool reads the size of each request before the model does. The read is deterministic: cue words, length, and file paths in the user's own text. There is no extra model call.
+
+The read has three sizes. A `trivial` request names a small cue, such as `just`, `typo`, `只改`, or `简单`. It gets a short instruction: make the smallest edit, run the one check that covers it, and add no tests, docs, or defensive handling. A `complex` request names broad scope, such as `all`, `refactor`, `所有`, or `重构`, or names three files or more. It gets a short plan before the first edit and a stop when the relevant checks pass. Every other request is `standard`.
+
+A `standard` request gets no extra text. The base prompt already covers it, and a block on every turn is the prompt bloat this feature exists to prevent.
+
+A question is read as `answer` when it carries no change verb. The model answers it and does not edit files or run builds for it. "How do I fix the flaky test?" names a change verb, so it stays a change.
+
+The same read sets the thinking effort. A trivial change runs at `low`, and a broad change runs at `high`. A standard request, a question, and every tier above `high` keep the model's own default. A level you set with `/think` or `thinkingLevel` always wins.
+
+The instruction travels with the stored user message, so the prompt cache prefix stays stable across turns. The transcript, the `/resume` preview, and the Markdown export remove it, so you never see it.
+
+Set `LBB_TASK_SCALE=off` to turn the read off. See `docs/dev/task-scale.md`.
+
 ### Themes
 
 ```bash

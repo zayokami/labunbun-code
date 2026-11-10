@@ -19,7 +19,7 @@
  * the parameter existed.
  */
 import { spawn } from "node:child_process";
-import type { CompactionTrigger, LoopHooks } from "@labunbun/agent";
+import type { CompactionTrigger, LoopHooks, TaskCalibration } from "@labunbun/agent";
 import type { SpawnConfiner } from "@labunbun/tools";
 import { z } from "zod";
 
@@ -255,8 +255,19 @@ export function advisoryHookFailures(event: HookEventName, outcome: HookOutcome)
  * rather than read, so a second prompt in the same run carries only what its own
  * prompt contributed.
  */
-export function sessionHookDeps(options: { runtime: HooksRuntime; context: string[]; cwd: string }): LoopHooks {
-	const { runtime, context, cwd } = options;
+export function sessionHookDeps(options: {
+	runtime: HooksRuntime;
+	context: string[];
+	cwd: string;
+	/**
+	 * The run's task-scale reader. Composed last, so the calibration block is at
+	 * the head of the stored message and the transcript can strip it by prefix;
+	 * classification itself reads `text`, the user's own words, not the hook
+	 * context that was just prepended to them.
+	 */
+	calibration?: TaskCalibration;
+}): LoopHooks {
+	const { runtime, context, cwd, calibration } = options;
 	return {
 		// Hook context is composed into the user message as it is created, so the
 		// stored transcript is what every later request replays. Attaching it to the
@@ -264,10 +275,10 @@ export function sessionHookDeps(options: { runtime: HooksRuntime; context: strin
 		// unrepeatable: the second request of a tool loop would send the same message
 		// without it, and every token after that message would be charged at full
 		// price again.
-		composeUserMessage: (text) => {
+		composeUserMessage: (text, origin) => {
 			const added = context.splice(0, context.length);
-			if (added.length === 0) return text;
-			return `${added.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
+			const composed = added.length === 0 ? text : `${added.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
+			return calibration ? calibration.compose(composed, text, origin) : composed;
 		},
 		beforeToolCall: async (toolName, input) => {
 			if (!runtime.has("PreToolUse")) return undefined;

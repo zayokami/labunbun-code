@@ -12,7 +12,7 @@
  * module cannot read is "no preview", never an error in the picker.
  */
 import { open } from "node:fs/promises";
-import { parseSessionLine, type SessionEntry } from "@labunbun/agent";
+import { parseSessionLine, type SessionEntry, stripTaskScale } from "@labunbun/agent";
 import type { PickerPreview } from "@labunbun/tui";
 import { readSessionTitle } from "./session-title.ts";
 
@@ -47,12 +47,15 @@ function previewLine(text: string): string {
 /** The text a user message carries, ignoring images. */
 function userText(message: Extract<SessionEntry, { type: "message" }>["message"]): string {
 	if (message.role !== "user") return "";
-	return typeof message.content === "string"
-		? message.content
-		: message.content
-				.filter((block) => block.type === "text")
-				.map((block) => block.text)
-				.join(" ");
+	const text =
+		typeof message.content === "string"
+			? message.content
+			: message.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join(" ");
+	// The picker shows the conversation, not the harness's guidance to the model.
+	return stripTaskScale(text);
 }
 
 /**

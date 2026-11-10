@@ -3,6 +3,7 @@
  * text. Used by /export; the caller decides the file path.
  */
 
+import { stripTaskScale } from "@labunbun/agent";
 import type { AgentMessage } from "@labunbun/ai";
 
 /** Per-result cap so one noisy command cannot dominate the export. */
@@ -13,7 +14,10 @@ export function sessionToMarkdown(messages: AgentMessage[]): string {
 
 	for (const message of messages) {
 		if (message.role === "user") {
-			sections.push("## user", "", textOf(message.content) || "*(empty)*", "");
+			// The export is the user's conversation; the task-scale contract the
+			// harness attached to the stored message stays out of it.
+			const text = stripTaskScale(textOf(message.content));
+			sections.push("## user", "", text || "*(empty)*", "");
 			continue;
 		}
 		if (message.role === "assistant") {

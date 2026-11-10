@@ -368,6 +368,9 @@ export interface BeforeToolCallDecision {
 	updatedInput?: unknown;
 }
 
+/** Which queue a user message came from; see {@link LoopHooks.composeUserMessage}. */
+export type UserMessageOrigin = "prompt" | "steer" | "followUp";
+
 export interface LoopHooks {
 	beforeToolCall?: (
 		toolName: string,
@@ -396,8 +399,15 @@ export interface LoopHooks {
 	 *
 	 * Implementations should not throw: this runs before the user's own text is
 	 * anywhere, and a throw here loses the prompt.
+	 *
+	 * `origin` says which of the three queues produced the message, because a
+	 * hook that attaches task context wants the user's own prompt and not the
+	 * harness's own nudges: a steer is the session talking to the model, and
+	 * classifying it as a new request would let a board reminder pick the
+	 * run's effort. The parameter is additive — a hook written for the text
+	 * alone still type-checks and still runs.
 	 */
-	composeUserMessage?: (text: string) => string | Promise<string>;
+	composeUserMessage?: (text: string, origin: UserMessageOrigin) => string | Promise<string>;
 	/**
 	 * Rewrite the context one request is about to be sent with.
 	 *

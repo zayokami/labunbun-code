@@ -8,6 +8,7 @@ import {
 	COMPACTION_BOUNDARY_LEAD,
 	isCompactionBoundary,
 	LENGTH_RECOVERY_MESSAGE,
+	stripTaskScale,
 } from "@labunbun/agent";
 import type { AgentMessage, ImageContent, TextContent, ThinkingLevel, Usage } from "@labunbun/ai";
 import type { ListPickerState } from "./components/ListPickerDialog.tsx";
@@ -844,7 +845,12 @@ export function entriesFromMessages(messages: readonly AgentMessage[]): UiEntry[
 	const toolRows = new Map<string, Extract<UiEntry, { kind: "toolUse" }>>();
 	for (const message of messages) {
 		if (message.role === "user") {
-			const text = typeof message.content === "string" ? message.content : textOfBlocks(message.content);
+			// The task-scale contract is guidance to the model, not something the
+			// user typed; the stored message carries it, the transcript does not
+			// show it. Stripping is a prefix match, so user text is never touched.
+			const text = stripTaskScale(
+				typeof message.content === "string" ? message.content : textOfBlocks(message.content),
+			);
 			if (text.trim().length === 0) continue;
 			if (isCompactionBoundary(message)) {
 				entries.push({ kind: "info", text: COMPACTION_BOUNDARY_LEAD });

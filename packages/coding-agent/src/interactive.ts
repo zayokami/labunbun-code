@@ -17,6 +17,7 @@ import {
 	collectReadOnlyToolNames,
 	compactionThreshold,
 	contextBreakdown,
+	createTaskCalibration,
 	DEFAULT_MODE_CHOICE,
 	describeModeChoice,
 	describeNetworkPolicy,
@@ -1304,6 +1305,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * subagent makes while it is still running.
 	 */
 	let thinkingLevel: ThinkingLevel | undefined = settings.thinkingLevel;
+	/**
+	 * The run's read of how big the request is. Composed into the stored user
+	 * message at admission and read by the session's effort getter, so one
+	 * classification lands on both halves of the behaviour: the contract the
+	 * model reads, and the depth the next request asks for. A level the user
+	 * pinned (`settings.thinkingLevel` or `/think`) wins over it, and
+	 * `LBB_TASK_SCALE=off` turns it off entirely.
+	 */
+	const taskCalibration = createTaskCalibration();
 	const agentDefinitions = loadAgentDefinitions(cwd, home);
 	// The host's own registry, so `/subagents` can see lifecycles the REPL
 	// did not spawn — the tools hold no display state of their own.
@@ -1642,8 +1652,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const sessionDeps: AgentDeps = {
 		streamFn,
 		// Read through the holder on every request, so `/think` lands on the next
-		// one rather than the next session.
-		thinkingLevel: () => thinkingLevel,
+		// one rather than the next session. The task calibration answers only when
+		// the holder has no level: a choice the user made outranks a classifier's
+		// guess, and `taskScaleThinkingLevel` leaves the model's own default alone
+		// for an ordinary request and for every question.
+		thinkingLevel: () => taskCalibration.level(thinkingLevel),
 		// Read through the holder rather than a captured id: /resume swaps the
 		// session, and the spills belong to whichever one is live.
 		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId: sessionIdHolder.current, home }),
@@ -1769,7 +1782,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// returns ends in a command this app dispatches.
 		errorRemedy,
 		hooks: {
-			composeUserMessage: (text) => {
+			composeUserMessage: (text, origin) => {
 				// Hook-contributed context drains on the message it belongs to, at the
 				// moment that message is created — so it is part of the stored
 				// transcript and every later request replays it identically. Attaching
@@ -1781,9 +1794,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// Memory is not here, and that is deliberate: memory is a section of
 				// the system prompt, which is the one place that survives a compaction
 				// and the one the cache breakpoint covers.
+				//
+				// The task-scale block is composed last, so it is at the head of the
+				// stored message and the transcript, the resume preview and the
+				// Markdown export strip it by prefix. Classification reads `text`, the
+				// user's own words, rather than the hook context just prepended.
 				const hookContext = pendingHookContext.splice(0, pendingHookContext.length);
-				if (hookContext.length === 0) return text;
-				return `${hookContext.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
+				const composed = hookContext.length === 0 ? text : `${hookContext.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
+				return taskCalibration.compose(composed, text, origin);
 			},
 			beforeToolCall: async (toolName, input) => {
 				// File checkpoint before mutations — powers /rewind — and the

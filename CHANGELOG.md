@@ -7,6 +7,20 @@ commands, and SHA-256 checksums.
 
 ### Added
 
+- **The process scales to the request.** Every user prompt is now read for its
+  size before the model sees it: `trivial` (an explicit small cue such as
+  `just`, `typo`, `只改`), `complex` (scope words such as `all`, `refactor`,
+  `所有`, or three named files), or `standard`. A trivial change is told to make
+  the smallest edit, run the one check that covers it, and add no tests, docs,
+  or defensive handling; a complex one to read first, state a short plan, and
+  stop once the relevant checks pass. A question with no change verb is read as
+  an answer, not an edit. `standard` adds nothing, so an ordinary request keeps
+  the bytes and the effort it had. The same read sets thinking effort — `low`
+  for trivial, `high` for complex — unless you set a level yourself. The
+  instruction is part of the stored message, keeping the cache prefix stable,
+  and is stripped from the transcript, the resume preview, and export.
+  `LBB_TASK_SCALE=off` turns it off. See `docs/dev/task-scale.md`.
+
 - **Claude Fable 5.2 and Claude Mythos 5.2 are in the catalog.** Both carry the
   1M-token window, 128K output, always-on adaptive thinking, and $8/$40 pricing
   with the 0.025x cache read. Their pages are the first to name all five effort

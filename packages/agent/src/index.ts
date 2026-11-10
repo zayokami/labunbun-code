@@ -139,6 +139,20 @@ export {
 } from "./session-store.ts";
 // Shell tokenizing, shared with the classifier
 export { COMMAND_SEPARATOR_RE, splitShellCommands, tokenizeShell } from "./shell-tokens.ts";
+// How much process a request has earned, and the contract that follows from it
+export {
+	classifyTask,
+	composeTaskScale,
+	createTaskCalibration,
+	stripTaskScale,
+	TASK_SCALE_VALUES,
+	type TaskCalibration,
+	type TaskKind,
+	type TaskScale,
+	type TaskShape,
+	taskScaleContract,
+	taskScaleThinkingLevel,
+} from "./task-scale.ts";
 // Core types
 export type {
 	AgentDeps,
@@ -160,6 +174,7 @@ export type {
 	ToolCallContext,
 	ToolResult,
 	TrimmedToolResults,
+	UserMessageOrigin,
 } from "./types.ts";
 export {
 	allow,
