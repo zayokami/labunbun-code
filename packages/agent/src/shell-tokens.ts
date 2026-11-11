@@ -6,8 +6,28 @@
 export const COMMAND_SEPARATOR_RE = /(?:\|\||&&|[;|&\n])/;
 
 // Long-form design notes: docs/dev/command-classifier.md
-/** Split one shell segment into tokens, honoring quotes and unwrapping them. */
-export function tokenizeShell(segment: string): string[] {
+/** Whose quoting and escaping rules a segment is read with. */
+export type ShellPlatform = "posix" | "windows";
+
+// Long-form design notes: docs/dev/command-classifier.md
+/**
+ * Split one shell segment into tokens, honoring quotes, backslash escapes and
+ * unwrapping them.
+ *
+ * The escape handling is POSIX's by default, because that is the shell every
+ * caller but the Windows classifier is reading. `platform` exists for the
+ * classifier alone: on Windows a backslash is a path separator, so `C:\x` must
+ * not lose its separator. A Windows line is still tokenized here (quotes,
+ * whitespace) and CMD's caret is folded by the classifier, which knows where in
+ * the line a caret is an escape.
+ *
+ * Inside single quotes a backslash is itself. Inside double quotes it only
+ * escapes `$`, a backtick, `"`, `\` and a newline; before any other character
+ * both characters stand. A backslash-newline pair is a continuation and
+ * disappears, and a trailing backslash at the end of the text is kept because
+ * there is nothing after it to escape.
+ */
+export function tokenizeShell(segment: string, platform: ShellPlatform = "posix"): string[] {
 	const tokens: string[] = [];
 	let current = "";
 	let quote: '"' | "'" | null = null;
@@ -15,9 +35,52 @@ export function tokenizeShell(segment: string): string[] {
 
 	for (let i = 0; i < segment.length; i++) {
 		const char = segment[i];
-		if (quote) {
-			if (char === quote) quote = null;
+		if (quote === "'") {
+			if (char === "'") quote = null;
 			else current += char;
+			continue;
+		}
+		if (quote === '"') {
+			if (char === '"') {
+				quote = null;
+				continue;
+			}
+			if (platform === "posix" && char === "\\") {
+				const next = segment[i + 1];
+				if (next === undefined) {
+					current += char;
+					continue;
+				}
+				if (next === "\n") {
+					i++;
+					continue;
+				}
+				if (next === "$" || next === "`" || next === '"' || next === "\\") {
+					current += next;
+					i++;
+					continue;
+				}
+				current += char;
+				continue;
+			}
+			current += char;
+			continue;
+		}
+		if (platform === "posix" && char === "\\") {
+			const next = segment[i + 1];
+			if (next === undefined) {
+				current += char;
+				started = true;
+				continue;
+			}
+			if (next === "\n") {
+				// A line continuation joins the two lines and is not part of either.
+				i++;
+				continue;
+			}
+			current += next;
+			i++;
+			started = true;
 			continue;
 		}
 		if (char === '"' || char === "'") {

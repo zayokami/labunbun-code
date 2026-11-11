@@ -250,6 +250,50 @@ describe("tokenizeShell", () => {
 	});
 });
 
+/**
+ * A backslash is the shell's escape, and the words that reach a program are the
+ * ones left after it is applied.
+ *
+ * The classifier reads program names and paths out of these tokens, so a
+ * tokenizer that keeps the escape hands it a name no shell ever runs: `r\m` was
+ * the program `r\m`, and `\/` was a path that is not the root. These rows pin
+ * each rule of POSIX's escape grammar to the token it produces — the grammar is
+ * small and every clause of it is here, so a later simplification that drops
+ * one of them fails a test rather than quietly changing what is classified.
+ */
+describe("tokenizeShell: POSIX backslash escapes", () => {
+	const BS = String.fromCharCode(92);
+
+	test.each([
+		[`r${BS}m -rf /`, ["rm", "-rf", "/"], "an escaped character inside a word"],
+		[`rm -r ${BS}/`, ["rm", "-r", "/"], "an escaped root"],
+		[`echo a${BS} b`, ["echo", "a b"], "an escaped space stays inside the word"],
+		[`echo a${BS}${BS}b`, ["echo", `a${BS}b`], "an escaped backslash is one backslash"],
+		[`echo a${BS}`, ["echo", `a${BS}`], "a trailing backslash has nothing to escape and stays"],
+		[`echo "a${BS}"b"`, ["echo", `a"b`], "an escaped quote does not close a double-quoted string"],
+		[`echo "a${BS}${BS}b"`, ["echo", `a${BS}b`], "an escaped backslash inside double quotes"],
+		[`echo "a${BS}nb"`, ["echo", `a${BS}nb`], "before an ordinary character in double quotes, both stand"],
+		[`echo 'a${BS}b'`, ["echo", `a${BS}b`], "single quotes make the backslash a character"],
+	])("%s tokenizes to %j (%s)", (input, expected) => {
+		expect(tokenizeShell(input, "posix")).toEqual(expected);
+	});
+
+	test("a backslash-newline is a continuation and disappears", () => {
+		expect(tokenizeShell(`rm ${BS}\n-rf /`)).toEqual(["rm", "-rf", "/"]);
+		expect(tokenizeShell(`echo "a${BS}\nb"`)).toEqual(["echo", "ab"]);
+	});
+
+	/**
+	 * The same text on Windows, where the backslash separates path segments.
+	 * Losing one would turn `C:\x` into `C:x`, which is a different path.
+	 */
+	test("a Windows backslash is a path separator, not an escape", () => {
+		expect(tokenizeShell(`rm -r C:${BS}Users${BS}me`, "windows")).toEqual(["rm", "-r", `C:${BS}Users${BS}me`]);
+		expect(tokenizeShell(`rm -r C:${BS}`, "windows")).toEqual(["rm", "-r", `C:${BS}`]);
+		expect(tokenizeShell(`rm -r C:${BS}Users${BS}me`, "posix")).toEqual(["rm", "-r", "C:Usersme"]);
+	});
+});
+
 describe("COMMAND_SEPARATOR_RE: the separator alphabet", () => {
 	// The scanner splits by walking characters, so nothing in the process calls
 	// the regex — it stays exported to answer a question about the alphabet:

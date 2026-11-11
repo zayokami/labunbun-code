@@ -239,6 +239,98 @@ describe("POSIX: `rm -r` aimed at a root, a home or a repository", () => {
 	});
 });
 
+/**
+ * A backslash is the shell's escape, not part of a word.
+ *
+ * `r\m` is how a shell delivers the name `rm`, and `\/` is how it delivers the
+ * root; reading the text as written made the program `r\m` and the target `\/`
+ * — two names the command that ran never had. The tokenizer now applies the
+ * escape, and these rows are the classifier's half of that: the names it sees
+ * are the ones the shell would run.
+ */
+describe("POSIX: backslash escapes do not hide the command", () => {
+	const BS = String.fromCharCode(92);
+
+	test.each([
+		[`r${BS}m -rf /`, "an escaped program name"],
+		[`${BS}rm -rf /`, "and one that opens with the escape"],
+		[`${BS}sudo rm -rf /`, "an escaped wrapper name"],
+		[`rm -r ${BS}/`, "an escaped root, with no force flag to catch it"],
+		[`rm -r /et${BS}c`, "an escape inside a system directory's name"],
+		[`rm -r /tm${BS}p/../etc`, "a path that only resolves to /etc after the escape is applied"],
+		[`rm -r foo${BS}/.git`, "an escaped separator in front of repository metadata"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The escape is applied where the shell applies it, and nowhere else. Inside
+	 * double quotes a backslash only escapes `$`, a backtick, `"`, `\` and a
+	 * newline, so `"r\m"` is still the word `r\m`; a printer's arguments are not
+	 * commands; and an escaped relative path is still relative.
+	 */
+	test.each([
+		[`echo r${BS}m -rf /`, "an escaped name after a printer"],
+		[`echo "r${BS}m" -rf /`, "a quoted word whose backslash is not an escape"],
+		[`rm -r ${BS}tmp/x`, "an escaped temporary path, which was never unrecoverable"],
+		[`rm -r C:${BS}`, "a Windows root read on POSIX, where it is a directory named `C:`"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
+/**
+ * A Windows path, read as the path it is.
+ *
+ * `rm` on Windows is the MSYS or Git Bash one, and it receives `C:\Users`,
+ * `C:/Users`, `\\server\share` and `C:\repo\.GIT` as written. None of those is
+ * `~` or `/`, so before this the recursion rule answered none of them: `rm -rf
+ * C:\` was caught only by the force flag, and `rm -r C:\` — the same delete with
+ * the asking left in, which this product's shell never gets to answer — was
+ * allowed. The same directory by `..` is resolved, because `C:\Windows\System32\..`
+ * is `C:\Windows` and a rule that compared raw strings would miss it.
+ *
+ * Named top-level directories only, on the same principle as the POSIX list:
+ * `C:\Windows` has no narrower form, `C:\Windows\System32` is a directory inside
+ * it, and a profile is matched at the depth a home directory sits at. A share
+ * root is matched because it is the root of everything that share holds; a
+ * folder inside it is not.
+ */
+describe("Windows: `rm -r` aimed at a drive, a profile or a repository", () => {
+	const BS = String.fromCharCode(92);
+
+	test.each([
+		[`rm -r C:${BS}`, "a drive root by backslash"],
+		["rm -r C:/", "and by forward slash"],
+		[`rm -r C:${BS}repo${BS}..${BS}..`, "a path that walks up to the drive root"],
+		["rm -r c:/users", "the directory that holds every profile"],
+		[`rm -r C:${BS}Users${BS}me`, "one profile"],
+		[`rm -r C:${BS}Windows`, "the installation directory"],
+		[`rm -r C:${BS}Windows${BS}System32${BS}..`, "the same directory by a path that walks into it and back"],
+		[`rm -r "C:${BS}Program Files"`, "an installation directory with a space in its name"],
+		[`rm -r "C:${BS}Program Files (x86)"`, "and the 32-bit one"],
+		[`rm -r C:${BS}ProgramData`, "the machine-wide data directory"],
+		[`rm -r C:${BS}repo${BS}.GIT`, "repository metadata, case-folded as the filesystem is"],
+		[`rm -r ${BS}${BS}server${BS}share`, "a UNC share root"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		[`rm -r C:${BS}tmp`, "an ordinary directory"],
+		[`rm -r C:${BS}Users${BS}me${BS}project`, "a project inside a profile"],
+		[`rm -r C:${BS}Windows${BS}System32`, "a directory inside the installation, which is narrower"],
+		[`rm -r ${BS}${BS}server${BS}share${BS}folder`, "a folder inside the share"],
+		[`rm -r C:${BS}repo${BS}.gitignore`, "a file whose name merely ends in `gitignore`"],
+		// In CMD, `C:` names the current directory on that drive rather than its
+		// root, so there is no fixed target to call unrecoverable.
+		["rm -r C:", "a drive-relative path, which names wherever that drive was left"],
+		["rm -r /tmp/x", "a POSIX path, on the platform where it is still a path"],
+	])("%s is not this rule — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+});
+
 describe("POSIX: shell scaffolding does not hide the command", () => {
 	/**
 	 * The words in front of a command are not the command.
@@ -1773,6 +1865,47 @@ describe("Windows: CMD", () => {
 			expect(windows(command)).toBeNull();
 		},
 	);
+});
+
+/**
+ * CMD's caret escape, measured on this machine before it was written down.
+ *
+ * `de^l /?` and `r^d /?` each printed the command's own help, `de^l /^?` did
+ * the same, `echo a^b` printed `ab`, `^^` printed `^`, and `rd^ir /?` answered
+ * as `rmdir`. A caret before a character removes itself and delivers that
+ * character, so the words the classifier reads were never the words CMD ran.
+ * The rules are now asked twice — once over the line as written, once over the
+ * folded spelling — and a caret inside double quotes is a literal character, so
+ * a quoted body keeps it and stays unmatched.
+ */
+describe("Windows: CMD's caret escape does not hide the command", () => {
+	test.each([
+		["de^l /s /q C:\\x", "an escaped `del`, with the silent recursive flags"],
+		["de^l /f C:\\x", "an escaped `del`, forced"],
+		["d^el /f C:\\x", "the escape in the middle of the name"],
+		["er^ase /s /q C:\\x", "the other spelling of `del`"],
+		["r^d /s /q C:\\x", "an escaped `rd`"],
+		["rmd^ir /s /q C:\\x", "an escaped `rmdir`"],
+		["cmd /c de^l /s /q C:\\x", "the same behind an explicit `/c`"],
+		["cmd /c r^d /s /q C:\\x", "and a recursive delete behind one"],
+		["de^l /^s /q C:\\x", "a caret in front of the switch as well as the name"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The other direction, which is what makes the fold a reading and not a
+	 * rewrite: inside the quotes CMD keeps the caret, so the string is the
+	 * argument the outer command passes on. It does not run a delete until
+	 * something else unquotes it and hands it to a shell.
+	 */
+	test.each([
+		['cmd /c "de^l /s /q C:\\x"', "a quoted body, where the caret is literal"],
+		["echo de^l /s /q C:\\x", "an escaped name after a printer"],
+		["ver^d", "an escaped word that names no builtin"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
 });
 
 describe("Windows: `forfiles` runs a command line once per file it finds", () => {

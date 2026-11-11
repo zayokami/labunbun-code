@@ -252,6 +252,16 @@ commands, and SHA-256 checksums.
 
 ### Fixed
 
+- **An escaped command is read as the shell runs it.** The classifier read a
+  command line as written, so a POSIX backslash left the program `r\m` and the
+  target `\/` — names no shell runs — and CMD's caret did the same to `de^l /s
+  /q` and `r^d /s /q`. The tokenizer now applies POSIX's escape grammar and
+  leaves a Windows backslash alone, where it separates path segments; the
+  Windows rules read the caret-folded line as a second reading, with a quoted
+  caret kept literal. `rm -r` also recognizes a Windows drive root, a profile
+  directory, the installation directories, a UNC share root, and `.GIT` by the
+  case-insensitive name a Windows filesystem gives it.
+
 - **A deny or ask rule sees the command the shell would run.** Quoting,
   backslash escapes and runs of whitespace were invisible to the matcher — `git
   pu"sh" origin main` did not match `git push *` — and a command substitution

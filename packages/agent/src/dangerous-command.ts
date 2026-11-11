@@ -131,12 +131,10 @@ function rmTargets(args: string[]): { paths: string[]; recursive: boolean } {
 	return { paths, recursive };
 }
 
-// Long-form design notes: docs/dev/command-classifier.md
-/** Resolve `.` and `..` segments the way the kernel resolves them, returning null for a path that is not absolute. */
-function resolveAbsoluteSegments(target: string): string | null {
-	if (!target.startsWith("/")) return null;
+/** Resolve `.` and `..` the way a filesystem does, dropping empty segments. */
+function resolveSegments(parts: string[]): string[] {
 	const segments: string[] = [];
-	for (const segment of target.split("/")) {
+	for (const segment of parts) {
 		if (segment === "" || segment === ".") continue;
 		if (segment === "..") {
 			segments.pop();
@@ -144,12 +142,84 @@ function resolveAbsoluteSegments(target: string): string | null {
 		}
 		segments.push(segment);
 	}
-	return `/${segments.join("/")}`;
+	return segments;
+}
+
+// Long-form design notes: docs/dev/command-classifier.md
+/** Resolve `.` and `..` segments the way the kernel resolves them, returning null for a path that is not absolute. */
+function resolveAbsoluteSegments(target: string): string | null {
+	if (!target.startsWith("/")) return null;
+	return `/${resolveSegments(target.split("/")).join("/")}`;
+}
+
+// Long-form design notes: docs/dev/command-classifier.md
+/**
+ * A Windows path in the one spelling the tests below can compare, or `null`
+ * when the path is not Windows-absolute.
+ *
+ * `C:\Windows\`, `c:/windows` and `C:/Windows/System32/..` all name the same
+ * directory, and `rm` — the MSYS and Git Bash one — receives any of them.
+ * Everything is lower-cased because the filesystem is case-insensitive there:
+ * `.GIT` is the repository metadata as surely as `.git` is.
+ *
+ * Both spellings of the separator are accepted because both reach `rm`: a
+ * shell hands the path through as written. A UNC path (`\\server\share`) has
+ * no drive, so it comes back with the same `//` prefix and is answered by the
+ * share-root test rather than by the drive test.
+ */
+function resolveWindowsSegments(target: string): string | null {
+	const normalized = target.replace(/\\/g, "/").toLowerCase();
+	// A bare `C:` is not the drive's root: in CMD it names whatever directory that
+	// drive was last left in, so there is no fixed target to call unrecoverable.
+	const drive = /^([a-z]):\//.exec(normalized);
+	if (drive) {
+		return `${drive[1]}:/${resolveSegments(normalized.slice(2).split("/")).join("/")}`;
+	}
+	if (!normalized.startsWith("//")) return null;
+	const segments = resolveSegments(normalized.slice(2).split("/"));
+	return segments.length === 0 ? "//" : `//${segments.join("/")}`;
+}
+
+// Long-form design notes: docs/dev/command-classifier.md
+/**
+ * A Windows location whose loss has no narrower form: a drive root, a share
+ * root, the directory that holds every profile, one profile under it, or an
+ * installation directory.
+ *
+ * Named rather than derived, on the same principle as the POSIX top-level list:
+ * `C:\Windows` is in it and `C:\Windows\System32` is not, because the second is
+ * a directory *inside* an installation rather than the installation. A user's
+ * own profile is matched at the depth a home directory sits at, not at every
+ * depth below it — `C:\Users\me\project` is ordinary work.
+ */
+const WINDOWS_UNRECOVERABLE_TARGETS =
+	/^[a-z]:\/(?:|users(?:\/[^/]+)?|windows|program files|program files \(x86\)|programdata|system volume information|\$recycle\.bin)$/;
+
+/** Whether a resolved Windows path names a share root, which is the root of everything that share holds. */
+function isWindowsShareRoot(target: string): boolean {
+	return /^\/\/[^/]+\/[^/]+$/.test(target);
 }
 
 // Long-form design notes: docs/dev/command-classifier.md
 /** Whether an `rm` target is somewhere whose loss has no narrower form. */
-function isUnrecoverableRmTarget(path: string): boolean {
+function isUnrecoverableRmTarget(path: string, platform: DangerousCommandPlatform): boolean {
+	// A Windows path is read by its own rules, and only on Windows: `C:\` and
+	// `C:/` are that drive's root, while on POSIX the same text is a directory
+	// called `C:` — which an `rm` there would delete, and which is not a disk.
+	if (platform === "windows") {
+		const resolvedWindows = resolveWindowsSegments(path);
+		if (resolvedWindows !== null) {
+			if (isWindowsShareRoot(resolvedWindows)) return true;
+			if (WINDOWS_UNRECOVERABLE_TARGETS.test(resolvedWindows)) return true;
+			const lastSlash = resolvedWindows.lastIndexOf("/");
+			return resolvedWindows.slice(lastSlash + 1) === ".git";
+		}
+		// A relative path has no drive to resolve, and on Windows `repo\.git` names
+		// the same metadata as `repo/.git`. It is folded here rather than left to the
+		// POSIX walk below, which only splits on `/`.
+		const relative = path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+		if (relative === ".git" || relative.endsWith("/.git")) return true;
+	}
 	// `./.git` and `.git/` name the same directory as `.git`, and a rule that only
 	// compared the raw string would match neither spelling of the thing it exists
 	// for. Trailing slashes go first so `/` does not reduce to `.` and then have
@@ -1143,7 +1213,7 @@ function remoteCommandScript(
 					// to `matchScript` would split on `&&` and read the tail as a second
 					// command that ssh never runs — a rule for a command that cannot
 					// run, which is the wrong kind of right.
-					const match = matchTokens(tokenizeShell(local), depth + 1, platform, local);
+					const match = matchTokens(tokenizeShell(local, platform), depth + 1, platform, local);
 					if (match) return match;
 				}
 			}
@@ -1749,7 +1819,7 @@ function matchTokens(
 		const rmArgs = tokens.slice(1);
 		if (rmArgsIncludeForce(rmArgs)) return { kind: "ForcedRm", rule: "`rm` with a force option" };
 		const { paths, recursive } = rmTargets(rmArgs);
-		if (recursive && paths.some(isUnrecoverableRmTarget)) {
+		if (recursive && paths.some((path) => isUnrecoverableRmTarget(path, platform))) {
 			return {
 				kind: "Other",
 				rule: "`rm` with recursion, aimed at a filesystem root, a home directory or a repository, which has no narrower form",
@@ -1880,19 +1950,26 @@ function matchTokens(
 	const remote = program === undefined ? undefined : remoteCommandScript(program, tokens, platform, depth);
 	if (remote !== undefined) return remote;
 
-	// Follow every wrapper this segment contains, each one a level deeper.
-	const scripts = [wrapperScript(tokens), powershellScript(tokens), ...substitutionScripts(segment)].filter(
-		(script): script is string => script !== undefined,
-	);
-	for (const script of scripts) {
-		for (const inner of splitShellCommands(script)) {
-			const match = matchTokens(tokenizeShell(inner), depth + 1, platform, inner);
+	// Follow every wrapper this segment contains, each one a level deeper. A
+	// script carried by `sh -c` is read with POSIX escapes whatever the line's
+	// platform is — the body runs under a POSIX shell — while a PowerShell body
+	// keeps its backslashes, which are path separators there. A substitution is
+	// read with the platform of the line that contains it for the same reason.
+	const scripts: Array<{ script: string; platform: DangerousCommandPlatform }> = [];
+	const posixBody = wrapperScript(tokens);
+	if (posixBody !== undefined) scripts.push({ script: posixBody, platform: "posix" });
+	const powershellBody = powershellScript(tokens);
+	if (powershellBody !== undefined) scripts.push({ script: powershellBody, platform: "windows" });
+	for (const script of substitutionScripts(segment)) scripts.push({ script, platform });
+	for (const carried of scripts) {
+		for (const inner of splitShellCommands(carried.script)) {
+			const match = matchTokens(tokenizeShell(inner, carried.platform), depth + 1, platform, inner);
 			if (match) return match;
 		}
 	}
 
 	if (platform === "windows") {
-		return matchWindows(tokens);
+		return matchWindows(tokens, segment);
 	}
 	return (
 		posixDiskRules(tokens, segment) ??
@@ -3367,7 +3444,63 @@ function powershellWords(tokens: string[]): string[] {
 	return words;
 }
 
-function matchWindows(tokens: string[]): DangerousCommandMatch | null {
+/**
+ * The same line with CMD's caret escape applied, or the line itself when it has
+ * no caret outside quotes.
+ *
+ * A caret is CMD's escape character: `de^l /s /q` runs `del /s /q`, and
+ * `r^d` runs `rd`. This was measured on this machine with harmless bodies —
+ * `de^l /?` and `r^d /?` each printed the command's own help, and a bare
+ * `echo a^b` printed `ab` — so a rule that reads the name as written is
+ * reading a name CMD never sees.
+ *
+ * Inside double quotes a caret is a literal character, measured the same way:
+ * `echo "a^b"` printed `a^b`. The fold therefore follows the tokenizer's quote
+ * state and leaves quoted runs alone, which is what makes
+ * `cmd /c "de^l /s /q C:\x"` — a string the outer command only passes on — stay
+ * unmatched. A caret at the very end has nothing to escape and is kept, as
+ * `echo a^` prints `a^`.
+ *
+ * This is a reading *alongside* the words as written, not a replacement for
+ * them: PowerShell uses a backtick and takes a caret literally, so the
+ * unfolded words are still tried first and a match on either is a match.
+ */
+function foldCmdCarets(segment: string): string {
+	let folded = "";
+	let quote: '"' | "'" | null = null;
+	for (let i = 0; i < segment.length; i++) {
+		const char = segment[i];
+		if (quote !== null) {
+			if (char === quote) quote = null;
+			folded += char;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			quote = char;
+			folded += char;
+			continue;
+		}
+		if (char === "^") {
+			const next = segment[i + 1];
+			// An escaped space would join the two words into one, which is a command
+			// name no rule here should read as the bare name in front of it. The
+			// caret is kept so the word stays unmatched, the safe direction for a
+			// spelling that cannot run the builtin anyway.
+			if (next === undefined || /\s/.test(next)) {
+				folded += char;
+				continue;
+			}
+			folded += next;
+			i++;
+			continue;
+		}
+		folded += char;
+	}
+	return folded;
+}
+
+/** The Windows rules over one reading of a line's words. */
+function matchWindowsTokens(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "windows");
 	if (program !== undefined && POWERSHELL_EXECUTABLES.has(program)) {
 		const match = dangerousPowershellWords(powershellWords(tokens));
@@ -3381,6 +3514,15 @@ function matchWindows(tokens: string[]): DangerousCommandMatch | null {
 		directGuiLaunch(tokens) ??
 		dangerousWindowsAdmin(tokens)
 	);
+}
+
+/** The Windows rules, over the words as written and over CMD's escaped spelling. */
+function matchWindows(tokens: string[], segment: string): DangerousCommandMatch | null {
+	const direct = matchWindowsTokens(tokens);
+	if (direct) return direct;
+	const folded = foldCmdCarets(segment);
+	if (folded === segment) return null;
+	return matchWindowsTokens(tokenizeShell(folded, "windows"));
 }
 
 // Long-form design notes: docs/dev/command-classifier.md
@@ -3926,7 +4068,7 @@ const SCRIPT_INTERPRETERS = new Set(["sh", "bash", "dash", "ksh", "zsh", "python
 // Long-form design notes: docs/dev/command-classifier.md
 /** The program a segment actually runs, past its scaffolding and its wrappers. */
 function segmentProgram(segment: string, platform: DangerousCommandPlatform = "posix"): string | undefined {
-	let tokens = tokenizeShell(segment);
+	let tokens = tokenizeShell(segment, platform);
 	const scaffolded = stripShellScaffolding(tokens);
 	if (scaffolded !== undefined) tokens = scaffolded;
 	// `curl … | sudo bash` puts a wrapper on the right-hand side of the pipe, and
@@ -4554,7 +4696,7 @@ const CURL_NON_READING_DATA_FLAGS: ReadonlySet<string> = new Set(["--data-raw", 
 
 /** The tokens in a segment that actually name a file, given the flags above. */
 function credentialTokensIn(segment: string, platform: DangerousCommandPlatform): string[] {
-	const tokens = tokenizeShell(segment);
+	const tokens = tokenizeShell(segment, platform);
 	const program = executableName(tokens[0] ?? "", platform);
 	if (program !== "curl") return tokens;
 	const named: string[] = [];
@@ -4598,7 +4740,7 @@ function credentialExfiltrationRules(
 			const named = namesCredential(token);
 			if (named === undefined) continue;
 			credential = named;
-			reader = segmentProgram(segment, platform) ?? tokenizeShell(segment)[0];
+			reader = segmentProgram(segment, platform) ?? tokenizeShell(segment, platform)[0];
 			break;
 		}
 		if (credential !== undefined) break;
@@ -4678,7 +4820,7 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 	const candidates =
 		platform === "windows" ? [...new Set([...segments, ...rejoinedSwitchSegments(segments)])] : segments;
 	for (const segment of candidates) {
-		const tokens = tokenizeShell(segment);
+		const tokens = tokenizeShell(segment, platform);
 		const match = matchTokens(tokens, depth, platform, segment);
 		if (match) return match;
 	}
