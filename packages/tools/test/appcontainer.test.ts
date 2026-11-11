@@ -959,21 +959,37 @@ describeWindows("a confined process", () => {
 			// The budget is not the assertion, but it must outlast the
 			// in-container PowerShell's cold start: the grandchild records its
 			// pid before the parent spins, and a deadline that fired first would
-			// leave no pid to check and make the row vacuous.
+			// leave no pid to check and make the row vacuous. Two seconds held on
+			// a local Windows 11 machine, but not on GitHub's `windows-latest`
+			// runner, where the deadline fired before the pid file appeared (run
+			// 43003129675). Ten seconds leaves room for the slower cold start and
+			// still ends the row well inside the test's own 30-second cap.
 			// `call` rather than the batch path alone: a batch handed to `cmd /c`
 			// as its direct target is refused inside the container with "Access
 			// is denied", while the same file through `call` runs (measured on
 			// this machine) — and this row is about the kill, not about cmd's
 			// command-line resolution.
+			const budgetMs = 10_000;
 			const timedOut = runConfined(
 				profile,
 				`"C:\\Windows\\System32\\cmd.exe" /d /s /c "call "${join(workspace, "parent.cmd")}""`,
-				{ cwd: workspace, timeoutMs: 2000 },
+				{ cwd: workspace, timeoutMs: budgetMs },
 			);
-			expect(timedOut.error).toContain("did not exit within 2000ms");
+			expect(timedOut.error).toContain(`did not exit within ${budgetMs}ms`);
 			expect(timedOut.killed).toBe(true);
 
-			const grandchildPid = Number(readFileSync(pidFile, "utf8").trim());
+			let grandchildPid: number;
+			try {
+				grandchildPid = Number(readFileSync(pidFile, "utf8").trim());
+			} catch (error) {
+				// A missing pid file means the deadline beat the cold start, not
+				// that the kill failed. Carry the run's own output into the
+				// failure, so the next reader does not have to reproduce it on CI.
+				throw new Error(
+					`the grandchild recorded no pid within ${budgetMs}ms (${(error as Error).message}); ` +
+						`stdout: ${JSON.stringify(timedOut.stdout)}; stderr: ${JSON.stringify(timedOut.stderr)}`,
+				);
+			}
 			expect(Number.isInteger(grandchildPid)).toBe(true);
 			// A beat every 50 ms: if the grandchild survived, the file grows
 			// within this window. One read only would pass on timing luck.
