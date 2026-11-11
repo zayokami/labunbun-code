@@ -20,6 +20,8 @@ import {
 	confinedProgramName,
 	containerCanExecute,
 	containerShellRefusal,
+	DEFAULT_GRANT_LINGER_MS,
+	flushIdleWorkspaceGrants,
 	releaseWorkspaceGrant,
 	runConfined,
 } from "./sandbox/appcontainer.ts";
@@ -655,6 +657,13 @@ export class ChildProcessExecOperations implements ExecOperations {
 	 * keep the process alive on a port nothing is going to close.
 	 */
 	async close(): Promise<void> {
+		// Idle grants are the ones no command holds; their window ends now rather
+		// than on its timer, so shutdown does not leave container ACEs behind for
+		// no reason. A failure has no caller to hand it to in a shutdown path.
+		const grantError = flushIdleWorkspaceGrants();
+		if (grantError !== null && grantError !== "") {
+			console.error(`Warning: could not release an idle sandbox grant: ${grantError}`);
+		}
 		const proxies = [...this.#proxies.values()].filter((proxy) => proxy !== null);
 		this.#proxies.clear();
 		this.#starting = undefined;
@@ -987,7 +996,17 @@ export class ChildProcessExecOperations implements ExecOperations {
 					};
 				}
 			} finally {
-				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network, resolution.readOnly);
+				// The grant lingers, so the next command in the same workspace
+				// joins it instead of writing the ACLs again — the propagation is
+				// the expensive part of a confined Windows command and a session
+				// runs commands back to back. An idle grant tears itself down when
+				// the window ends, and `close` flushes the rest.
+				const dropError = releaseWorkspaceGrant(
+					resolution.workspace,
+					resolution.network,
+					resolution.readOnly,
+					DEFAULT_GRANT_LINGER_MS,
+				);
 				// A failed cleanup is reported, not thrown: the command already
 				// ran and its exit code is what the caller acts on, so raising
 				// here would turn a successful command into an exception. The

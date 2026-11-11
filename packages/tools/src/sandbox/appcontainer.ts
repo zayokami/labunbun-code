@@ -1626,9 +1626,31 @@ interface ActiveGrant {
 	 * the diagnostic's second round).
 	 */
 	protectedAsFound: ProtectedRestore[];
+	/**
+	 * The timer that tears an idle grant down after its last reference left.
+	 * Non-null means the grant is installed but nothing runs under it: the next
+	 * command joins it instead of paying the ACL writes again, and the timer is
+	 * what ends the window when no command comes.
+	 */
+	idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const activeGrants = new Map<string, ActiveGrant>();
+
+/**
+ * How long an idle grant stays installed after its last command, so the next
+ * command in the same workspace joins it instead of writing the ACLs again.
+ *
+ * The grant's ACL work is the expensive part of a confined Windows command: an
+ * inheritable ACE propagates over the whole subtree on the way in and its
+ * removal walks the same tree on the way out, measured at ~150 µs per object
+ * per walk (docs/dev/sandbox.md). A session runs commands back to back, and a
+ * join is one map lookup. The window still ends on a timer when no command
+ * comes, and a crash's leftovers are the same reusable ACEs release already
+ * documents — the ACE names the profile's deterministic SID, which the next
+ * acquire derives again.
+ */
+export const DEFAULT_GRANT_LINGER_MS = 120_000;
 
 // Long-form design notes: docs/dev/sandbox.md
 /** The one spelling of a path every reader agrees on: symlinks, junctions, and 8.3 names resolved. */
@@ -1712,12 +1734,6 @@ export function acquireWorkspaceGrant(
 			? []
 			: [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
 		const missingWrite = requestedWrites.find((root) => !coveredByGrant(root, existing.writeRoots));
-		if (missingWrite !== undefined) {
-			return {
-				profile,
-				error: `the grant for ${workspace} is already open without write access to ${missingWrite}; release it before granting more`,
-			};
-		}
 		// Read-only has no write list, so the roots that must already be granted
 		// are the read+execute ones: the workspace, every extra root, and the
 		// toolchain roots. Same join rule in both modes: a root the open grant
@@ -1725,11 +1741,33 @@ export function acquireWorkspaceGrant(
 		const requestedExec = Array.from(
 			new Set((readOnly ? [workspace, ...extraRoots, ...executableRoots] : executableRoots).map(canonicalPathForChild)),
 		);
-		const missingExec = requestedExec.find((root) => !coveredByGrant(root, existing.roots));
-		if (missingExec !== undefined) {
+		const missingExec =
+			missingWrite === undefined ? requestedExec.find((root) => !coveredByGrant(root, existing.roots)) : undefined;
+		if (missingWrite !== undefined || missingExec !== undefined) {
+			// An idle grant is held only by its linger window, so it can be
+			// replaced: nothing runs under it, and refusing the caller would make
+			// the window visible as a policy change it is not. A grant with a
+			// live reference is not replaceable — tearing it down would pull the
+			// ACLs out from under a running command.
+			if (existing.refs === 0) {
+				clearIdleTimer(existing);
+				activeGrants.delete(profile.name);
+				const teardownError = finishGrant(existing);
+				// The replacement is an acquire only if the old grant actually
+				// left the disk. A failed teardown may have left ACEs a new grant
+				// would never take ownership of, so the caller gets that error and
+				// runs nothing — the leftovers are the reusable crash kind.
+				if (teardownError !== null && teardownError !== "") {
+					return { profile, error: `could not replace the idle sandbox grant for ${workspace}: ${teardownError}` };
+				}
+				return acquireWorkspaceGrant(workspace, network, extraRoots, executableRoots, protectedRoots, readOnly);
+			}
 			return {
 				profile,
-				error: `the grant for ${workspace} is already open without read+execute access to ${missingExec}; release it before granting more`,
+				error:
+					missingWrite !== undefined
+						? `the grant for ${workspace} is already open without write access to ${missingWrite}; release it before granting more`
+						: `the grant for ${workspace} is already open without read+execute access to ${missingExec}; release it before granting more`,
 			};
 		}
 		for (const dir of [...new Set(protectedRoots.map(canonicalPathForChild))]) {
@@ -1746,6 +1784,11 @@ export function acquireWorkspaceGrant(
 			// stays off the release list, and the next join tries again.
 			if (outcome.restore !== undefined) existing.protectedRestores.push(outcome.restore);
 		}
+		// The join lands here, and only here: a failure above must leave an idle
+		// grant's timer armed, or the grant would sit installed with nothing to
+		// end its window. Timers cannot fire during this synchronous function, so
+		// nothing between the checks and this line can race the timer.
+		clearIdleTimer(existing);
 		existing.refs += 1;
 		return { profile };
 	}
@@ -1879,18 +1922,82 @@ export function acquireWorkspaceGrant(
 		roots: [...writeRoots, ...execRoots],
 		protectedRestores: protectRestores,
 		protectedAsFound: protectAsFound,
+		idleTimer: null,
 	});
 	return { profile };
 }
 
-/** Drops one reference, and on the last one removes every ACE this grant added. */
-export function releaseWorkspaceGrant(workspace: string, network = false, readOnly = false): string | null {
+/**
+ * Drops one reference. On the last one, the grant and its ACEs are removed
+ * after `lingerMs` — immediately at the default zero — so the next command in
+ * the window joins an installed grant instead of rebuilding it. The window is
+ * the same grant either way: nothing runs under it while it is idle, and the
+ * ACLs name only the container profile's own SID.
+ */
+export function releaseWorkspaceGrant(
+	workspace: string,
+	network = false,
+	readOnly = false,
+	lingerMs = 0,
+): string | null {
 	const name = appContainerProfileName(workspace, network, readOnly);
 	const grant = activeGrants.get(name);
 	if (grant === undefined) return null;
+	if (grant.refs === 0) return null; // already released, waiting out its window
 	grant.refs -= 1;
 	if (grant.refs > 0) return null;
+	if (lingerMs > 0) {
+		clearIdleTimer(grant);
+		const timer = setTimeout(() => {
+			// A later acquire may have replaced this grant; the map is the
+			// authority on which grant the name still holds.
+			if (activeGrants.get(name) !== grant) return;
+			activeGrants.delete(name);
+			const error = finishGrant(grant);
+			// A timer has no caller to hand the error to, so it goes where the
+			// rest of this module's unreported write failures go: stderr, once
+			// per event, naming the workspace.
+			if (error !== null && error !== "") {
+				console.error(`Warning: could not release the sandbox grant for ${workspace}: ${error}`);
+			}
+		}, lingerMs);
+		// Unreferenced, so the window never keeps a process alive. A process
+		// that exits inside the window leaves the ACEs release already treats
+		// as reusable leftovers of a crash.
+		(timer as { unref?: () => void }).unref?.();
+		grant.idleTimer = timer;
+		return null;
+	}
 	activeGrants.delete(name);
+	return finishGrant(grant);
+}
+
+// Long-form design notes: docs/dev/sandbox.md
+/**
+ * Tears down every idle grant now instead of waiting out its window. Returns
+ * the first write error, in the same shape `releaseWorkspaceGrant` does. Safe
+ * to call with nothing idle, and never touches a grant a command still holds.
+ */
+export function flushIdleWorkspaceGrants(): string | null {
+	let firstError: string | null = null;
+	for (const [name, grant] of [...activeGrants]) {
+		if (grant.refs > 0 || grant.idleTimer === null) continue;
+		clearIdleTimer(grant);
+		activeGrants.delete(name);
+		const error = finishGrant(grant);
+		if (error !== null && firstError === null) firstError = error;
+	}
+	return firstError;
+}
+
+function clearIdleTimer(grant: ActiveGrant): void {
+	if (grant.idleTimer === null) return;
+	clearTimeout(grant.idleTimer);
+	grant.idleTimer = null;
+}
+
+/** Removes every ACE a grant added and writes back every narrowed directory. The caller drops it from the map first. */
+function finishGrant(grant: ActiveGrant): string | null {
 	let firstError: string | null = null;
 	// The narrowed directories first: the write-back re-fuses inheritance
 	// and runs while the grant's ACEs are still in place, so the sweep that

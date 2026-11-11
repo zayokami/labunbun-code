@@ -30,6 +30,7 @@ import {
 	deriveAppContainerSid,
 	dropAcesFor,
 	ensureAppContainerProfile,
+	flushIdleWorkspaceGrants,
 	grantReadExecuteAccess,
 	grantRootAccess,
 	protectDirForGrant,
@@ -431,6 +432,105 @@ describeWindows("the grant that lets a confined command touch the workspace", ()
 			expect(existsSync(join(cache, "c2.txt"))).toBe(false);
 		} finally {
 			execSync(`cmd /c if exist "${cache}" rmdir /s /q "${cache}"`, { stdio: "ignore" });
+		}
+	});
+});
+
+describeWindows("the idle grant window", () => {
+	// The grant's ACL writes propagate over the whole subtree on the way in and
+	// out, and a session runs commands back to back. The window keeps the grant
+	// installed after its last reference leaves, so the next command joins it.
+	// These rows pin what that costs the machine: the ACLs are still there while
+	// the window is open, and the window ends three ways — a join, a widening
+	// replacement, and the timer, with an explicit flush beside it.
+
+	function scaffold(root: string): void {
+		execSync(`cmd /c if exist "${root}" rmdir /s /q "${root}"`, { stdio: "ignore" });
+		execSync(`cmd /c mkdir "${root}\\src"`, { stdio: "ignore" });
+		writeFileSync(join(root, "src", "file.txt"), "workspace file\n");
+	}
+
+	const root = `${process.env.LOCALAPPDATA}\\Temp\\ac-linger-${process.pid}`;
+	const cache = `${process.env.LOCALAPPDATA}\\Temp\\ac-linger-cache-${process.pid}`;
+
+	test("a release with a window keeps the ACEs, and the next acquire joins them", () => {
+		scaffold(root);
+		try {
+			const first = acquireWorkspaceGrant(root);
+			expect(first.error).toBeUndefined();
+			const profile = first.profile as AppContainerProfile;
+			expect(releaseWorkspaceGrant(root, false, false, 60_000)).toBeNull();
+
+			// The ACEs are still installed: the confined child cannot read the
+			// workspace without them, and it still does.
+			const read = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${root}\\src\\file.txt"`, {
+				cwd: root,
+			});
+			expect(read.exitCode).toBe(0);
+			expect(read.stdout).toContain("workspace file");
+
+			// The join, then the window again; the flush ends it now.
+			expect(acquireWorkspaceGrant(root).error).toBeUndefined();
+			expect(releaseWorkspaceGrant(root, false, false, 60_000)).toBeNull();
+			expect(flushIdleWorkspaceGrants()).toBeNull();
+			const blocked = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${root}\\src\\file.txt"`, {
+				cwd: root,
+			});
+			expect(blocked.exitCode).not.toBe(0);
+		} finally {
+			flushIdleWorkspaceGrants();
+		}
+	});
+
+	test("a join that needs more roots replaces an idle grant instead of refusing", () => {
+		scaffold(root);
+		execSync(`cmd /c if exist "${cache}" rmdir /s /q "${cache}"`, { stdio: "ignore" });
+		execSync(`cmd /c mkdir "${cache}"`, { stdio: "ignore" });
+		try {
+			expect(acquireWorkspaceGrant(root).error).toBeUndefined();
+			expect(releaseWorkspaceGrant(root, false, false, 60_000)).toBeNull();
+			// A live grant refuses a wider join, because tearing it down would pull
+			// the ACLs out from under a running command. An idle one holds nothing,
+			// and the window must not read as a policy change, so it is replaced.
+			const widened = acquireWorkspaceGrant(root, false, [cache]);
+			expect(widened.error).toBeUndefined();
+			const profile = widened.profile as AppContainerProfile;
+			const wrote = runConfined(
+				profile,
+				`"C:\\Windows\\System32\\cmd.exe" /c echo cached > "${cache}\\c.txt" && exit 42`,
+				{ cwd: root },
+			);
+			expect(wrote.exitCode).toBe(42);
+			expect(existsSync(join(cache, "c.txt"))).toBe(true);
+		} finally {
+			releaseWorkspaceGrant(root, false, false, 0);
+			flushIdleWorkspaceGrants();
+			execSync(`cmd /c if exist "${cache}" rmdir /s /q "${cache}"`, { stdio: "ignore" });
+		}
+	});
+
+	test("the window ends on its own timer", async () => {
+		scaffold(root);
+		try {
+			const first = acquireWorkspaceGrant(root);
+			expect(first.error).toBeUndefined();
+			const profile = first.profile as AppContainerProfile;
+			expect(releaseWorkspaceGrant(root, false, false, 100)).toBeNull();
+			// A timer has no caller to answer to, so the test polls for what it
+			// did instead of sleeping a guessed number of milliseconds.
+			let blocked = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${root}\\src\\file.txt"`, {
+				cwd: root,
+			});
+			for (let waited = 0; waited < 5000 && blocked.exitCode === 0; waited += 100) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				blocked = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${root}\\src\\file.txt"`, {
+					cwd: root,
+				});
+			}
+			expect(blocked.exitCode).not.toBe(0);
+			expect(flushIdleWorkspaceGrants()).toBeNull();
+		} finally {
+			flushIdleWorkspaceGrants();
 		}
 	});
 });

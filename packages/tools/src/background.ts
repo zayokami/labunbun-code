@@ -23,6 +23,7 @@ import {
 	confinedProgramName,
 	containerCanExecute,
 	containerShellRefusal,
+	DEFAULT_GRANT_LINGER_MS,
 	releaseWorkspaceGrant,
 	spawnConfined,
 } from "./sandbox/appcontainer.ts";
@@ -884,13 +885,25 @@ export class BackgroundShellManager {
 				// The grant was acquired for this spawn, and there is no shell
 				// whose end could release it — it comes back here, and a failed
 				// cleanup rides in the thrown message rather than vanishing.
-				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network, resolution.readOnly);
+				const dropError = releaseWorkspaceGrant(
+					resolution.workspace,
+					resolution.network,
+					resolution.readOnly,
+					DEFAULT_GRANT_LINGER_MS,
+				);
 				const cleanup = dropError !== null && dropError !== "" ? ` [sandbox cleanup: ${dropError}]` : "";
 				throw new Error(`${spawned.error}${cleanup}`);
 			}
 			proc = spawned;
 			release = () => {
-				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network, resolution.readOnly);
+				// The window lets the next command join the installed grant instead
+				// of rewriting the ACLs; an idle grant ends on its own timer.
+				const dropError = releaseWorkspaceGrant(
+					resolution.workspace,
+					resolution.network,
+					resolution.readOnly,
+					DEFAULT_GRANT_LINGER_MS,
+				);
 				// A failed cleanup is logged, not thrown: the shell already ran
 				// and its exit code is what the caller acts on.
 				if (dropError !== null && dropError !== "") append(`\n[sandbox cleanup: ${dropError}]`);

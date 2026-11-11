@@ -217,6 +217,20 @@ commands, and SHA-256 checksums.
 
 ### Changed
 
+- **A Windows command joins an installed sandbox grant instead of rewriting
+  the ACLs.** The last release of an AppContainer grant no longer tears the
+  ACEs down immediately: it arms a 120 s idle window, and the next command in
+  the same workspace finds the grant in the map and joins it. The ACL work is
+  the expensive part of a confined Windows command — an inheritable ACE walks
+  the whole subtree on the way in and its removal walks it on the way out,
+  measured at 1.3–3.1 s for a 300-file workspace with a 3,000-object `.git` —
+  and a join is one map lookup. The window ends on an unref'd timer, which
+  runs the same teardown an immediate release does; a process that exits
+  inside it leaves the reusable ACEs a crash already leaves. Shutdown flushes
+  every idle grant. A grant a command still holds is refused for new roots
+  exactly as before, and an idle grant is replaced instead, so the window
+  never changes which commands the policy lets run.
+
 - **Interactive mode says why it needs a terminal.** When stdin is not a TTY
   (a pipe, a CI step, a launcher that captures output), the session now exits
   before the first frame with a message pointing at `-p "<prompt>"`, instead of

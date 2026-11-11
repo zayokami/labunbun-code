@@ -51,6 +51,7 @@ import {
 	confinedCommandLine,
 	confinedProgramName,
 	ensureAppContainerProfile,
+	flushIdleWorkspaceGrants,
 	runConfined,
 } from "../src/sandbox/appcontainer.ts";
 import { describeWritableRoots } from "../src/sandbox/default-writable-roots.ts";
@@ -1589,16 +1590,16 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		}
 	}, 30_000);
 
-	test("run_in_background under the same policy runs confined, and the grant lives exactly as long as the shell", async () => {
+	test("run_in_background under the same policy runs confined, and its grant ends when the idle window does", async () => {
 		// This used to be a refusal: the confined runner waited for the child to
 		// exit, and a background shell's whole point is a child that outlives the
-		// call. The handle-based spawn closed that gap, so the assertion flips —
-		// and the interesting half becomes the grant's lifetime. It must cover
-		// the shell while it runs and be gone the moment it ends, which one
-		// fixture shows twice: the shell writes its evidence into the workspace
-		// (only a live grant admits that), and then a probe that could start
-		// against a still-granted workspace fails at the cwd it can no longer
-		// reach (only a released grant explains that).
+		// call. The handle-based spawn closed that gap. The release at the shell's
+		// end now passes the idle window, so the interesting half is three states
+		// one fixture can show: the shell writes its evidence into the workspace
+		// (only a live grant admits that), a probe writes after the shell ends
+		// (only the still-installed window admits that), and the same probe is
+		// refused once the window is flushed (the window was a window, not a
+		// leaked grant). The un-granted control stays refused throughout.
 		const cwd = workspace();
 		const ops = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		const manager = new BackgroundShellManager(CONTAINER_RUNTIME, ops, CONTAINER_SHELL);
@@ -1622,9 +1623,8 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 			// carries a read ACE for the package SID), so a read probe would
 			// answer "reachable" in every state and prove nothing. The control
 			// directory has never been granted, so what it exhibits is the
-			// un-granted state itself; the workspace after the shell ended must
-			// behave identically. That both are refused while the shell's own
-			// write above succeeded is the whole lifetime, measured in one run.
+			// un-granted state itself; the workspace after the window ends must
+			// behave identically.
 			const attemptWrite = (dir: string, file: string): { exitCode: number; out: string; wrote: boolean } => {
 				const probe = ensureAppContainerProfile(dir, true);
 				if ("error" in probe) throw new Error(probe.error);
@@ -1649,10 +1649,20 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 			expect(control.exitCode).not.toBe(0);
 			expect(control.out).toContain("Access is denied");
 			expect(control.wrote).toBe(false);
-			const afterRelease = attemptWrite(cwd, "released.txt");
-			expect(afterRelease.exitCode).not.toBe(0);
-			expect(afterRelease.out).toContain("Access is denied");
-			expect(afterRelease.wrote).toBe(false);
+			// The shell ended, but its release handed the grant the same idle
+			// window the command paths pass: the ACEs are still installed, so
+			// the write the control refuses lands here.
+			const whileIdle = attemptWrite(cwd, "idle.txt");
+			expect(whileIdle.exitCode).toBe(0);
+			expect(whileIdle.wrote).toBe(true);
+			// Ending the window is the release this test used to see at the
+			// shell's end. Nothing runs under the grant here, so the flush takes
+			// it, and the workspace must then match the control.
+			expect(flushIdleWorkspaceGrants()).toBeNull();
+			const afterWindow = attemptWrite(cwd, "released.txt");
+			expect(afterWindow.exitCode).not.toBe(0);
+			expect(afterWindow.out).toContain("Access is denied");
+			expect(afterWindow.wrote).toBe(false);
 		} finally {
 			void ops.close?.();
 		}
