@@ -279,6 +279,21 @@ commands, and SHA-256 checksums.
 
 ### Fixed
 
+- **A compaction's own request is on the bill.** A summary is a full-prefix
+  request — the most expensive one a session sends — and its message never
+  enters the transcript, so every surface that costed the conversation from its
+  messages alone reported the turns and omitted the compaction: a `-p` run's
+  `cost_usd`, the ACP budget gate, and the REPL's `/cost`. Every attempt that
+  came back with billed usage is now booked as it is spent, including an
+  attempt the provider refused for size, one that answered with nothing, one
+  the user cancelled, and the smaller request that replaced a refusal; the
+  entry names the model that actually answered, not the summarizer that was
+  asked when a fallback took over. A `-p` run's stream-json `usage` total
+  carries the summary's tokens for the same reason its money does. A
+  subagent's compaction books on the run's own seat, so the light ceiling sees
+  it too. A beetle member's summaries are still outside its cost: a member is
+  costed from its post-compaction transcript, which does not hold them.
+
 - **A multi-block result keeps every block's full text on disk.** When one cut
   spilled more than one text block of the same result, each block was written
   to a file named from the call id, and the blocks share that id, so each

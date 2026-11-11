@@ -149,6 +149,53 @@ describe("a `-p` run that runs out of room", () => {
 		expect(retried).toContain("hello");
 	});
 
+	test("the summary call's tokens are on the bill the JSON result reports", async () => {
+		// The summary is the most expensive request a run sends — the whole
+		// prefix — and its message never enters the transcript. Before the
+		// accumulator, `cost_usd` counted the turns and left the compaction out,
+		// in the direction that under-reports. Haiku 4.5 is $1/$5 per Mtok: the
+		// prompt again is $1.00 and the summary (1M in, 100k out) is $1.50.
+		const f = fixture();
+		const faux = fauxProvider([
+			OVERFLOW,
+			{ text: "<summary>1. Primary Request: hello</summary>", usage: { input: 1_000_000, output: 100_000 } },
+			{ text: "done", usage: { input: 1_000_000 } },
+		]);
+
+		const { code, stdout } = await runCaptured(f, { streamFn: faux.streamFn });
+
+		expect(code).toBe(0);
+		const result = JSON.parse(stdout) as { cost_usd: number; subagent_cost_usd: number };
+		expect(result.cost_usd).toBeCloseTo(2.5, 10);
+		// The summary is this run's own spend, not a subagent's: it must not be
+		// attributed to the accumulator that names another conversation.
+		expect(result.subagent_cost_usd).toBe(0);
+	});
+
+	test("a stream-json result counts the summary's tokens in its usage total", async () => {
+		// The money is one report; the token count is the other, and a run whose
+		// cost included the summary while its tokens did not would describe two
+		// different runs.
+		const f = fixture();
+		const faux = fauxProvider([
+			OVERFLOW,
+			{ text: "<summary>1. Primary Request: hello</summary>", usage: { input: 1_000_000, output: 100_000 } },
+			{ text: "done", usage: { input: 1_000_000 } },
+		]);
+
+		const { code, stdout } = await runCaptured(f, { streamFn: faux.streamFn, outputFormat: "stream-json" });
+
+		expect(code).toBe(0);
+		const lines = stdout
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { type: string; usage?: { input: number; output: number } });
+		const result = lines.find((line) => line.type === "result");
+		// The transcript's surviving turn (1M in) plus the summary (1M in, 100k out).
+		expect(result?.usage?.input).toBe(2_000_000);
+		expect(result?.usage?.output).toBe(100_000);
+	});
+
 	test("a read above the boundary does not license an edit after the summary", async () => {
 		// A `-p` run used to build its tool set with a read record the host could
 		// not reach, so a summary replaced the prefix and the record outlived the

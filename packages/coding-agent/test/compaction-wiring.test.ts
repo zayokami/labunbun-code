@@ -33,6 +33,7 @@ import {
 	type StreamFn,
 	textContent,
 	toolResultMessage,
+	type Usage,
 	userMessage,
 } from "@labunbun/ai";
 import {
@@ -180,6 +181,24 @@ describe("which rung runs at the threshold", () => {
 		expect(decision?.action).toBe("reduced");
 		expect(harness.summaries()).toBe(0);
 		expect(harness.reports.join("\n")).toContain("old tool results replaced by previews");
+	});
+
+	test("the reduced report names a file only where one exists", async () => {
+		// A subagent or band member has no store. Telling its host the full text
+		// "is still in the session file" names a file that does not exist.
+		const bare = wiring();
+		await bare.check({ systemPrompt: "", messages: overThreshold() });
+		expect(bare.reports.join("\n")).toContain("The full text exists only in the previews that remain.");
+		expect(bare.reports.join("\n")).not.toContain("session file");
+
+		const spilled = wiring({ spillOutput: () => "/tmp/call_0.txt" });
+		await spilled.check({ systemPrompt: "", messages: overThreshold() });
+		expect(spilled.reports.join("\n")).toContain("Each preview that names a file keeps the rest of its result there.");
+		expect(spilled.reports.join("\n")).not.toContain("session file");
+
+		const stored = wiring({ store: newStore() });
+		await stored.check({ systemPrompt: "", messages: overThreshold() });
+		expect(stored.reports.join("\n")).toContain("The full text is still in the session file.");
 	});
 
 	test("the previews point at the files the full text was written to", async () => {
@@ -588,6 +607,47 @@ describe("the compaction tuning", () => {
 		await created.checkCompaction({ systemPrompt: "", messages: overThreshold() });
 
 		expect(seen).toEqual(["faux-summarizer"]);
+	});
+});
+
+describe("the summary's spend", () => {
+	/**
+	 * Two rounds behind the working set, so a refused summary has an older round
+	 * to drop. `overThreshold` on its own leaves nothing behind the last request,
+	 * and the ladder's only step down is that older round.
+	 */
+	function twoRoundsBehind(): AgentMessage[] {
+		return [
+			userMessage("an earlier request"),
+			toolResultMessage("call_old", "Read", [textContent("y".repeat(20_000))]),
+			userMessage("another earlier request"),
+			toolResultMessage("call_older", "Read", [textContent("z".repeat(20_000))]),
+			...overThreshold(),
+		];
+	}
+
+	test("every billed attempt reaches the host, with the model that answered", async () => {
+		// The summary message never enters the transcript, so a host that costs
+		// the conversation from its messages alone would never see this request.
+		// Both the refused first attempt and the smaller retry are booked: the
+		// refusal was a request the provider read and charged for.
+		const booked: Array<{ provider: string; modelId: string; usage: Usage }> = [];
+		const created = createCompactionWiring({
+			model: MODEL,
+			store: undefined,
+			streamFn: fauxProvider([
+				{ stopReason: "error", errorMessage: "too long", errorKind: "context_overflow", usage: { input: 25_000 } },
+				{ text: "<summary>1. Request: the files</summary>", usage: { input: 10_000, output: 10 } },
+			]).streamFn,
+			report: () => {},
+			trimOldToolResults: false,
+			onSummaryUsage: (provider, modelId, usage) => booked.push({ provider, modelId, usage }),
+		});
+
+		await created.checkCompaction({ systemPrompt: "", messages: twoRoundsBehind() });
+
+		expect(booked.map((entry) => entry.usage.input)).toEqual([25_000, 10_000]);
+		expect(booked.every((entry) => entry.provider === "faux" && entry.modelId === "faux-1")).toBe(true);
 	});
 });
 

@@ -550,7 +550,14 @@ interface MemberRuntime {
 	model: Model;
 	state: BeetleMemberState;
 	turns: number;
-	/** Spend from sessions this member has already finished, in USD. */
+	/**
+	 * Spend from sessions this member has already finished, in USD.
+	 *
+	 * Like the live half in `status()`, it is costed from the session's
+	 * messages, and a compaction's own request is not one of them — its message
+	 * never enters the transcript, and the band has no `onSummaryUsage` to book
+	 * it. A member that compacted mid-task is therefore costed a summary low.
+	 */
 	settledCostUSD: number;
 	lastActivity: string | null;
 	/** When this member's last event landed, for the quiet watchdog. */

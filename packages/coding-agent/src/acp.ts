@@ -93,7 +93,7 @@ import {
 	createCompactionWiring,
 	resolveCompactionSummarizer,
 } from "./compaction-wiring.ts";
-import { costStateFromMessages } from "./cost-tracker.ts";
+import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { errorRemedy } from "./error-remedy.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
@@ -1228,6 +1228,11 @@ class AcpAgent {
 		// the author believes is loaded and is not is worse than no skill.
 		for (const note of skillNotes) process.stderr.write(`Skills: ${note}\n`);
 
+		// The summary request's spend. Its message never enters the session's
+		// transcript, so the budget gate below — which costs the transcript at
+		// every request — would never see the most expensive request this session
+		// sends. In memory only: an editor session keeps no ledger of its own.
+		const summaryUsage = new CostTracker();
 		const compactionWiring = createCompactionWiring({
 			model,
 			store,
@@ -1246,6 +1251,8 @@ class AcpAgent {
 			// The same writer the tools use: a preview points the model at the file
 			// its full text landed in, rather than at a session file it cannot open.
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId, home }),
+			// The summary's own request, into the accumulator the budget gate reads.
+			onSummaryUsage: (provider, modelId, usage) => summaryUsage.recordUsage(provider, modelId, usage),
 			noteRewrite: (cause) => transport.tracker?.note(cause),
 			// The cheap rung replaces old tool results with previews, so the bytes
 			// the model was shown are gone from its context and the record goes too.
@@ -1353,10 +1360,13 @@ class AcpAgent {
 				// messages are the record every host's JSON result is costed
 				// from. A resumed conversation counts what it already spent,
 				// because the costed messages are the ones it was resumed with.
+				// The summary accumulator is added for the one request the
+				// transcript does not keep.
 				checkBudget: ({ model: answering }) => {
 					const seat = seatTable.get(modelRefKey(answering));
 					if (!seat) return { action: "ok" };
-					return budgetVerdict(costStateFromMessages(session.messages).totalCostUSD, seat);
+					const spent = costStateFromMessages(session.messages).totalCostUSD + summaryUsage.state.totalCostUSD;
+					return budgetVerdict(spent, seat);
 				},
 				errorRemedy,
 				spillOutput: (request) => writeToolOutput(request, { cwd, sessionId, home }),

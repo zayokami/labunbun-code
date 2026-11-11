@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, Context, Model, StreamFn } from "@labunbun/ai";
+import type { AgentMessage, Context, Model, StreamFn, Usage } from "@labunbun/ai";
 import { assistantMessage, FAUX_MODEL, fauxProvider, userMessage } from "@labunbun/ai";
 import { CompactionManager, type CompactionPhase, estimateContextUsage } from "../src/compaction.ts";
 import { SessionStore } from "../src/session-store.ts";
@@ -277,5 +277,102 @@ describe("the phases of a summarization", () => {
 
 		expect(await harness.manager.check({ systemPrompt: "", messages: [userMessage("short")] })).toBeNull();
 		expect(harness.phases).toEqual([]);
+	});
+});
+
+describe("what a summary spent", () => {
+	test("is booked with the model that answered, not the one that was asked", async () => {
+		// The summary goes out through the same fallback chain every request does,
+		// and the message that comes back names whoever answered. Booking the
+		// model that was asked would price a request another model ran.
+		const booked: Array<{ provider: string; modelId: string; usage: Usage }> = [];
+		const answered: StreamFn = async function* () {
+			const message = assistantMessage({
+				provider: "fallback-provider",
+				model: "fallback-model",
+				content: [{ type: "text", text: SUMMARY_TEXT }],
+				usage: { input: 1_200, output: 34, cacheRead: 500, cacheWrite: 0 },
+			});
+			yield { type: "text_delta", contentIndex: 0, delta: SUMMARY_TEXT, partial: message };
+			yield { type: "done", message };
+		};
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: answered,
+			summarizerModel: SUMMARIZER,
+			onUsage: (provider, modelId, usage) => booked.push({ provider, modelId, usage }),
+		});
+
+		await manager.compact(bigContext());
+
+		expect(booked).toEqual([
+			{
+				provider: "fallback-provider",
+				modelId: "fallback-model",
+				usage: { input: 1_200, output: 34, cacheRead: 500, cacheWrite: 0 },
+			},
+		]);
+	});
+
+	test("a refused attempt is on the bill, and so is the smaller one that replaced it", async () => {
+		// A refusal for size is a request the provider read and rejected; the
+		// tokens it counted before refusing are not refunded because the summary
+		// was never adopted. The retry is a second full request, and both are
+		// booked.
+		const booked: Usage[] = [];
+		const failedThenOk = fauxProvider([
+			{ stopReason: "error", errorMessage: "too long", errorKind: "context_overflow", usage: { input: 90_000 } },
+			{ text: SUMMARY_TEXT, usage: { input: 40_000, output: 20 } },
+		]);
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: failedThenOk.streamFn,
+			summarizerModel: SUMMARIZER,
+			onUsage: (_provider, _modelId, usage) => booked.push(usage),
+		});
+		// Two rounds above the retained suffix, because the ladder's last rung
+		// drops one (the same shape the phases test above needs to descend).
+		const messages: AgentMessage[] = [
+			userMessage("do the thing"),
+			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+			userMessage("keep going"),
+			assistantMessage({ usage: { input: 95_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+			userMessage("and now this"),
+		];
+
+		await manager.compact({ systemPrompt: "", messages });
+
+		expect(booked.map((usage) => usage.input)).toEqual([90_000, 40_000]);
+	});
+
+	test("an empty reply is billed too, because the request that produced it was paid for", async () => {
+		// The manager throws this reply away. The provider does not throw the
+		// invoice away with it, and the message never enters the transcript, so
+		// this callback is the only record the spend ever reaches a ledger through.
+		const booked: Usage[] = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "", usage: { input: 5_000 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			onUsage: (_provider, _modelId, usage) => booked.push(usage),
+		});
+
+		await expect(manager.compact(bigContext())).rejects.toThrow("empty summary");
+
+		expect(booked).toHaveLength(1);
+		expect(booked[0]?.input).toBe(5_000);
+	});
+
+	test("an attempt the provider billed nothing for adds no entry", async () => {
+		// A terminal message with zero usage is what a stream that never reached
+		// the provider reports. Booking it would put an empty model row in front
+		// of the user in `/cost` for a call that spent nothing.
+		const booked: Usage[] = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: SUMMARY_TEXT }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			onUsage: (_provider, _modelId, usage) => booked.push(usage),
+		});
+
+		await manager.compact(bigContext());
+
+		expect(booked).toEqual([]);
 	});
 });

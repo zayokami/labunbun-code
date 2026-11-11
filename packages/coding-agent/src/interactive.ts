@@ -1093,6 +1093,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// The same writer the tools use, read through the holder so a /resume's
 		// spills land in the session that is live when the preview is made.
 		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId: sessionIdHolder.current, home }),
+		// The summary's own request, into the ledger every other call books into.
+		// The message never enters the transcript, so `turn_end` never sees it —
+		// without this booking a compaction was the one full-price request in a
+		// session that `/cost` did not count. Read through the binding, not
+		// captured: it is declared below with the rest of the ledger, and no pass
+		// can run before this function has finished setting the session up.
+		onSummaryUsage: (provider, modelId, usage) => {
+			costTracker.recordUsage(provider, modelId, usage);
+			costTracker.persist();
+		},
 		preCompact: async (trigger, customInstructions) => {
 			if (!hooksRuntime.has("PreCompact")) return { blocked: false };
 			const outcome = await hooksRuntime.run("PreCompact", {

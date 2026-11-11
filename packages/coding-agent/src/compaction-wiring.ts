@@ -34,6 +34,7 @@ import {
 	resolveModel,
 	resolvePromptCacheRetention,
 	type StreamFn,
+	type Usage,
 } from "@labunbun/ai";
 import { formatTokenTotal } from "@labunbun/tui/format";
 import { rewriteCause } from "./cache-report.ts";
@@ -327,6 +328,16 @@ export interface CompactionWiringOptions {
 	 * a `-p` run and a subagent want.
 	 */
 	onPhase?: (phase: CompactionPhase) => void | Promise<void>;
+	/**
+	 * Book what a summary attempt spent. The summary message never enters the
+	 * session's transcript, so a host that costs the conversation from its
+	 * messages alone leaves every compaction unpaid — and compaction is a
+	 * full-prefix request, the most expensive one a session sends.
+	 *
+	 * Called for each attempt that came back with billed usage, including the
+	 * ones whose summary was refused or discarded.
+	 */
+	onSummaryUsage?: (provider: string, modelId: string, usage: Usage) => void;
 }
 
 export interface CompactionWiring {
@@ -438,6 +449,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				// request. The note after `check` returns stays where it is: that one
 				// covers the request that follows the rewrite, not the summary's own.
 				onSummarizeRequest: () => options.noteRewrite?.(rewriteCause("compact")),
+				onUsage: options.onSummaryUsage,
 			},
 		);
 	};
@@ -483,10 +495,20 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				// working from previews of older results. Silence would make that
 				// indistinguishable from the transcript having been summarized.
 				if (decision?.action === "reduced") {
+					// Where the full text went depends on who is running the
+					// session, and the report must not name a place that does not
+					// exist. A subagent and a band member have no store, so there is
+					// no session file to point at; with a spill writer each preview
+					// that names a file holds the rest of that result, and without
+					// one the preview is all that remains.
+					const kept = options.store
+						? "The full text is still in the session file."
+						: options.spillOutput
+							? "Each preview that names a file keeps the rest of its result there."
+							: "The full text exists only in the previews that remain.";
 					options.report(
 						`Context trimmed: ${decision.cleared.results} old tool result${decision.cleared.results === 1 ? "" : "s"} replaced by previews ` +
-							`(${decision.cleared.chars.toLocaleString()} characters freed, no summarization needed). ` +
-							"The full text is still in the session file.",
+							`(${decision.cleared.chars.toLocaleString()} characters freed, no summarization needed). ${kept}`,
 					);
 					// The previews replaced bytes the model can no longer see, so the
 					// read evidence has to go with them.

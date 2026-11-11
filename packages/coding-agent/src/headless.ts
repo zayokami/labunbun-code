@@ -67,7 +67,7 @@ import {
 	createCompactionWiring,
 	resolveCompactionSummarizer,
 } from "./compaction-wiring.ts";
-import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
+import { type CostState, CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { errorRemedy } from "./error-remedy.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
@@ -734,6 +734,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// under-report every run that fanned out. In memory only — a `-p` run keeps
 	// no project ledger.
 	const subagentUsage = new CostTracker();
+	// The summary request's spend, for the same reason one step closer to home:
+	// compaction drops the request and keeps only the summary text, so no
+	// message in this run records what it cost. In memory only, like the
+	// accumulator beside it.
+	const summaryUsage = new CostTracker();
 	// The fleet as the host watches it, the same table the REPL injects: the
 	// close-out note's live count has to be read from the registry the tools
 	// write to, or it would be a claim rather than an observation.
@@ -876,6 +881,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// The same writer the tools use: a preview points the model at the file
 		// its full text landed in, rather than at a session file it cannot open.
 		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
+		// The summary's own request, into the accumulator the budget gate and the
+		// JSON result both read. Its message never enters the transcript, so
+		// nothing else in this run would ever count it.
+		onSummaryUsage: (provider, modelId, usage) => summaryUsage.recordUsage(provider, modelId, usage),
 		noteRewrite: (cause) => transport.tracker?.note(cause),
 		// The cheap rung replaces old tool results with previews, so the bytes the
 		// model was shown are gone from its context and the read record goes too.
@@ -960,6 +969,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// The repository's shape, when it fits the prompt. Smaller checkouts get the
 	// whole outline; a large one gets no section and the RepoMap tool instead.
 	const repoMapText = await repoMapPromptSection(repoMap);
+	// What this run has spent so far: the transcript, re-costed from its own
+	// usage records, plus the two requests that never enter it — a subagent's
+	// conversation and the summary call. One reader for the budget gate and the
+	// JSON result, so the two cannot disagree about the bill.
+	const totalSpendUSD = (): number =>
+		costStateFromMessages(session.messages).totalCostUSD +
+		subagentUsage.state.totalCostUSD +
+		summaryUsage.state.totalCostUSD;
 	// Annotated because `checkBudget` below reads this very session's messages:
 	// without the annotation the type would be inferred from its own initializer.
 	const session: AgentSession = new AgentSession({
@@ -996,13 +1013,13 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// owns is never gated), and the spend is the run's cumulative total
 			// at that moment: the transcript, re-costed from its own usage
 			// records — which is what makes a resumed conversation count what it
-			// already spent — plus the subagent accumulator, whose bookings never
-			// enter the transcript. The same sum the JSON result reports.
+			// already spent — plus the accumulators whose bookings never enter the
+			// transcript: the subagents' runs and the summary call. The same sum
+			// the JSON result reports.
 			checkBudget: ({ model: answering }) => {
 				const seat = seatTable.get(modelRefKey(answering));
 				if (!seat) return { action: "ok" };
-				const spent = costStateFromMessages(session.messages).totalCostUSD + subagentUsage.state.totalCostUSD;
-				return budgetVerdict(spent, seat);
+				return budgetVerdict(totalSpendUSD(), seat);
 			},
 			// The line printed under the error when a run ends on a classified
 			// provider failure — the same sentence the REPL shows. A scripted run
@@ -1233,6 +1250,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const finalText = finalMessage ? assistantText(finalMessage) : "";
 	const finalIncomplete = finalMessage?.incomplete === true;
 	const usage = totalUsage(session.messages);
+	// The summary call is a request this run sent whose message never enters the
+	// transcript, so its tokens join the total here — the same reason `cost_usd`
+	// has an accumulator. Subagent tokens stay out: their conversations are
+	// separate runs, and their money is reported beside the bill instead.
+	addUsageTotals(usage, summaryUsage.state);
 
 	// Before the result goes to stdout, so a script that reads the file as soon
 	// as the process exits can never win a race with the write. A missing
@@ -1279,8 +1301,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// and an interactive one disagree about the bill only if the prices differ.
 			// The subagents' spend is added in, and named beside it: their
 			// conversations never enter this transcript, so a sum of the messages
-			// alone under-reported every run that fanned out.
-			cost_usd: costStateFromMessages(session.messages).totalCostUSD + subagentUsage.state.totalCostUSD,
+			// alone under-reported every run that fanned out. The summary call is
+			// added for the same reason, though it is not named separately: it is
+			// this run's own request, and a full-prefix one.
+			cost_usd: totalSpendUSD(),
 			subagent_cost_usd: subagentUsage.state.totalCostUSD,
 			duration_ms: Date.now() - startedAt,
 			num_turns: turns,
@@ -1367,6 +1391,17 @@ function assistantText(message: AssistantMessage): string {
 		.filter((b) => b.type === "text")
 		.map((b) => b.text)
 		.join("");
+}
+
+/** Fold an accumulator's tokens into a transcript-derived total. */
+function addUsageTotals(totals: Record<string, number>, state: CostState): void {
+	for (const usage of Object.values(state.modelsUsage)) {
+		totals.input += usage.inputTokens;
+		totals.output += usage.outputTokens;
+		totals.cacheRead += usage.cacheReadTokens;
+		totals.cacheWrite += usage.cacheWriteTokens;
+		totals.reasoning += usage.reasoningTokens;
+	}
 }
 
 function totalUsage(messages: AgentMessage[]): Record<string, number> {

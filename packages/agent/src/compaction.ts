@@ -257,6 +257,18 @@ function promptTokens(usage: Usage): number {
 }
 
 /**
+ * Whether a usage record names anything the provider will bill.
+ *
+ * A terminal event synthesizes zero usage when the stream never reached the
+ * provider — a request refused for size, an aborted attempt — and booking that
+ * would put an empty model entry in front of the user in `/cost` for a call
+ * that cost nothing.
+ */
+function billedSomething(usage: Usage): boolean {
+	return usage.input > 0 || usage.output > 0 || usage.cacheRead > 0 || usage.cacheWrite > 0;
+}
+
+/**
  * Rough token estimate: last known API usage anchors the prefix; later
  * messages estimated at ~4 chars/token.
  *
@@ -774,6 +786,19 @@ export interface CompactionManagerDeps {
 	 * cause per request.
 	 */
 	onSummarizeRequest?: () => void;
+	/**
+	 * Book what a summary attempt spent, into whatever ledger bills the session.
+	 *
+	 * Called once per attempt that came back with billed usage — not once per
+	 * adopted summary. A refusal for size, an empty reply and a cancel all paid
+	 * for the request that produced them, and the summary message never enters
+	 * the transcript, so this is the only record a host can cost it from. An
+	 * attempt whose ending discards the summary does not refund its tokens.
+	 *
+	 * `modelId` is the model that actually answered, which is not necessarily
+	 * the summarizer that was asked when a fallback chain answered instead.
+	 */
+	onUsage?: (provider: string, modelId: string, usage: Usage) => void;
 }
 
 export class CompactionManager {
@@ -1349,6 +1374,8 @@ export class CompactionManager {
 			const model = this.#deps.summarizerModel;
 			let text = "";
 			let servedBy = model.id;
+			let servedProvider = model.provider;
+			let spent: Usage | undefined;
 			let announcedResponse = false;
 			// Whether the provider refused this attempt for size. A cancel is the
 			// third kind of ending, and unlike a refusal it ends the pass rather
@@ -1368,8 +1395,14 @@ export class CompactionManager {
 					}
 					text += event.delta;
 				}
-				// The stream may be fallback-wrapped: report whoever answered.
-				if (event.type === "done" && event.message.model) servedBy = event.message.model;
+				// Both terminal events carry the message the provider answered with,
+				// usage included. The stream may be fallback-wrapped, so report
+				// whoever actually answered rather than the model that was asked.
+				if (event.type === "done" || event.type === "error") {
+					if (event.message.model) servedBy = event.message.model;
+					servedProvider = event.message.provider;
+					spent = event.message.usage;
+				}
 				if (event.type === "error") {
 					if (event.message.errorKind === "context_overflow") {
 						tooBig = true;
@@ -1386,6 +1419,10 @@ export class CompactionManager {
 					throw new Error(event.message.errorMessage ?? "compaction stream failed");
 				}
 			}
+			// Booked before the ending is decided. Every ending below — a cancel,
+			// an empty reply, a descent to a smaller request — can throw the
+			// summary away; none of them un-sends the request that was billed.
+			if (spent && billedSomething(spent)) this.#deps.onUsage?.(servedProvider, servedBy, spent);
 			if (aborted) {
 				// Whatever arrived before the cancel is not a summary — a reply cut
 				// short mid-sentence describes half a conversation — so nothing is

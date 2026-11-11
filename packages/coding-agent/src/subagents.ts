@@ -692,6 +692,12 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			trimOldToolResults: ctx.trimOldToolResults,
 			tuning: ctx.compactionTuning,
 			spillOutput,
+			// The summary call is part of this run's spend even though its message
+			// never enters the subagent's transcript — the same reason every turn
+			// is booked at `turn_end`, one request further out. The seat is the
+			// one this run answers on, which is where the host's light ceiling
+			// has to see the compaction too.
+			onSummaryUsage: (provider, modelId, usage) => ctx.onUsage?.(provider, modelId, usage, seat),
 			report: (text) => {
 				notes.push(text);
 				ctx.report?.(`[${definition.agentType}] ${text}`);
