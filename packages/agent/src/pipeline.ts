@@ -1,7 +1,8 @@
 /**
  * Per-tool-call execution pipeline:
- *   zod safeParse → validateInput → beforeToolCall hooks → canUseTool
- *   → tool.call → afterToolCall hooks → bound the result → ToolResultMessage
+ *   malformed arguments → zod safeParse → validateInput → beforeToolCall hooks
+ *   → canUseTool → tool.call → afterToolCall hooks → bound the result
+ *   → ToolResultMessage
  *
  * Every failure mode produces an isError ToolResultMessage — the pipeline
  * never throws, so the loop always has paired results for the wire.
@@ -10,6 +11,26 @@ import type { ToolResultMessage } from "@labunbun/ai";
 import { textContent, toolResultMessage } from "@labunbun/ai";
 import { cutContent, type SpillWriter } from "./output-limits.ts";
 import type { AgentDeps, AnyTool, PermissionContext, ToolCallContext, ToolResult } from "./types.ts";
+
+/**
+ * Arguments that never parsed, carried from the session to the pipeline.
+ *
+ * A plain sentinel object cannot express this: zod strips unknown keys, so a
+ * schema with no known keys (`z.object({})`, an MCP `passthrough()` schema)
+ * accepts `{ __malformedArguments: raw }` as `{}` and the tool runs as if the
+ * model had sent valid empty arguments — reporting success for a call whose
+ * arguments were unreadable. Keeping the failure a distinct value lets the
+ * pipeline answer it before any schema, hook or permission sees it.
+ */
+export class MalformedToolArguments {
+	readonly message: string;
+	readonly raw: string;
+
+	constructor(message: string, raw: string) {
+		this.message = message;
+		this.raw = raw;
+	}
+}
 
 export interface PipelineRunOptions {
 	callId: string;
@@ -36,6 +57,15 @@ function isAborted(ctx: Omit<ToolCallContext, "onUpdate">): boolean {
 
 const ABORTED_RESULT_TEXT = "Tool execution aborted";
 
+/** A broken call can carry as much text as the context; the error names a prefix. */
+const MALFORMED_ARGUMENTS_EXCERPT_CHARS = 200;
+
+function excerptArguments(raw: string): string {
+	if (raw.length <= MALFORMED_ARGUMENTS_EXCERPT_CHARS) return raw;
+	const omitted = raw.length - MALFORMED_ARGUMENTS_EXCERPT_CHARS;
+	return `${raw.slice(0, MALFORMED_ARGUMENTS_EXCERPT_CHARS)}… [${omitted} chars truncated]`;
+}
+
 export async function runToolPipeline(options: PipelineRunOptions): Promise<ToolResultMessage> {
 	const { callId, tool, rawInput, deps, ctx, permissionContext } = options;
 	const finish = (result: ToolResult): ToolResultMessage =>
@@ -47,7 +77,23 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
 		}
 
-		// 1. Schema validation
+		// 1. Malformed arguments — before the schema, because a schema with no
+		// known keys accepts a stripped sentinel as `{}` and would run the tool.
+		// validateInput, hooks and permissions are skipped too: none of them is
+		// guarding a real call, and a hook must not be able to "fix" arguments
+		// that were never arguments.
+		if (rawInput instanceof MalformedToolArguments) {
+			return finish({
+				content: [
+					textContent(
+						`InputValidationError: tool arguments are not valid JSON: ${rawInput.message}\nInput was: ${excerptArguments(rawInput.raw)}`,
+					),
+				],
+				isError: true,
+			});
+		}
+
+		// 2. Schema validation
 		const parsed = tool.inputSchema.safeParse(rawInput);
 		if (!parsed.success) {
 			const issue = parsed.error.issues[0];
@@ -63,7 +109,7 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 		}
 		let input: unknown = parsed.data;
 
-		// 2. Semantic validation
+		// 3. Semantic validation
 		if (tool.validateInput) {
 			const error = await tool.validateInput(input);
 			if (error) {
@@ -74,7 +120,7 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
 		}
 
-		// 3. Loop hooks (before)
+		// 4. Loop hooks (before)
 		// Before the permission check on purpose: a hook is the user's own code
 		// and is how prompt policies get enforced (e.g. "block anything touching
 		// prod"), so it must be able to refuse a call that permissions would
@@ -95,7 +141,7 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
 		}
 
-		// 4. Permissions — the resolver must resolve "ask" itself (dialog); a
+		// 5. Permissions — the resolver must resolve "ask" itself (dialog); a
 		// bare "ask" result here means nobody resolved it, so fail safe.
 		if (deps.canUseTool) {
 			const decision = await deps.canUseTool(tool.name, input, permissionContext);
@@ -113,7 +159,7 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 			}
 		}
 
-		// 5. Execute — recheck after the permission wait: a dialog resolved only
+		// 6. Execute — recheck after the permission wait: a dialog resolved only
 		// because the user interrupted must not run the tool anyway.
 		if (isAborted(ctx)) {
 			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
@@ -130,7 +176,7 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 			});
 		}
 
-		// 6. Loop hooks (after) — may replace the result message
+		// 7. Loop hooks (after) — may replace the result message
 		let resultMessage = finish(result);
 		if (deps.hooks?.afterToolCall) {
 			const replaced = await deps.hooks.afterToolCall(tool.name, input, resultMessage);

@@ -31,8 +31,12 @@ export const FAUX_MODEL: Model = {
 export interface FauxToolCallSpec {
 	id?: string;
 	name: string;
-	/** JSON object (not string) — stringified into raw arguments. */
-	arguments: Record<string, unknown>;
+	/**
+	 * A JSON object, stringified into raw arguments, or raw argument text sent
+	 * verbatim — so a test can script a call the model could actually produce,
+	 * truncated JSON included.
+	 */
+	arguments: Record<string, unknown> | string;
 }
 
 export interface FauxStep {
@@ -137,7 +141,7 @@ export function fauxProvider(steps: FauxStep[]): FauxProvider {
 			type: "toolCall",
 			id: spec.id ?? `faux_call_${stepIndex}_${i}`,
 			name: spec.name,
-			arguments: JSON.stringify(spec.arguments),
+			arguments: typeof spec.arguments === "string" ? spec.arguments : JSON.stringify(spec.arguments),
 		}));
 
 		for (const call of calls) {

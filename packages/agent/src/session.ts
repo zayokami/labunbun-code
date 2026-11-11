@@ -31,7 +31,7 @@ import {
 import { LENGTH_RECOVERY_MESSAGE } from "./compaction.ts";
 import { DEFAULT_MAX_CONCURRENCY, partitionToolCalls, Semaphore } from "./concurrency.ts";
 import { capRoundResults } from "./output-limits.ts";
-import { runToolPipeline } from "./pipeline.ts";
+import { MalformedToolArguments, runToolPipeline } from "./pipeline.ts";
 import type {
 	AgentDeps,
 	AgentEndReason,
@@ -963,6 +963,10 @@ export class AgentSession {
 		const tool = this.#tools.find((t) => t.name === toolCall.name);
 		if (!tool?.isEnabled?.()) return;
 		const input = parseArguments(toolCall.arguments);
+		// A call whose arguments never parsed is answered by the pipeline in place.
+		// Starting it here would announce a tool execution that can never run, and
+		// `isConcurrencySafe` would be asked about a value the tool never accepts.
+		if (input instanceof MalformedToolArguments) return;
 		if (!tool.isConcurrencySafe?.(input)) {
 			gate.blocked = true;
 			return;
@@ -1187,8 +1191,9 @@ function parseArguments(raw: string): unknown {
 	if (!raw.trim()) return {};
 	try {
 		return JSON.parse(raw);
-	} catch {
-		// Let the pipeline's zod validation produce the proper error result.
-		return { __malformedArguments: raw };
+	} catch (error) {
+		// A distinct value, not a sentinel key: the pipeline answers it before
+		// schema validation, which a keyless schema would otherwise accept as {}.
+		return new MalformedToolArguments(error instanceof Error ? error.message : String(error), raw);
 	}
 }

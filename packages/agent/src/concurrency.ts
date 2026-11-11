@@ -1,3 +1,4 @@
+import { MalformedToolArguments } from "./pipeline.ts";
 import type { ResolvedToolCall } from "./types.ts";
 
 export interface ToolBatch {
@@ -10,6 +11,16 @@ export interface ToolBatch {
 export const DEFAULT_MAX_CONCURRENCY = 10;
 
 /**
+ * Whether a call may share a batch. Arguments that never parsed are answered by
+ * the pipeline before any tool runs, and asking the tool about them would call
+ * an embedder's `isConcurrencySafe` outside the pipeline's never-throws contract.
+ */
+function safeInParallel(call: ResolvedToolCall): boolean {
+	if (call.input instanceof MalformedToolArguments) return false;
+	return call.tool.isConcurrencySafe?.(call.input) ?? false;
+}
+
+/**
  * Partition tool calls into execution batches: maximal runs of consecutive
  * concurrency-safe calls run in parallel; everything else runs serially.
  * Batches preserve assistant source order, and results are always reported
@@ -20,10 +31,10 @@ export function partitionToolCalls(calls: ResolvedToolCall[], maxConcurrency = D
 	let i = 0;
 	while (i < calls.length) {
 		const call = calls[i];
-		if (call.tool.isConcurrencySafe?.(call.input)) {
+		if (safeInParallel(call)) {
 			const batch: ResolvedToolCall[] = [call];
 			i++;
-			while (i < calls.length && calls[i].tool.isConcurrencySafe?.(calls[i].input)) {
+			while (i < calls.length && safeInParallel(calls[i])) {
 				batch.push(calls[i]);
 				i++;
 			}

@@ -8,6 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_MAX_CONCURRENCY, partitionToolCalls, Semaphore } from "../src/concurrency.ts";
+import { MalformedToolArguments } from "../src/pipeline.ts";
 import type { AnyTool, ResolvedToolCall } from "../src/types.ts";
 
 /** A resolved call whose only interesting property is whether it may run in parallel. */
@@ -73,6 +74,28 @@ describe("partitionToolCalls", () => {
 		const bare: ResolvedToolCall = { callId: "x", tool: { name: "x" } as unknown as AnyTool, input: {} };
 		const batches = partitionToolCalls([bare, bare]);
 		expect(flags(batches)).toEqual([false, false]);
+	});
+
+	// The pipeline answers a call whose arguments never parsed. Batching it first
+	// must not hand that value to a tool's own safety check: an embedder's check
+	// may read its input, and the pipeline is the layer that promises never to
+	// throw.
+	test("a call with malformed arguments is serial and never asks the tool", () => {
+		let asked = false;
+		const malformed: ResolvedToolCall = {
+			callId: "bad",
+			tool: {
+				name: "bad",
+				isConcurrencySafe: () => {
+					asked = true;
+					return true;
+				},
+			} as unknown as AnyTool,
+			input: new MalformedToolArguments("Unexpected end of JSON input", '{"text":'),
+		};
+		const batches = partitionToolCalls([malformed]);
+		expect(flags(batches)).toEqual([false]);
+		expect(asked).toBe(false);
 	});
 
 	// Bash decides per command, so the same tool can appear on both sides of a

@@ -100,7 +100,7 @@ The fallback walk reports only the descents it actually makes.
 
 ### Malformed tool arguments
 
-A tool call whose arguments are not JSON is not a stream failure. `toolCallEnd` hands the buffered text over unparsed (`packages/ai/src/message-builder.ts:89-101`). The agent parses once at dispatch and turns a parse failure into `{ __malformedArguments: raw }`, which the pipeline's schema validation reports as an invalid-input tool result (`packages/agent/src/session.ts:1088-1096`, `packages/agent/src/pipeline.ts:51-63`). The stream continues, the call is paired, and the raw text is available to the error. `parseToolArguments` still exists for the adapters that replay a stored block to a provider; it maps malformed text to `{}` (`packages/ai/src/message-builder.ts:160-169`).
+A tool call whose arguments are not JSON is not a stream failure. `toolCallEnd` hands the buffered text over unparsed (`packages/ai/src/message-builder.ts:89-101`). The agent parses once at dispatch and turns a parse failure into a `MalformedToolArguments` value (`packages/agent/src/session.ts:1190-1200`). The pipeline answers it before schema validation, `validateInput`, hooks and permissions (`packages/agent/src/pipeline.ts:79-94`): a schema with no known keys would otherwise strip a sentinel key and accept the broken arguments as `{}`, running the tool and reporting success. The result names the parse error and a truncated raw excerpt. The stream continues and the call is paired. `parseToolArguments` still exists for the adapters that replay a stored block to a provider; it maps malformed text to `{}` (`packages/ai/src/message-builder.ts:160-169`).
 
 ## Interruption
 

@@ -47,6 +47,15 @@ commands, and SHA-256 checksums.
   writing, locking files, or holding ports after the tool has reported failure.
   The normal-exit path is untouched.
 
+- **Malformed tool arguments fail before validation.** A tool call whose
+  arguments are not JSON is carried as a dedicated `MalformedToolArguments`
+  value and answered before schema validation, `validateInput`, hooks, and
+  permissions. A schema with no known keys (`z.object({})`, an MCP
+  `passthrough()` schema) used to strip the old sentinel and run the tool with
+  `{}`, reporting success. The error now names the JSON parse failure and a
+  truncated raw excerpt, no tool starts, and the concurrency partitioner treats
+  the call as serial without asking the tool.
+
 - **Edit says what is actually wrong with its target.** A cold-path Edit on a
   missing file answers "does not exist - use Write" instead of "was not read
   this session"; a directory and a permission failure are named the same way.

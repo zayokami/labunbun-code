@@ -394,6 +394,37 @@ describe("AgentSession loop", () => {
 		expect((results[0].content[0] as any).text).toContain("InputValidationError");
 	});
 
+	test("malformed arguments yield a paired error without executing the tool", async () => {
+		// Truncated argument text is a real model output, not a stream failure: the
+		// call must still be paired and the loop must continue, but the tool body
+		// must never run on input nobody could parse.
+		let executions = 0;
+		const tool = echoTool({
+			isConcurrencySafe: () => true,
+			call: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "should not run" }] };
+			},
+		});
+		const { session, reason } = await runHarness(
+			[{ toolCalls: [{ id: "bad", name: "echo", arguments: '{"text":"truncated' }] }, { text: "following turn" }],
+			{ tools: [tool] },
+		);
+
+		expect(reason).toBe("completed");
+		expect(executions).toBe(0);
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0]).toMatchObject({ toolCallId: "bad", isError: true });
+		const text = (results[0].content[0] as any).text as string;
+		expect(text).toContain("not valid JSON");
+		expect(text).toContain('{"text":"truncated');
+		// The turn after the failed call is not poisoned: the next model call ran
+		// and its answer is the last thing in the transcript.
+		const assistants = session.messages.filter((m) => m.role === "assistant") as any[];
+		expect(assistants.at(-1)?.content[0].text).toBe("following turn");
+	});
+
 	test("unknown tool yields isError result", async () => {
 		const { session } = await runHarness([{ toolCalls: [{ name: "no_such_tool", arguments: {} }] }, { text: "ok" }], {
 			tools: [],

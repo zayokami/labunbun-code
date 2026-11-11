@@ -3,7 +3,7 @@ import type { AgentDeps } from "@labunbun/agent";
 import { z } from "zod";
 import { partitionToolCalls } from "../src/concurrency.ts";
 import { type AnyTool, allow, buildTool, type ResolvedToolCall } from "../src/index.ts";
-import { runToolPipeline } from "../src/pipeline.ts";
+import { MalformedToolArguments, runToolPipeline } from "../src/pipeline.ts";
 
 const BASE_CTX = {
 	callId: "t1",
@@ -101,6 +101,54 @@ describe("runToolPipeline stages", () => {
 		const text = (result.content[0] as any).text as string;
 		expect(text).toContain("InputValidationError");
 		expect(text).toContain("JSON.stringify" in {} ? "" : '{"wrong":42}');
+	});
+
+	test("malformed arguments fail before schema validation and never execute", async () => {
+		// z.object({}) strips unknown keys, so a sentinel handed to the schema
+		// would become {} and the tool would run as if the call were valid. The
+		// failure has to be answered before the schema, hooks and permissions see
+		// it — none of them is guarding a real call.
+		let calls = 0;
+		let validations = 0;
+		const tool = buildTool({
+			name: "noargs",
+			description: "takes no arguments",
+			inputSchema: z.object({}),
+			validateInput: async () => {
+				validations++;
+				return null;
+			},
+			call: async () => {
+				calls++;
+				return { content: [{ type: "text", text: "ran" }] };
+			},
+		});
+		const raw = '{"text":"truncated';
+		const result = await run(tool, new MalformedToolArguments("Unexpected end of JSON input", raw), {
+			hooks: {
+				beforeToolCall: async () => {
+					throw new Error("hooks must not see malformed arguments");
+				},
+			},
+			canUseTool: async () => {
+				throw new Error("permissions must not see malformed arguments");
+			},
+		});
+		expect(result.isError).toBe(true);
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain("not valid JSON");
+		expect(text).toContain(raw);
+		expect(calls).toBe(0);
+		expect(validations).toBe(0);
+	});
+
+	test("a malformed-arguments error carries only a truncated raw excerpt", async () => {
+		const raw = `{"text":"${"x".repeat(500)}"`;
+		const result = await run(echoTool(), new MalformedToolArguments("Unterminated string", raw));
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain("not valid JSON");
+		expect(text).toContain("chars truncated");
+		expect(text.length).toBeLessThan(raw.length);
 	});
 
 	test("validateInput semantic failure short-circuits before call", async () => {

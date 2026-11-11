@@ -100,7 +100,7 @@ export {
 	specifierToRegExp,
 } from "./permissions.ts";
 // Pipeline / concurrency
-export { type PipelineRunOptions, runToolPipeline } from "./pipeline.ts";
+export { MalformedToolArguments, type PipelineRunOptions, runToolPipeline } from "./pipeline.ts";
 // The sandbox policy: data only. The backends that turn it into something
 // executable live in @labunbun/tools, which depends on this package.
 export {
