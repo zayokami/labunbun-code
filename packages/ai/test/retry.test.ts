@@ -252,6 +252,64 @@ describe("withRetry", () => {
 	});
 });
 
+// Waiting cannot repair a closed TLS handshake, a full disk or a refused
+// write. These arrive status-less, which used to read as "worth one more
+// shot" — ten attempts and two minutes of silence for a condition that was
+// decided before the first retry.
+describe("permanent failures", () => {
+	const permanent: Array<[string, Error]> = [
+		[
+			"a self-signed certificate",
+			Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+		],
+		[
+			"the same certificate nested on the cause, as fetch reports it",
+			Object.assign(new TypeError("fetch failed"), {
+				cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+			}),
+		],
+		["a full disk", Object.assign(new Error("no space left on device"), { code: "ENOSPC" })],
+	];
+
+	for (const [label, error] of permanent) {
+		test(`${label} fails on the first attempt`, async () => {
+			const { fn, calls } = failingStreamFn(99, error);
+			let slept = 0;
+			const wrapped = withRetry(fn, {
+				baseDelayMs: 1,
+				sleep: async () => {
+					slept++;
+				},
+			});
+
+			const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+			expect(calls()).toBe(1);
+			expect(slept).toBe(0);
+			expect(events).toHaveLength(1);
+			expect(events[0].type).toBe("error");
+		});
+	}
+
+	// The complement of the rows above: the check is a closed set, so a
+	// transient code keeps every attempt it always had.
+	test("ECONNRESET still climbs the ladder", async () => {
+		const { fn, calls } = failingStreamFn(99, Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
+		const wrapped = withRetry(fn, { baseDelayMs: 1, maxAttempts: 3, sleep: async () => {} });
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(calls()).toBe(3);
+		expect(events.at(-1)?.type).toBe("error");
+	});
+
+	test("a 503 still climbs the ladder", async () => {
+		const { fn, calls } = failingStreamFn(99, Object.assign(new Error("down"), { status: 503 }));
+		const wrapped = withRetry(fn, { baseDelayMs: 1, maxAttempts: 3, sleep: async () => {} });
+
+		await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(calls()).toBe(3);
+	});
+});
+
 describe("context overflow classification", () => {
 	test("recognizes the provider wordings for an oversized request", () => {
 		expect(looksLikeContextOverflow("This model's maximum context length is 200000 tokens")).toBe(true);

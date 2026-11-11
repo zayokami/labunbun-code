@@ -55,6 +55,12 @@ commands, and SHA-256 checksums.
   live transcript on its old leaf, and a real branch inside the suffix is not a
   prefix, so a choice the user made is never read as a crash.
 
+- **Permanent failures stop retrying.** TLS certificate errors, `ENOSPC`,
+  `EROFS`, `EACCES`, and unsupported-protocol errors take the first-attempt
+  terminal path instead of climbing the 10-attempt, 30-second-max ladder.
+  Unknown status-less errors, `ECONNRESET`, `503`, and the `529` cap keep the
+  retries they had.
+
 - **Malformed tool arguments fail before validation.** A tool call whose
   arguments are not JSON is carried as a dedicated `MalformedToolArguments`
   value and answered before schema validation, `validateInput`, hooks, and

@@ -109,6 +109,47 @@ function isNetworkError(error: unknown): boolean {
 	return false;
 }
 
+/**
+ * Failures that a later attempt is guaranteed to reproduce: a certificate the
+ * machine will not trust, a disk with no room, a write the filesystem refuses,
+ * a protocol the local stack does not carry. They arrive status-less, so
+ * without this they take the whole ladder — two minutes of silence spent
+ * retrying a condition that was decided before the first attempt.
+ *
+ * The set is deliberately closed. A code that is not named here keeps the
+ * ladder it always had, so an unknown transient code never retries less.
+ */
+const PERMANENT_FAILURE_CODES = new Set([
+	"DEPTH_ZERO_SELF_SIGNED_CERT",
+	"SELF_SIGNED_CERT_IN_CHAIN",
+	"CERT_HAS_EXPIRED",
+	"UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+	"ERR_TLS_CERT_ALTNAME_INVALID",
+	"ENOSPC",
+	"EACCES",
+	"EROFS",
+	"EPROTONOSUPPORT",
+	"ENOTSUP",
+]);
+
+/** The `code` off an error or its `cause`: fetch nests the system error there. */
+function failureCodeOf(error: unknown): string | null {
+	if (error === null || typeof error !== "object") return null;
+	const code = (error as { code?: unknown }).code;
+	if (typeof code === "string") return code;
+	const cause = (error as { cause?: unknown }).cause;
+	if (cause !== null && typeof cause === "object") {
+		const causeCode = (cause as { code?: unknown }).code;
+		if (typeof causeCode === "string") return causeCode;
+	}
+	return null;
+}
+
+function isPermanentFailure(error: unknown): boolean {
+	const code = failureCodeOf(error);
+	return code !== null && PERMANENT_FAILURE_CODES.has(code);
+}
+
 /** One header off an error, whichever container the SDK put it in. */
 function headerValue(headers: unknown, name: string): string | null {
 	if (!headers || typeof headers !== "object") return null;
@@ -239,7 +280,12 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				const status = statusCodeOf(error);
 				const overloaded = status === 529;
 				const overflow = isContextOverflowError(error);
-				const retryable = isNetworkError(error) || (status !== null && isRetryableStatus(status)) || status === null; // unknown errors before first byte: give one more shot below
+				// A permanent fault is terminal on the first attempt but keeps the
+				// unlabelled shape of any other refusal: another model or provider
+				// may not share the closed handshake or the full disk.
+				const retryable =
+					!isPermanentFailure(error) &&
+					(isNetworkError(error) || (status !== null && isRetryableStatus(status)) || status === null); // unknown errors before first byte: give one more shot below
 
 				const attemptCap = overloaded ? Math.min(overloadedMaxAttempts, maxAttempts) : maxAttempts;
 				const attemptsUsed = overloaded ? overloadedAttempts + 1 : attempt;
