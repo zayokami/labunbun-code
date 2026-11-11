@@ -762,6 +762,80 @@ describeWindows("a confined process", () => {
 		}
 	});
 
+	test("a timeout ends the grandchildren the command left running", async () => {
+		// The shape the timeout kill exists for: the command starts a detached
+		// grandchild that outlives it, and killing only the direct child leaves
+		// that grandchild writing — holding a file, a port, or the inherited
+		// pipes. The heartbeat is the witness: after the run reports failure it
+		// must stop growing, and the recorded pid must be gone.
+		const workspace = `${process.env.LOCALAPPDATA}\\Temp\\ac-tree-${process.pid}`;
+		execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
+		execSync(`cmd /c mkdir "${workspace}"`, { stdio: "ignore" });
+		const pidFile = join(workspace, "grandchild.pid");
+		const heartbeat = join(workspace, "heartbeat.txt");
+		writeFileSync(
+			join(workspace, "grandchild.ps1"),
+			[
+				'$PID | Set-Content -Path (Join-Path $PSScriptRoot "grandchild.pid") -Encoding ascii',
+				'$beat = Join-Path $PSScriptRoot "heartbeat.txt"',
+				"while ($true) {",
+				'  Add-Content -Path $beat -Value "beat"',
+				"  Start-Sleep -Milliseconds 50",
+				"}",
+			].join("\r\n"),
+		);
+		// The parent waits for the pid before spinning, so the deadline cannot
+		// land before the grandchild existed. Its spin is what keeps it inside
+		// the container's wait until the timeout.
+		writeFileSync(
+			join(workspace, "parent.cmd"),
+			[
+				"@echo off",
+				'start "" /b "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0grandchild.ps1"',
+				":wait",
+				'if not exist "%~dp0grandchild.pid" goto wait',
+				":spin",
+				"goto spin",
+			].join("\r\n"),
+		);
+		const grant = acquireWorkspaceGrant(workspace);
+		expect(grant.error).toBeUndefined();
+		const profile = grant.profile as AppContainerProfile;
+		try {
+			// The budget is not the assertion, but it must outlast the
+			// in-container PowerShell's cold start: the grandchild records its
+			// pid before the parent spins, and a deadline that fired first would
+			// leave no pid to check and make the row vacuous.
+			// `call` rather than the batch path alone: a batch handed to `cmd /c`
+			// as its direct target is refused inside the container with "Access
+			// is denied", while the same file through `call` runs (measured on
+			// this machine) — and this row is about the kill, not about cmd's
+			// command-line resolution.
+			const timedOut = runConfined(
+				profile,
+				`"C:\\Windows\\System32\\cmd.exe" /d /s /c "call "${join(workspace, "parent.cmd")}""`,
+				{ cwd: workspace, timeoutMs: 2000 },
+			);
+			expect(timedOut.error).toContain("did not exit within 2000ms");
+			expect(timedOut.killed).toBe(true);
+
+			const grandchildPid = Number(readFileSync(pidFile, "utf8").trim());
+			expect(Number.isInteger(grandchildPid)).toBe(true);
+			// A beat every 50 ms: if the grandchild survived, the file grows
+			// within this window. One read only would pass on timing luck.
+			const beatsAtReturn = readFileSync(heartbeat).length;
+			await new Promise((resolve) => setTimeout(resolve, 600));
+			expect(readFileSync(heartbeat).length).toBe(beatsAtReturn);
+
+			const listing = execSync(`tasklist /FI "PID eq ${grandchildPid}" /NH`, { encoding: "utf8" });
+			expect(listing).not.toContain(String(grandchildPid));
+		} finally {
+			releaseWorkspaceGrant(workspace);
+			deleteAppContainerProfile(profile.name);
+			execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
+		}
+	}, 30_000);
+
 	test("the child actually runs as the container identity, not as this user", () => {
 		// The one confinement assertion that does not need a grant. A process
 		// in an AppContainer carries the LOW mandatory integrity label and a

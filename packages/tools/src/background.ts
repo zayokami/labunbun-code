@@ -13,6 +13,7 @@ import {
 	type ExecOperations,
 	type ShellResolution,
 } from "./operations.ts";
+import { killProcessTree } from "./process-tree.ts";
 import {
 	acquireWorkspaceGrant,
 	type ConfinedProcess,
@@ -206,19 +207,17 @@ export async function killPidTree(pid: number): Promise<boolean> {
 		// silent: the caller heard "attempted" and said "stopped" while the
 		// process kept running. Exit 0 is the confirmation; a non-zero exit —
 		// not found, access denied — is a kill that did not happen.
-		return new Promise<boolean>((resolve) => {
-			const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-			killer.on("error", () => {
+		return killProcessTree(pid, {
+			onMissing: () => {
 				// taskkill itself failed to spawn — fall back to the direct signal so
 				// the process doesn't linger while we've already reported it killed.
 				try {
 					process.kill(pid);
-					resolve(true);
+					return true;
 				} catch {
-					resolve(false);
+					return false;
 				}
-			});
-			killer.on("close", (code) => resolve(code === 0));
+			},
 		});
 	}
 	try {

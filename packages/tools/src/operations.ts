@@ -11,6 +11,7 @@ import { closeSync, mkdirSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import type { SandboxPolicy } from "@labunbun/agent";
 import { createStreamCapture, nextSpillPath } from "./output-capture.ts";
+import { killProcessTree } from "./process-tree.ts";
 import {
 	acquireWorkspaceGrant,
 	canonicalPathForChild,
@@ -1066,11 +1067,12 @@ export class ChildProcessExecOperations implements ExecOperations {
 
 			const killTree = () => {
 				if (process.platform === "win32" && child.pid) {
-					// An unhandled `error` event on a ChildProcess throws, and a
-					// taskkill that never starts (not on PATH, spawn failure)
-					// must not take the whole call down with it — the child, not
-					// the killer, is what this function is about.
-					spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true }).on("error", () => {});
+					// Fire and forget, and a taskkill that never starts (not on
+					// PATH, spawn failure) must not take the whole call down with
+					// it — the child, not the killer, is what this function is
+					// about. The helper registers the `error` handler, so the
+					// event cannot escape as an uncaught throw.
+					void killProcessTree(child.pid);
 				} else {
 					// `SIGTERM` alone reaches the shell, and a shell blocked in
 					// `wait` can take the signal and leave the command running —

@@ -5,6 +5,7 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { guardWritablePath } from "./containment.ts";
 import type { Operations } from "./operations.ts";
+import { isMissingPathError, isPermissionError } from "./path-errors.ts";
 import type { ReadFileState, ReadFileStateEntry } from "./read-file-state.ts";
 import { decideWrite } from "./sandbox/simulated.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
@@ -85,7 +86,9 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 				// the two in that it is handed no read-only roots, so `decideWrite`
 				// here has even less to decide.
 				path = guardWritablePath(input.file_path, cwd, "Edit");
-				const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox });
+				// The guard above already refuses `.git` at any depth, so the
+				// scan's nested findings cannot change this tool's decision.
+				const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox, deriveProtectedPaths: false });
 				const decision = decideWrite(policy, path, cwd);
 				if (!decision.allowed) throw new Error(`Edit: ${decision.reason}`);
 			} catch (error) {
@@ -96,6 +99,23 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 			// Long-form design notes: docs/dev/tools.md
 			const seen = readState.getState(path);
 			if (!seen) {
+				// Cold path only. A target that is missing or is a directory is a
+				// different mistake from "this file was not read", and naming it here
+				// saves the turn a model would spend reading a path that is not a file.
+				// An existing file keeps the read-gate sentence below. The errno is
+				// what distinguishes these: `probePath` collapses it into a message.
+				try {
+					if ((await ops.stat(path)).isDirectory) {
+						return errorResult(`Edit: Path is a directory: ${path}. Edit changes files; try a file path.`);
+					}
+				} catch (error) {
+					if (isMissingPathError(error)) {
+						return errorResult(`Edit: ${path} does not exist - use Write to create it.`);
+					}
+					if (isPermissionError(error)) {
+						return errorResult(`Edit: permission denied on ${path}. Check the path and its permissions.`);
+					}
+				}
 				return errorResult(
 					`Edit: ${path} was not read this session. Read it with Read (the whole file, no offset/limit) and try again — Edit will not edit a file whose current content it was never shown.`,
 				);

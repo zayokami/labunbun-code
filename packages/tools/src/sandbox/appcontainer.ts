@@ -8,6 +8,7 @@ import { dlopen, FFIType, type Pointer, ptr, toArrayBuffer } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+import { killProcessTreeSync } from "../process-tree.ts";
 
 /** `S-1-15-2-…`, 40 bytes on x64 — the shape the kernel checks per file access. */
 export interface AppContainerProfile {
@@ -1233,7 +1234,7 @@ function runConfinedWithSid(
 	if (lib === null) return ffFailure("kernel32 FFI is unavailable");
 	const spawned = spawnConfinedRaw(lib, sidAddr, commandLine, options, spawnRids);
 	if ("error" in spawned) return ffFailure(spawned.error);
-	const { pi, attrList, attrAddr, outRead, errRead } = spawned;
+	const { pi, attrList, attrAddr, outRead, errRead, pid } = spawned;
 	// Held until the delete at the end — see the spawn half's pin note.
 	void attrList;
 
@@ -1270,6 +1271,13 @@ function runConfinedWithSid(
 		if (waited === 0) break;
 		if (options.signal?.aborted) {
 			// An abort is the caller's deadline arriving early: kill and say so.
+			// The tree goes before the direct process — a grandchild the command
+			// spawned would otherwise outlive the report of its failure, still
+			// writing and holding files and ports — and the synchronous taskkill
+			// has to finish here, because this loop blocks the event a spawn
+			// would be reported on.
+			killProcessTreeSync(pid);
+			// The handle is the backstop behind the tree kill.
 			lib.symbols.TerminateProcess(pi[0], 1);
 			waitError = "the command was aborted before it exited";
 			break;
@@ -1277,7 +1285,10 @@ function runConfinedWithSid(
 		if (deadline !== null && Date.now() >= deadline) {
 			// Kill FIRST — a process that still lives still holds the write
 			// ends, and reading a pipe with a live writer blocks forever,
-			// which is a deadlock, not a slow read.
+			// which is a deadlock, not a slow read. The tree first, the direct
+			// handle second: the drain below explicitly allows for a grandchild
+			// still holding the pipes, and only a tree kill ends that one.
+			killProcessTreeSync(pid);
 			lib.symbols.TerminateProcess(pi[0], 1);
 			waitError = `the command did not exit within ${timeoutMs}ms`;
 			break;

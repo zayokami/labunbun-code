@@ -60,6 +60,8 @@ The writable roots each become a `write` entry with the skip mark (`packages/age
 
 The code used to cache the scan for the life of the process, and the cache was a hole of its own. A measurement showed it: a moved `.git` stayed listed at the old path (`packages/agent/src/sandbox-policy.ts:193`). The cache is gone. The only limit left is the reach of the scan (`packages/agent/src/sandbox-policy.ts:193`).
 
+The walk does not run for every caller. `WorkspacePolicyOptions.deriveProtectedPaths` defaults to true, and `workspacePolicy` runs the scan only under `workspace-write` (`packages/tools/src/sandbox/workspace-policy.ts:54`, `packages/tools/src/sandbox/workspace-policy.ts:65`). `read-only` and `danger-full-access` build an empty protected list, so the scan's answer is discarded there and skipping it changes no decision (`packages/agent/src/sandbox-policy.ts:126-152`). Write and Edit pass false (`packages/tools/src/write.ts:67`, `packages/tools/src/edit.ts:91`): `guardWritablePath` refuses `.git` at any depth before either tool builds a policy, so a nested path the scan could add cannot reach a write decision. Bash keeps the default. The flag is not a cache: the default path re-derives on every call (`packages/tools/src/sandbox/workspace-policy.ts:13`).
+
 The builder derives only `.git`. The builder deduplicates the list. An absent path is still derived, which is why bwrap needs the empty-directory recipe. The protection is stronger when the directory appears later (`packages/agent/src/sandbox-policy.ts:193`).
 
 `gitRoots` is the set of roots that asked for a `.git` derivation. The caller filters on kind. `WorkspacePolicyOptions` passes the temp and cache roots with kind `data` (`packages/agent/src/sandbox-policy.ts:193`).

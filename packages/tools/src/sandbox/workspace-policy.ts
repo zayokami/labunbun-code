@@ -44,6 +44,14 @@ export interface WorkspacePolicyOptions {
 	// Long-form design notes: docs/dev/sandbox.md
 	/** The network axis, read per call. Optional, because the read policy below is built without a session. */
 	network?: NetworkAxis;
+	/**
+	 * Whether to walk the workspace for nested `.git` directories. Defaults to
+	 * true. Write and Edit pass false: `guardWritablePath` refuses `.git` at any
+	 * depth before either tool consults the policy, so a path the scan finds can
+	 * never reach a write decision. Bash keeps the default and still re-derives
+	 * on every call — this flag is not a cache.
+	 */
+	deriveProtectedPaths?: boolean;
 }
 
 // Long-form design notes: docs/dev/sandbox.md
@@ -55,10 +63,14 @@ export function readableRootsPolicy(workspace: string, readOnlyRoots: string[]):
 // Long-form design notes: docs/dev/sandbox.md
 /** Build the policy the shell and the write tools consult. */
 export async function workspacePolicy(workspace: string, options: WorkspacePolicyOptions): Promise<SandboxPolicy> {
+	// The scan is only consulted for `workspace-write`: the other two modes
+	// return an empty protected list from `buildSandboxPolicy` and discard its
+	// answer, so walking the tree for them is cost with no decision behind it.
+	const derive = options.deriveProtectedPaths !== false && options.sandbox === "workspace-write";
 	return policyFor({
 		sandbox: options.sandbox,
 		workspace,
-		protectedPaths: await protectedPathsFor(workspace),
+		protectedPaths: derive ? await protectedPathsFor(workspace) : [],
 		readOnlyRoots: options.readOnlyRoots,
 		writableRoots: options.writableRoots,
 		network: options.network,

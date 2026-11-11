@@ -31,6 +31,27 @@ commands, and SHA-256 checksums.
   requests a compaction keeps verbatim. `LBB_TASK_SCALE=off` turns it off. See
   `docs/dev/task-scale.md`.
 
+- **The sandbox stops paying for scans that cannot change its answer.** Write
+  and Edit, and Bash outside workspace-write, no longer run the depth-4
+  protected-path walk whose result they discard — 76 ms for the walk and a
+  152 ms median per Bash call on Windows. `workspacePolicy` gains
+  `deriveProtectedPaths`; the write guard already refuses `.git` at any depth,
+  and the read-only and full-access policies discard the list anyway. Bash in
+  workspace-write still re-derives it on every call, so metadata created
+  mid-session is still protected.
+
+- **A timed-out confined command takes its process tree with it.** The Windows
+  tree kill is now one helper (`taskkill /T /F`, with each caller's own
+  fallback preserved), and the AppContainer runner calls it before
+  `TerminateProcess` on both abort and timeout. A grandchild no longer keeps
+  writing, locking files, or holding ports after the tool has reported failure.
+  The normal-exit path is untouched.
+
+- **Edit says what is actually wrong with its target.** A cold-path Edit on a
+  missing file answers "does not exist - use Write" instead of "was not read
+  this session"; a directory and a permission failure are named the same way.
+  A file that exists keeps the read gate it had.
+
 - **Claude Fable 5.2 and Claude Mythos 5.2 are in the catalog.** Both carry the
   1M-token window, 128K output, always-on adaptive thinking, and $8/$40 pricing
   with the 0.025x cache read. Their pages are the first to name all five effort

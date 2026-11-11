@@ -42,9 +42,11 @@ import {
 } from "@labunbun/agent";
 import { BackgroundShellManager } from "../src/background.ts";
 import { createBashTool } from "../src/bash.ts";
+import { createEditTool } from "../src/edit.ts";
 import { createAllTools } from "../src/index.ts";
 import { ChildProcessExecOperations, defaultOperations, type ExecResult, type Operations } from "../src/operations.ts";
 import { createReadTool } from "../src/read.ts";
+import { ReadFileState } from "../src/read-file-state.ts";
 import {
 	confinedCommandLine,
 	confinedProgramName,
@@ -510,6 +512,44 @@ describe("the policy refuses a write inside protected metadata", () => {
 		expect(built.protected.some((p) => p.includes("/sub/.git"))).toBe(true);
 		expect(decideWrite(built, join(cwd, "sub", ".git", "config"), cwd).allowed).toBe(false);
 		expect(decideWrite(built, join(cwd, "sub", "notes.md"), cwd).allowed).toBe(true);
+	});
+
+	test("Write and Edit skip the scan, and the guard still refuses a nested .git", async () => {
+		// The scan's nested findings cannot change either tool's answer: the guard
+		// in front of the policy refuses `.git` at any depth, so passing
+		// `deriveProtectedPaths: false` removes 152 ms of walk per call without
+		// removing a refusal. The flag is not a cache — the default call still
+		// finds the nested repository on every invocation.
+		const cwd = workspace();
+		mkdirSync(join(cwd, ".git"), { recursive: true });
+		mkdirSync(join(cwd, "sub", ".git"), { recursive: true });
+		const config = join(cwd, "sub", ".git", "config");
+		writeFileSync(config, "[core]\n");
+
+		const unscanned = await workspacePolicy(cwd, { sandbox: "workspace-write", deriveProtectedPaths: false });
+		expect(unscanned.protected.some((p) => p.endsWith("/.git"))).toBe(true);
+		expect(unscanned.protected.some((p) => p.includes("/sub/.git"))).toBe(false);
+
+		const scanned = await workspacePolicy(cwd, { sandbox: "workspace-write" });
+		expect(scanned.protected.some((p) => p.endsWith("/.git"))).toBe(true);
+		expect(scanned.protected.some((p) => p.includes("/sub/.git"))).toBe(true);
+
+		// The refusal still arrives, and it is the guard's: `decideWrite` never
+		// sees `sub/.git` in the policy these tools build.
+		const write = createWriteTool(cwd, defaultOperations());
+		const wrote = await write.call({ file_path: config, content: "[core]\n\tevil = 1\n" }, CTX("workspace-write"));
+		expect(wrote.isError).toBe(true);
+		expect((wrote.content[0] as { text: string }).text).toContain("version-control metadata");
+		expect(await Bun.file(config).text()).toBe("[core]\n");
+
+		const edit = createEditTool(cwd, defaultOperations(), new ReadFileState());
+		const edited = await edit.call(
+			{ file_path: config, old_string: "core", new_string: "evil" },
+			CTX("workspace-write"),
+		);
+		expect(edited.isError).toBe(true);
+		expect((edited.content[0] as { text: string }).text).toContain("version-control metadata");
+		expect(await Bun.file(config).text()).toBe("[core]\n");
 	});
 
 	/**

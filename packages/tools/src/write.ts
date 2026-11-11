@@ -61,7 +61,14 @@ export function createWriteTool(
 				// a case `decideWrite` also refuses would keep passing if this line
 				// were deleted.
 				path = guardWritablePath(input.file_path, cwd, "Write");
-				const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox, readOnlyRoots });
+				// The guard above already refuses `.git` at any depth, so the
+				// scan's nested findings cannot change this tool's decision. The
+				// derived `<workspace>/.git` still arrives from the builder.
+				const policy = await workspacePolicy(cwd, {
+					sandbox: ctx.sandbox,
+					readOnlyRoots,
+					deriveProtectedPaths: false,
+				});
 				const decision = decideWrite(policy, path, cwd);
 				if (!decision.allowed) throw new Error(`Write: ${decision.reason}`);
 			} catch (error) {

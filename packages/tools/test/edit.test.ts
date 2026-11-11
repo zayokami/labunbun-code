@@ -21,7 +21,7 @@
  *   rather than an error. That is pinned below, by name.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCanonical } from "../src/containment.ts";
@@ -113,6 +113,34 @@ describe("gate 1: the file must have been read this session", () => {
 		const result = await call(edit, { file_path: file, old_string: "const a = 1;", new_string: "const a = 2;" });
 		expect(result.isError).toBe(true);
 		expect(textOf(result)).toContain("was not read this session");
+	});
+
+	test("a path that does not exist is named as missing, not as unread", async () => {
+		// The cold path: there is no record because there is no file. Saying
+		// "read it first" sends the model to Read for a path that Read will also
+		// refuse, when the next move is Write.
+		const dir = tempDir();
+		const { edit } = readEditPair(dir);
+
+		const result = await call(edit, { file_path: join(dir, "nope.ts"), old_string: "a", new_string: "b" });
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("does not exist");
+		expect(textOf(result)).toContain("Write");
+		expect(textOf(result)).not.toContain("was not read this session");
+	});
+
+	test("a directory is named as a directory, not as unread", async () => {
+		const dir = tempDir();
+		const target = join(dir, "folder.ts");
+		mkdirSync(target);
+		const { edit } = readEditPair(dir);
+
+		const result = await call(edit, { file_path: target, old_string: "a", new_string: "b" });
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("Path is a directory");
+		expect(textOf(result)).not.toContain("was not read this session");
 	});
 
 	test("a ranged read is not consent to rewrite the whole file", async () => {
