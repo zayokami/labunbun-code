@@ -1,7 +1,7 @@
 // Long-form design notes: docs/dev/ai-layer.md
 /** Watching a prefix across requests, so a rewind cannot happen quietly. */
 
-import { type CacheNotice, hash64, prefixIdentity } from "./cache.ts";
+import { CACHE_TTL_MS, type CacheNotice, hash64, prefixIdentity } from "./cache.ts";
 import type { AgentMessage, Context, Model, StreamFn, StreamOptions } from "./types.ts";
 
 /**
@@ -165,6 +165,65 @@ export function firstDivergence(prev: readonly string[], next: readonly string[]
 
 function familyKeyOf(model: Model, context: Context): string {
 	return hash64(prefixIdentity(model, context));
+}
+
+/** One family's prompt-cache standing, from the records the tracker kept. */
+export interface CacheFamilyState {
+	/** When the family's newest request went out. */
+	at: number;
+	/** The entry's lifetime, in milliseconds, as the provider last reported it. */
+	ttlMs: number;
+	/** When that entry expires. */
+	expiresAt: number;
+	/** Whether `now` is still inside the lifetime. */
+	warm: boolean;
+}
+
+/**
+ * What is known about the prompt cache for one request's prefix, as of `now`.
+ *
+ * The family is the one this exact model-and-prefix shape belongs to — the same
+ * key the tracker files requests under — not the newest record overall: a
+ * subagent keeps its own family, and a summarizer writing with a different model
+ * keeps a third. A caller asking "when did *this* conversation's cache last get
+ * refreshed" has to mean this conversation.
+ *
+ * The lifetime comes from the newest record in the family that reported a
+ * write bucket, because that is the provider saying which tier it actually
+ * stored; a full cache read reports no write, and neither does a request that
+ * predates the field. Only when no record says anything does `fallbackTtlMs`
+ * apply, and `undefined` there means the caller has no number to give — which
+ * this function answers with `undefined` rather than an invented expiry.
+ */
+export function cacheFamilyState(
+	records: readonly CacheRequestRecord[],
+	model: Model,
+	context: Context,
+	now: number,
+	fallbackTtlMs?: number,
+): CacheFamilyState | undefined {
+	const key = familyKeyOf(model, context);
+	let latest: CacheRequestRecord | undefined;
+	// Kept apart from the fallback so a reported bucket outranks it: initialising
+	// the search with the fallback would make the provider's own answer
+	// unreachable whenever the caller had a number to offer.
+	let reportedTtlMs: number | undefined;
+	for (let i = records.length - 1; i >= 0; i--) {
+		const record = records[i];
+		if (record?.family !== key) continue;
+		latest ??= record;
+		const written = record.cacheWriteTtl;
+		if (reportedTtlMs === undefined && written) {
+			if (written["1h"] > 0) reportedTtlMs = CACHE_TTL_MS["1h"];
+			else if (written["5m"] > 0) reportedTtlMs = CACHE_TTL_MS["5m"];
+		}
+		if (latest !== undefined && reportedTtlMs !== undefined) break;
+	}
+	if (latest === undefined) return undefined;
+	const ttlMs = reportedTtlMs ?? fallbackTtlMs;
+	if (ttlMs === undefined) return undefined;
+	const expiresAt = latest.at + ttlMs;
+	return { at: latest.at, ttlMs, expiresAt, warm: now < expiresAt };
 }
 
 interface FamilyState {

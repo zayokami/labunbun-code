@@ -3,6 +3,7 @@ export const AI_PACKAGE_VERSION = "0.1.0.4";
 // Prompt caching
 export {
 	anthropicMinPrefixTokens,
+	CACHE_TTL_MS,
 	type CacheCapability,
 	type CacheMode,
 	type CacheNotice,
@@ -15,6 +16,7 @@ export {
 	cacheHitRate,
 	cacheTotals,
 	DEFAULT_CACHE_POLICY,
+	effectiveCacheTtl,
 	estimatePrefixTokens,
 	hash64,
 	type PrefixTiers,
@@ -31,9 +33,11 @@ export {
 } from "./cache.ts";
 export {
 	type CacheDivergence,
+	type CacheFamilyState,
 	type CacheRequestRecord,
 	type CacheTracker,
 	type CacheTrackerOptions,
+	cacheFamilyState,
 	contextFingerprints,
 	type DivergenceScope,
 	firstDivergence,

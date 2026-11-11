@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { CacheNotice } from "../src/cache.ts";
-import { contextFingerprints, firstDivergence, withCacheTracker } from "../src/cache-tracker.ts";
+import { CACHE_TTL_MS, type CacheNotice } from "../src/cache.ts";
+import { cacheFamilyState, contextFingerprints, firstDivergence, withCacheTracker } from "../src/cache-tracker.ts";
 import type { AssistantMessageEvent, Context, Model, StreamFn, Usage } from "../src/types.ts";
 import { assistantMessage, userMessage } from "../src/types.ts";
 
@@ -272,5 +272,71 @@ describe("withCacheTracker", () => {
 		notices.push({ kind: "ttl-downgrade", from: "1h", to: "5m", reason: "1h is not available" });
 		await drain(streamFn(model(), ctx()));
 		expect(tracker.notices()).toEqual([{ kind: "ttl-downgrade", from: "1h", to: "5m", reason: "1h is not available" }]);
+	});
+});
+
+describe("cacheFamilyState", () => {
+	test("the lifetime the provider reported outranks the caller's fallback", async () => {
+		// The provider's write bucket is the tier it actually stored; the policy is
+		// only what the app asked for. A degraded tier has to shorten the expiry the
+		// caller plans around.
+		const { streamFn, tracker } = withCacheTracker(stubStream({ cacheWriteTtl: { "5m": 0, "1h": 900 } }));
+		await drain(streamFn(model(), ctx()));
+		const at = tracker.records()[0]?.at ?? 0;
+
+		const state = cacheFamilyState(tracker.records(), model(), ctx(), at + 1_000, CACHE_TTL_MS["5m"]);
+
+		expect(state?.ttlMs).toBe(CACHE_TTL_MS["1h"]);
+		expect(state?.expiresAt).toBe(at + CACHE_TTL_MS["1h"]);
+		expect(state?.warm).toBe(true);
+	});
+
+	test("a request that reported no write leaves the caller's fallback in force", async () => {
+		const { streamFn, tracker } = withCacheTracker(stubStream({ cacheRead: 5_000 }));
+		await drain(streamFn(model(), ctx()));
+		const at = tracker.records()[0]?.at ?? 0;
+
+		const state = cacheFamilyState(tracker.records(), model(), ctx(), at + 10, CACHE_TTL_MS["5m"]);
+
+		expect(state?.ttlMs).toBe(CACHE_TTL_MS["5m"]);
+		expect(state?.expiresAt).toBe(at + CACHE_TTL_MS["5m"]);
+	});
+
+	test("with no lifetime to offer, there is no state to plan around", async () => {
+		const { streamFn, tracker } = withCacheTracker(stubStream({ cacheRead: 5_000 }));
+		await drain(streamFn(model(), ctx()));
+		expect(cacheFamilyState(tracker.records(), model(), ctx(), 0)).toBeUndefined();
+	});
+
+	test("the family asked for is the family answered, not the newest record", async () => {
+		// A subagent's request keeps its own family. Reading the newest record to
+		// decide when the main conversation's cache expires would arm the idle
+		// summary against a prefix the main loop never sent.
+		const main = ctx([userMessage("hello")], "main");
+		const subagent = ctx([userMessage("hello")], "subagent");
+		const { streamFn, tracker } = withCacheTracker(stubStream({}));
+		await drain(streamFn(model(), main));
+		const mainAt = tracker.records()[0]?.at ?? 0;
+		await drain(streamFn(model({ id: "claude-haiku-5-5" }), subagent));
+
+		const state = cacheFamilyState(tracker.records(), model(), main, mainAt + 1, CACHE_TTL_MS["1h"]);
+
+		expect(state?.at).toBe(mainAt);
+		// The other family has no record of its own, so asking about it now would
+		// find nothing rather than borrow the main one's entry.
+		expect(
+			cacheFamilyState(tracker.records(), model(), ctx([userMessage("other")]), 0, CACHE_TTL_MS["1h"]),
+		).toBeUndefined();
+	});
+
+	test("an entry past its lifetime is reported cold rather than missing", async () => {
+		const { streamFn, tracker } = withCacheTracker(stubStream({ cacheWriteTtl: { "5m": 100, "1h": 0 } }));
+		await drain(streamFn(model(), ctx()));
+		const at = tracker.records()[0]?.at ?? 0;
+
+		const state = cacheFamilyState(tracker.records(), model(), ctx(), at + CACHE_TTL_MS["5m"] + 1, CACHE_TTL_MS["1h"]);
+
+		expect(state?.warm).toBe(false);
+		expect(state?.expiresAt).toBe(at + CACHE_TTL_MS["5m"]);
 	});
 });

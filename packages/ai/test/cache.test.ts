@@ -8,6 +8,7 @@ import {
 	cacheHitRate,
 	cacheTotals,
 	DEFAULT_CACHE_POLICY,
+	effectiveCacheTtl,
 	estimatePrefixTokens,
 	prefixTierTokens,
 	promptCacheKeyFor,
@@ -340,6 +341,34 @@ describe("cache policy", () => {
 		// Turning breakpoints off says nothing about the TTL, and the TTL says
 		// nothing about breakpoints: they are separate knobs.
 		expect(resolveCacheTtl({ explicitBreakpoints: false })).toBe("1h");
+	});
+
+	test("the effective TTL follows a refusal the provider announced", () => {
+		// The requested TTL and the one in force diverge exactly when a provider
+		// refused the long tier. A caller planning around an expiry has to use the
+		// second, or it would fire an hour after the entry was already gone.
+		const anthropic = cacheCapability(model());
+		expect(effectiveCacheTtl(undefined, anthropic)).toBe("1h");
+		expect(effectiveCacheTtl({ ttl: "5m" }, anthropic)).toBe("5m");
+		expect(
+			effectiveCacheTtl({ ttl: "1h" }, anthropic, [{ kind: "ttl-downgrade", from: "1h", to: "5m", reason: "no" }]),
+		).toBe("5m");
+		// The last refusal is the one in force: the adapter walks its ladder once
+		// and never back.
+		expect(
+			effectiveCacheTtl({ ttl: "1h" }, anthropic, [
+				{ kind: "ttl-downgrade", from: "1h", to: "5m", reason: "no" },
+				{ kind: "ttl-downgrade", from: "5m", to: undefined, reason: "no field" },
+			]),
+		).toBe("5m");
+	});
+
+	test("a provider whose lifetime is not selectable offers no number to plan around", () => {
+		// An automatic cache keeps entries for a period it does not publish, and
+		// "assume an hour" here would spend a full-price request to save nothing.
+		expect(
+			effectiveCacheTtl(undefined, cacheCapability(model({ provider: "deepseek", api: "openai-completions" }))),
+		).toBe(undefined);
 	});
 });
 

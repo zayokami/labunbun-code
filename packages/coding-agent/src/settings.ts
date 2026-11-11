@@ -237,6 +237,19 @@ export const SettingsSchema = z.object({
 			 * should find all of them, the off switch included, in one place.
 			 */
 			enabled: z.boolean().optional(),
+			/**
+			 * Let a quiet session summarize before its prompt cache expires.
+			 *
+			 * On by default. The pass is the automatic side's fourth lever and
+			 * obeys `enabled` with the rest: a session that has gone quiet with a
+			 * large transcript would otherwise send the whole prefix at full price
+			 * when the user returns, and the window in which it can be replaced at
+			 * cache-read prices closes when the provider's entry does. It costs a
+			 * summary the user did not ask for, which is why it has its own switch
+			 * — the catch is that the saving is largest exactly when nobody is
+			 * watching.
+			 */
+			idleSummary: z.boolean().optional(),
 			/** The model that writes summaries; the session's own model when unset. */
 			model: z.string().optional(),
 			/** Tokens kept free below the window when the trigger line is computed. */

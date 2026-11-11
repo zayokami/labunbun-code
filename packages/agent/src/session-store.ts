@@ -60,8 +60,11 @@ export type SessionEntry =
 	| { id: string; parentId: string; type: "custom"; timestamp: number; kind: string; data: unknown };
 
 // Long-form design notes: docs/dev/session-store.md
-/** What set a compaction off: the threshold, `/compact`, or a size refusal from the provider. */
-export type CompactionTrigger = "auto" | "manual" | "overflow";
+/**
+ * What set a compaction off: the threshold, `/compact`, a size refusal from the
+ * provider, or a session that went quiet with its prompt cache still readable.
+ */
+export type CompactionTrigger = "auto" | "manual" | "overflow" | "idle";
 
 /** What a compaction leaves behind. */
 export interface CompactionRecord {

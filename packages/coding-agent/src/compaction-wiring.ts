@@ -86,7 +86,9 @@ export function compactionPhaseText(phase: CompactionPhase): string {
 		case "failed":
 			return `Compaction failed (${phase.trigger}): the summary could not be written. Continuing with the context as it is.`;
 		case "done":
-			return `Context compacted (${phase.trigger}): ${formatTokens(phase.preTokens)} → ${formatTokens(phase.postTokens)} tokens.`;
+			return phase.trigger === "idle"
+				? `Context compacted while idle: ${formatTokens(phase.preTokens)} → ${formatTokens(phase.postTokens)} tokens.`
+				: `Context compacted (${phase.trigger}): ${formatTokens(phase.preTokens)} → ${formatTokens(phase.postTokens)} tokens.`;
 	}
 }
 
@@ -221,6 +223,13 @@ export interface CompactionTuning {
 	 * flips this field and asks for a rebuild rather than waiting for a restart.
 	 */
 	enabled?: boolean;
+	/**
+	 * `settings.compaction.idleSummary`. Whether a quiet session may buy a
+	 * summary while its prompt cache is still readable. Only a host with a clock
+	 * and a cache tracker acts on it — the REPL runs the idle pass; a `-p` run
+	 * and a subagent have no one to come back to.
+	 */
+	idleSummary?: boolean;
 }
 
 /**
@@ -364,6 +373,16 @@ export interface CompactionWiring {
 		trigger: CompactionTrigger,
 		customInstructions?: string,
 	) => Promise<{ blocked: boolean; reason?: string }>;
+	/**
+	 * Record that a request just went out in the main loop's place — the idle
+	 * summary's own — so the idle clock measures quiet from it.
+	 *
+	 * `checkCompaction` advances that clock on the turns it sees. The idle pass
+	 * runs outside a turn, and without this the next turn would measure the
+	 * whole quiet stretch as one gap and hand the free trim a prefix the summary
+	 * had just warmed — paying to rewrite what was just paid to cache.
+	 */
+	noteRequest(at: number): void;
 }
 
 const DAY_MS = 86_400_000;
@@ -439,6 +458,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				reserveTokens: options.tuning?.reserveTokens,
 				thresholdPercent: options.tuning?.thresholdPercent,
 				enabled: options.tuning?.enabled,
+				idleSummary: options.tuning?.idleSummary,
 				idleTrimGapMs: idleTrimGapMsFor(forModel, options.cachePolicy),
 			},
 			{
@@ -558,5 +578,8 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 		},
 		runPreCompact: async (trigger, customInstructions) =>
 			(await options.preCompact?.(trigger, customInstructions)) ?? { blocked: false },
+		noteRequest: (at) => {
+			lastCheckAt = at;
+		},
 	};
 }

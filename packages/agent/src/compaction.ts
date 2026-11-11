@@ -78,6 +78,19 @@ export interface CompactionConfig {
 	 * so a session that asked for a longer retention passes its own gap here.
 	 */
 	idleTrimGapMs?: number;
+	/**
+	 * Whether a quiet session may buy a summary while its prompt cache is still
+	 * readable.
+	 *
+	 * Undefined means on. The pass this permits is the mirror image of the idle
+	 * trim: instead of rewriting a prefix whose cache is already cold, it pays
+	 * cache-read prices to replace a large prefix with a small one *before* the
+	 * entry expires, so the next request — whenever it comes — starts from the
+	 * small prefix instead of paying full price for the large one. The trigger
+	 * itself belongs to a host that owns a clock and a cache record; this switch
+	 * only says whether the automatic side may spend that money.
+	 */
+	idleSummary?: boolean;
 }
 
 export const SUMMARY_PROMPT = `You are summarizing a coding-agent conversation so work can continue in a fresh context. Produce a structured summary with EXACTLY these sections:
@@ -203,6 +216,17 @@ export const IDLE_TRIM_KEEP_RESULTS = 5;
  * trade detail for nothing.
  */
 export const IDLE_TRIM_MIN_SAVINGS_TOKENS = 20_000;
+/**
+ * The context size at which an idle summary pays for itself even below the
+ * compaction threshold.
+ *
+ * The floor is `min(threshold, this)`: on an ordinary window the threshold is
+ * already the line worth acting on, while a very large window can sit at several
+ * hundred thousand tokens — expensive on every cold request — long before its
+ * threshold. Below both, the summary's own cache-read of the prefix is a real
+ * share of what it would save, and the pass is not worth the wait.
+ */
+export const IDLE_SUMMARY_MIN_TOKENS = 200_000;
 /** Below the point where the reserves fit, compact at this share of the window. */
 const MIN_THRESHOLD_FRACTION = 0.6;
 /** Growth since the last compaction before another one is worth trying. */
@@ -239,6 +263,18 @@ export function compactionThreshold(config: CompactionConfig): number {
 
 export function hardContextLimit(config: CompactionConfig): number {
 	return config.contextWindow - HARD_LIMIT_RESERVE;
+}
+
+/**
+ * The context size below which an idle summary is not worth buying.
+ *
+ * A large window's threshold can sit near its own ceiling, while the prefix is
+ * already expensive to send cold long before that. The smaller of the two lines
+ * is the point where either rule says this conversation is big enough that
+ * replacing it from cache-read prices is a saving rather than a rounding error.
+ */
+export function idleSummaryFloor(config: CompactionConfig): number {
+	return Math.min(compactionThreshold(config), IDLE_SUMMARY_MIN_TOKENS);
 }
 
 /**
@@ -892,6 +928,36 @@ export class CompactionManager {
 	}
 
 	/**
+	 * Whether this context is worth an early summary while its cache is warm.
+	 *
+	 * The caller owns the clock and the cache reading — this owns the size
+	 * arithmetic and the switches, so the answer cannot disagree with what a
+	 * threshold pass would do. `false` for the same three reasons automatic
+	 * compaction is off: the setting, the breaker, or a context too small to be
+	 * worth the pass. The anti-thrash floor is shared with `#pass`: a summary
+	 * that has just run on nearly this size had nothing new to work with, and
+	 * paying for the same pass again is not made better by doing it early.
+	 *
+	 * A large context past the hard limit is deliberately eligible: a request
+	 * that could not be sent is exactly the one an early summary can still save,
+	 * and the caller has already established that the session is idle.
+	 */
+	idleSummaryWorthwhile(context: Context): boolean {
+		if (this.#config.enabled === false || this.#config.idleSummary === false) return false;
+		if (this.isTripped) return false;
+		const tokens = estimateContextUsage(context);
+		if (tokens < idleSummaryFloor(this.#config)) return false;
+		if (
+			this.#lastPostTokens !== null &&
+			tokens < hardContextLimit(this.#config) &&
+			tokens - this.#lastPostTokens < this.#thrashGrowth()
+		) {
+			return false;
+		}
+		return true;
+	}
+
+	/**
 	 * One decision about one context: nothing, a cheaper context, or a summary.
 	 *
 	 * The kind is part of the answer rather than narrowed away, because every
@@ -1165,8 +1231,13 @@ export class CompactionManager {
 			// given no room to hold. Manual is the user's own call and clears the run
 			// — the same reason it is the way out of the failure breaker — while one
 			// that follows its predecessor after a real gap resets it, because a
-			// session that went a while between compactions is not stuck.
-			if (trigger === "manual") {
+			// session that went a while between compactions is not stuck. An idle
+			// pass is treated the same way for the same reason: it was bought to
+			// make the next request cheap, not to answer a threshold the previous
+			// summary failed to clear, so counting it as a refill would let a
+			// session that merely sat quiet long enough switch its own automatic
+			// compaction off.
+			if (trigger === "manual" || trigger === "idle") {
 				this.#rapidRefills = 0;
 			} else if (this.#checksSinceCompact <= RAPID_REFILL_CHECKS) {
 				this.#rapidRefills++;

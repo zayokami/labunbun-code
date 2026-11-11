@@ -154,6 +154,12 @@ export function cacheCapability(model: Model): CacheCapability {
 /** How long a written cache entry should live, where the provider lets us choose. */
 export type CacheTtl = "5m" | "1h";
 
+/** Those tiers in milliseconds, for the callers that reason about expiry. */
+export const CACHE_TTL_MS: Readonly<Record<CacheTtl, number>> = {
+	"5m": 300_000,
+	"1h": 3_600_000,
+};
+
 // Long-form design notes: docs/dev/ai-layer.md
 /** What this app asks providers to do about their cache. */
 export interface CachePolicy {
@@ -217,6 +223,39 @@ export function resolvePromptCacheRetention(
 ): PromptCacheRetention | undefined {
 	if (!capability.promptCacheKey) return undefined;
 	return policy?.promptCacheRetention;
+}
+
+/**
+ * The TTL actually in force, after any downgrade the provider announced.
+ *
+ * `resolveCacheTtl` is what the app asked for; this is what it got. The two
+ * differ exactly when a provider refused the long tier, and a caller planning
+ * around an entry's expiry has to use the second — an hour of margin computed
+ * from a TTL the provider rejected would fire an hour after the entry was gone.
+ *
+ * `undefined` means the caller cannot know: a provider whose cache is automatic
+ * and whose entry lifetime it does not report leaves nothing to plan around.
+ * That is deliberately not "assume an hour" — the whole point of a caller asking
+ * is to act just before an expiry it can name, and a guess there spends money
+ * at full price to save nothing.
+ *
+ * A refusal that fell all the way to "send no TTL field" is the provider's own
+ * short tier, which on the one wire that offers this choice is five minutes.
+ */
+export function effectiveCacheTtl(
+	policy: CachePolicy | undefined,
+	capability: CacheCapability,
+	notices: readonly CacheNotice[] = [],
+): CacheTtl | undefined {
+	if (capability.ttl.length === 0) return undefined;
+	// The newest refusal is what is in force: the adapter advances its ladder
+	// once for the process and never walks it back.
+	for (let i = notices.length - 1; i >= 0; i--) {
+		const notice = notices[i];
+		if (notice?.kind !== "ttl-downgrade") continue;
+		return notice.to ?? "5m";
+	}
+	return resolveCacheTtl(policy);
 }
 
 // ---------------------------------------------------------------------------

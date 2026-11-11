@@ -77,6 +77,22 @@ commands, and SHA-256 checksums.
   live transcript on its old leaf, and a real branch inside the suffix is not a
   prefix, so a choice the user made is never read as a crash.
 
+- **A quiet session summarizes before its cache expires, not after.** The REPL
+  now watches the main conversation's prompt cache and, once its entry is close
+  to expiring, runs the summary while the prefix is still a cache read. The
+  trigger is the provider's own lifetime — including a downgrade it announced —
+  with a lead of up to two minutes; a provider whose cache is automatic and
+  whose lifetime is not reported gets no pass at all, because there is no
+  expiry to fire ahead of. The floor is the compaction threshold capped at
+  200,000 tokens, the summarizer must share the session model's prefix identity
+  or the request would pay full price, and a turn always wins: the pass never
+  starts beside one, aborts when one starts, and does not adopt a summary that
+  finished after a new message arrived. Its `done` line reads "Context
+  compacted while idle", its failures stay silent (nobody was waiting), and it
+  clears rather than counts the rapid-refill run. `compaction.idleSummary:
+  false` turns it off; `compaction.enabled: false` still turns off the whole
+  automatic side. See `docs/dev/compaction.md`.
+
 - **Permanent failures stop retrying.** TLS certificate errors, `ENOSPC`,
   `EROFS`, `EACCES`, and unsupported-protocol errors take the first-attempt
   terminal path instead of climbing the 10-attempt, 30-second-max ladder.

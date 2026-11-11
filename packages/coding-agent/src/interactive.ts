@@ -242,6 +242,7 @@ import {
 } from "./gemini-login.ts";
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
+import { createIdleSummary } from "./idle-summary.ts";
 import { createMcpToolRefreshHandler } from "./mcp-tool-refresh.ts";
 import {
 	appendMemoryNoteAt,
@@ -576,6 +577,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					reserveTokens: compactionSettings?.reserveTokens,
 					thresholdPercent: compactionSettings?.thresholdPercent,
 					enabled: compactionSettings?.enabled,
+					idleSummary: compactionSettings?.idleSummary,
 				}
 			: undefined;
 
@@ -1017,8 +1019,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// states before them are the row's job, since a line about a wait the
 			// row is already showing would outlive the wait. `/compact` is the
 			// exception — it prints its own summary of the same ending, and two
-			// lines for one compaction is the app talking over itself.
-			if ((phase.kind === "done" || phase.kind === "failed") && phase.trigger !== "manual") {
+			// lines for one compaction is the app talking over itself. An idle
+			// pass's failure is deliberately silent: no one was waiting, the
+			// breaker counted it, and a user returning to a line about a summary
+			// they never saw start would have no way to act on it.
+			if (phase.kind === "done" && phase.trigger !== "manual") {
+				pushInfo(handle, compactionPhaseText(phase));
+			}
+			if (phase.kind === "failed" && phase.trigger !== "manual" && phase.trigger !== "idle") {
 				pushInfo(handle, compactionPhaseText(phase));
 			}
 			// The receipt: what the pass can prove about itself, under the size line
@@ -1883,6 +1891,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * rebound separately by setSession.
 	 */
 	let detachSessionListeners: (() => void) | null = null;
+	/**
+	 * Stops an idle summary in flight, installed once the runner exists.
+	 *
+	 * Declared here because the listener below is attached before the runner is
+	 * built, and it must answer for whichever session is attached now — a hot
+	 * swap detaches and reattaches, the holder does not.
+	 */
+	let abortIdleSummary: (() => void) | null = null;
 	function attachSessionListeners(target: AgentSession): void {
 		// Edge-triggered state for the low-context warning, per attached session:
 		// after a hot swap the incoming conversation has its own size.
@@ -1901,7 +1917,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// The band's setTools rewrite, registered on the main session's own next
 			// turn — the latch explains why it cannot register where the change does.
 			toolChangeLatch.observe(event);
-			if (event.type === "agent_start") taskNudges.onAgentStart();
+			if (event.type === "agent_start") {
+				taskNudges.onAgentStart();
+				// A turn is starting, and the session is marked running before this
+				// event is emitted. An idle summary still in flight was reading the
+				// prefix this turn is about to extend, and adopting it after the new
+				// user message lands would drop that message. Stop it now: the
+				// manager discards an aborted pass before it records anything.
+				abortIdleSummary?.();
+			}
 			// The tool ledger: one `custom` entry per finished call — what ran,
 			// whether it worked, the file fingerprints Edit and Write took, the
 			// failing tests a failed test run reported, and the next step the
@@ -2826,6 +2850,52 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	watchPoll.unref();
 	publishWatch();
 
+	/**
+	 * The summary a quiet session buys before its prompt cache expires.
+	 *
+	 * The REPL is the only host that has this: a `-p` run has no "later" for the
+	 * saving to arrive in, and a subagent has neither a clock of its own nor a
+	 * session file to record the pass in. Everything the decision reads is passed
+	 * in — the tracker's records, the clock, the timer — because the conditions
+	 * it tests (a warm entry, a large prefix, nobody typing) take an hour to
+	 * happen naturally and a millisecond to state in a test.
+	 */
+	const idleSummary = createIdleSummary({
+		manager: compactionWiring.manager,
+		model: () => sessionRef?.model ?? model,
+		summarizer: () => compactionTuning?.summarizerModel ?? sessionRef?.model ?? model,
+		policy: () => settings.cache,
+		notices: () => cacheTracker.notices(),
+		records: () => cacheTracker.records(),
+		context: () => sessionRef?.currentContext(),
+		isRunning: () => sessionRef?.isRunning === true,
+		// The same ceiling the loop consults before each of its own requests.
+		// Spending it while the user is away, on a pass nobody asked for, would
+		// turn a budget into advice.
+		canSpend: () => {
+			const target = sessionRef?.model ?? model;
+			const seat = seatTable.get(modelRefKey(target));
+			if (!seat) return true;
+			return budgetVerdict(costTracker.sessionState.totalCostUSD, seat).action !== "blocked";
+		},
+		preCompact: () => compactionWiring.runPreCompact("idle"),
+		noteRequest: (at) => compactionWiring.noteRequest(at),
+		noteRewrite: (cause) => cacheTracker.note(cause),
+		apply: (compacted) => {
+			sessionRef?.applyCompaction(compacted);
+			if (sessionRef) refreshContextInfo(sessionRef);
+		},
+		report: (text) => pushInfo(handle, text),
+		now: () => Date.now(),
+		schedule: (tick, ms) => {
+			const timer = setInterval(tick, ms);
+			// A timer must not be the reason the process stays alive.
+			timer.unref();
+			return () => clearInterval(timer);
+		},
+	});
+	abortIdleSummary = () => idleSummary.abort();
+
 	// And the other half of that status row: when a shell finishes on its own,
 	// the session is told instead of being polled for it. `getSession` rather
 	// than the session itself because a `/resume` swaps it, and the setting is
@@ -2922,6 +2992,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// exactly as much: nothing reads the watch surface once the user has quit,
 	// so the same clear the shell poll gets is the same clear it needs.
 	clearInterval(watchPoll);
+	// The idle summary's timer lives by the same rule, and its pass — if one is
+	// still in flight — is an in-flight request nothing is waiting for.
+	abortIdleSummary = null;
+	idleSummary.stop();
 	// A band member mid-request is an in-flight request like any other, and
 	// nothing is waiting for its answer once the user has quit.
 	beetleSurface.shutdown();
