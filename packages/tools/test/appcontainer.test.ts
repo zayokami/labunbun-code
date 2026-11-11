@@ -927,6 +927,12 @@ describeWindows("a confined process", () => {
 		execSync(`cmd /c mkdir "${workspace}"`, { stdio: "ignore" });
 		const pidFile = join(workspace, "grandchild.pid");
 		const heartbeat = join(workspace, "heartbeat.txt");
+		// Progress markers for a run that never gets a pid: which step the batch
+		// reached is the difference between "the container cannot run the batch",
+		// "the batch cannot spawn PowerShell", and "PowerShell is still starting".
+		// Without one, a failed row says only that the deadline fired.
+		const startedFile = join(workspace, "parent.started");
+		const spawnedFile = join(workspace, "parent.spawned");
 		writeFileSync(
 			join(workspace, "grandchild.ps1"),
 			[
@@ -945,7 +951,9 @@ describeWindows("a confined process", () => {
 			join(workspace, "parent.cmd"),
 			[
 				"@echo off",
+				'echo started>"%~dp0parent.started"',
 				'start "" /b "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0grandchild.ps1"',
+				'echo %errorlevel%>"%~dp0parent.spawned"',
 				":wait",
 				'if not exist "%~dp0grandchild.pid" goto wait',
 				":spin",
@@ -961,15 +969,18 @@ describeWindows("a confined process", () => {
 			// pid before the parent spins, and a deadline that fired first would
 			// leave no pid to check and make the row vacuous. Two seconds held on
 			// a local Windows 11 machine, but not on GitHub's `windows-latest`
-			// runner, where the deadline fired before the pid file appeared (run
-			// 43003129675). Ten seconds leaves room for the slower cold start and
-			// still ends the row well inside the test's own 30-second cap.
+			// runner, where the deadline fired before the pid file appeared (runs
+			// 43003129675, 43008267282). Ten seconds was not enough there either,
+			// so this is fifteen, which still ends the row well inside the test's
+			// own 30-second cap. If it fails again, the markers say which step
+			// stalled; three red runs is the point where the next change has to
+			// be aimed by evidence rather than by another guess at the cold start.
 			// `call` rather than the batch path alone: a batch handed to `cmd /c`
 			// as its direct target is refused inside the container with "Access
 			// is denied", while the same file through `call` runs (measured on
 			// this machine) — and this row is about the kill, not about cmd's
 			// command-line resolution.
-			const budgetMs = 10_000;
+			const budgetMs = 15_000;
 			const timedOut = runConfined(
 				profile,
 				`"C:\\Windows\\System32\\cmd.exe" /d /s /c "call "${join(workspace, "parent.cmd")}""`,
@@ -983,11 +994,17 @@ describeWindows("a confined process", () => {
 				grandchildPid = Number(readFileSync(pidFile, "utf8").trim());
 			} catch (error) {
 				// A missing pid file means the deadline beat the cold start, not
-				// that the kill failed. Carry the run's own output into the
-				// failure, so the next reader does not have to reproduce it on CI.
+				// that the kill failed. Carry the run's own output and the batch's
+				// progress into the failure, so the next reader does not have to
+				// reproduce it on CI.
+				const progress = existsSync(spawnedFile)
+					? `parent.cmd started and its start line returned ${readFileSync(spawnedFile, "utf8").trim()}`
+					: existsSync(startedFile)
+						? "parent.cmd started but its start line never returned"
+						: "parent.cmd never ran inside the container";
 				throw new Error(
 					`the grandchild recorded no pid within ${budgetMs}ms (${(error as Error).message}); ` +
-						`stdout: ${JSON.stringify(timedOut.stdout)}; stderr: ${JSON.stringify(timedOut.stderr)}`,
+						`${progress}; stdout: ${JSON.stringify(timedOut.stdout)}; stderr: ${JSON.stringify(timedOut.stderr)}`,
 				);
 			}
 			expect(Number.isInteger(grandchildPid)).toBe(true);
