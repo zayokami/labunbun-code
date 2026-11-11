@@ -191,6 +191,11 @@ describe("the tools say why a path cannot be used", () => {
 		const result = await createGlobTool(dir, ops).call({ pattern: "**/*.ts", path: dir }, ctx());
 		const text = (result.content[0] as { text: string }).text;
 
-		expect(text).toBe("No files matched.");
+		// An empty answer from a filtered tree names what was filtered and where,
+		// so the next call can change something instead of repeating itself.
+		expect(text).toContain('No files matched "**/*.ts"');
+		expect(text).toContain(normalized(dir));
+		expect(text).toContain(".gitignore");
+		expect(text).toContain("Read or LS");
 	});
 });

@@ -33,8 +33,14 @@ export interface GrepDisplay {
 	safetyCapped: boolean;
 	/** Files the walk listed but this search could not open; they were not searched. */
 	skippedFiles?: number;
+	/** Files over the size cap; a large minified bundle is not a text search target. */
+	skippedLargeFiles?: number;
+	/** Files holding a NUL byte; their matches would be binary noise. */
+	skippedBinaryFiles?: number;
 	/** Directories the walk could not list; everything below them was not searched. */
 	skippedDirectories?: number;
+	/** The walk's file-count cap, when the tree held more files than it collected. */
+	walkCappedAt?: number;
 }
 
 // Long-form design notes: docs/dev/tools.md
@@ -127,6 +133,7 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 			// file is a statement about that file.
 			let files: string[];
 			let skippedDirectories = 0;
+			let walkCappedAt: number | undefined;
 			if (probe.stat.isFile) {
 				files = [root];
 			} else {
@@ -136,17 +143,28 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 					onUnreadableDirectory: () => {
 						skippedDirectories++;
 					},
+					// The walk stops at its own cap, and a search that never saw the
+					// rest of the tree must not answer as though it had. The cap is
+					// reported in the header, next to the other gaps.
+					onTruncated: (limit) => {
+						walkCappedAt = limit;
+					},
 				});
 			}
 
 			const matches: GrepMatch[] = [];
 			let skippedFiles = 0;
+			let skippedLargeFiles = 0;
+			let skippedBinaryFiles = 0;
 			let safetyCapped = false;
 			const deadline = Date.now() + REGEX_TIMEOUT_MS;
 			outer: for (const file of files) {
 				try {
 					const stat = await ops.stat(file);
-					if (stat.size > 1_000_000) continue; // skip huge files
+					if (stat.size > 1_000_000) {
+						skippedLargeFiles++;
+						continue;
+					}
 				} catch {
 					// Listed by the walk, gone or unreadable by the time it was opened.
 					// The result cannot claim the tree was searched; the count says so.
@@ -160,7 +178,10 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 					skippedFiles++;
 					continue; // unreadable
 				}
-				if (text.includes("\0")) continue; // skip binary
+				if (text.includes("\0")) {
+					skippedBinaryFiles++;
+					continue;
+				}
 				const shownPath = displayPath(root, file);
 				const fileLines = text.split("\n");
 				for (let i = 0; i < fileLines.length; i++) {
@@ -200,7 +221,10 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 				maxColumns: input.max_columns ?? DEFAULT_MAX_COLUMNS,
 				safetyCapped,
 				skippedFiles,
+				skippedLargeFiles,
+				skippedBinaryFiles,
 				skippedDirectories,
+				walkCappedAt,
 			});
 			return { content: [{ type: "text", text }] };
 		},
@@ -219,9 +243,20 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 function skippedClause(display: GrepDisplay): string {
 	const parts: string[] = [];
 	if (display.skippedFiles) parts.push(`${display.skippedFiles} unreadable file(s) skipped`);
+	if (display.skippedLargeFiles) {
+		const count = display.skippedLargeFiles;
+		parts.push(`${count} file${count === 1 ? "" : "s"} over 1 MB skipped`);
+	}
+	if (display.skippedBinaryFiles) {
+		const count = display.skippedBinaryFiles;
+		parts.push(`${count} binary file${count === 1 ? "" : "s"} skipped`);
+	}
 	if (display.skippedDirectories) {
 		const count = display.skippedDirectories;
 		parts.push(`${count} unreadable director${count === 1 ? "y" : "ies"} skipped`);
+	}
+	if (display.walkCappedAt) {
+		parts.push(`walk stopped at ${display.walkCappedAt} files, so files past that point were not searched`);
 	}
 	return parts.length > 0 ? `; ${parts.join("; ")}` : "";
 }

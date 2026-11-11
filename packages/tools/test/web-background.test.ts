@@ -214,16 +214,42 @@ describe("background shells (real spawn)", () => {
 			onUpdate: () => {},
 		};
 
+		// A miss before any shell exists names the empty state rather than
+		// pretending a list is available.
 		const missing = await outputTool.call({ shell_id: "nope" }, ctx);
-		expect(missing.isError).toBe(true);
+		expect((missing.content[0] as any).text).toContain("Unknown shell id: nope");
+		expect((missing.content[0] as any).text).toContain("No background shells have been started");
 
 		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1" : "sleep 30";
 		const shell = await manager.start(command, process.cwd());
 		const out = await outputTool.call({ shell_id: shell.id }, ctx);
 		expect((out.content[0] as any).text).toContain("still running");
 
+		// Once one exists, a miss names it: the model can retry the right id
+		// without re-reading the transcript.
+		const missingAfterStart = await outputTool.call({ shell_id: "shell_999" }, ctx);
+		expect((missingAfterStart.content[0] as any).text).toContain(`Known shell ids: ${shell.id} (running)`);
+
+		// Killing an id that never existed is a different error from killing a
+		// shell that already ended, and neither is "not found or not running".
+		const killedMissing = await killTool.call({ shell_id: "shell_999" }, ctx);
+		expect((killedMissing.content[0] as any).text).toContain("no background shell has that id");
+
 		const killed = await killTool.call({ shell_id: shell.id }, ctx);
 		expect((killed.content[0] as any).text).toContain(`Killed ${shell.id}`);
+
+		const killedTwice = await killTool.call({ shell_id: shell.id }, ctx);
+		expect((killedTwice.content[0] as any).text).toContain("it was already killed");
+
+		// A finished shell that wrote nothing says so; "(no output yet)" would
+		// invite a poll that can never produce any.
+		const quiet = await manager.start("exit 0", process.cwd());
+		await manager.completed(quiet.id);
+		const quietOut = await outputTool.call({ shell_id: quiet.id }, ctx);
+		expect((quietOut.content[0] as any).text).toContain("(no output)");
+		expect((quietOut.content[0] as any).text).not.toContain("(no output yet)");
+		const killQuiet = await killTool.call({ shell_id: quiet.id }, ctx);
+		expect((killQuiet.content[0] as any).text).toContain("it already finished (exit code 0)");
 	}, 10_000);
 });
 

@@ -228,20 +228,47 @@ export function createGlobTool(
 			}
 
 			let unreadableDirectories = 0;
+			let walkCappedAt: number | undefined;
 			const matches = await walkProjectFiles(root, ops, {
 				pattern: new Bun.Glob(input.pattern),
 				respectGitignore: true,
 				onUnreadableDirectory: () => {
 					unreadableDirectories++;
 				},
+				// The walk's cap is separate from the display cut below and must not
+				// be silent: past it the tool has not seen the whole tree.
+				onTruncated: (limit) => {
+					walkCappedAt = limit;
+				},
 			});
 			const skipped =
 				unreadableDirectories > 0
 					? `\n[skipped ${unreadableDirectories} unreadable director${unreadableDirectories === 1 ? "y" : "ies"}]`
 					: "";
+			const truncated =
+				walkCappedAt !== undefined
+					? `\n[walk stopped at the ${walkCappedAt}-file cap; matches past that point are not listed]`
+					: "";
 
 			if (matches.length === 0) {
-				return { content: [{ type: "text", text: `No files matched.${skipped}` }] };
+				// "No files matched." reads as a fact about the tree. The tree was
+				// filtered before it was searched, and an empty answer from a filtered
+				// tree is a different claim: the file may be excluded, or the pattern
+				// may be anchored where the caller did not expect. Naming the pattern,
+				// the root and both filters is what lets the model correct itself
+				// instead of repeating the same call.
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`No files matched "${input.pattern}" under ${root}.${skipped}` +
+								"\n.gitignore rules and the built-in skip list (node_modules, .git, dist, build, .next, …) " +
+								"were applied, so an excluded file will not appear. Patterns match paths relative to that " +
+								'directory — use "**/" to reach subdirectories. Read or LS can confirm a path you already know.',
+						},
+					],
+				};
 			}
 			const shown = matches.slice(0, MAX_RESULTS);
 			let suffix = "";
@@ -265,7 +292,7 @@ export function createGlobTool(
 				suffix = path ? `\n[+${more} more → ${path}]` : `\n[+${more} more]`;
 			}
 			return {
-				content: [{ type: "text", text: `${shown.join("\n")}${suffix}${skipped}` }],
+				content: [{ type: "text", text: `${shown.join("\n")}${suffix}${truncated}${skipped}` }],
 			};
 		},
 	});

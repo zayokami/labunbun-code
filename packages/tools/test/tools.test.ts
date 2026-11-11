@@ -685,6 +685,43 @@ describe("Grep tool", () => {
 		expect((result.content[0] as any).text).toBe("No matches found.");
 	});
 
+	test("files skipped for size and binary content are counted, not silently omitted", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "small.txt"), "TOKEN here\n");
+		writeFileSync(join(dir, "huge.txt"), `TOKEN ${"x".repeat(1_000_000)}`);
+		writeFileSync(join(dir, "binary.bin"), "TOKEN\0binary\n");
+		const tool = createGrepTool(dir, defaultOperations());
+		const text = (await call(tool, { pattern: "TOKEN" })).content[0].text as string;
+		const header = text.split("\n")[0];
+		// "No matches" after a search that never opened these files would be a
+		// claim about the tree that the search did not earn.
+		expect(header).toContain("1 file over 1 MB skipped");
+		expect(header).toContain("1 binary file skipped");
+		expect(text).toContain("small.txt:1: TOKEN here");
+	});
+
+	test("a walk that stopped at its file cap says the search was not complete", () => {
+		const one: GrepMatch[] = [{ path: "a.txt", lineNumber: 1, text: "TOKEN" }];
+		const page = renderGrepResult(one, {
+			offset: 0,
+			headLimit: 250,
+			maxColumns: 500,
+			safetyCapped: false,
+			walkCappedAt: 5_000,
+		});
+		expect(page.split("\n")[0]).toBe(
+			"1 of 1 match(es) shown; walk stopped at 5000 files, so files past that point were not searched:",
+		);
+		const none = renderGrepResult([], {
+			offset: 0,
+			headLimit: 250,
+			maxColumns: 500,
+			safetyCapped: false,
+			walkCappedAt: 5_000,
+		});
+		expect(none).toBe("No matches found; walk stopped at 5000 files, so files past that point were not searched.");
+	});
+
 	test("head_limit 0 removes the display limit", async () => {
 		const dir = tempDir();
 		numberedMatches(dir, 300);
@@ -793,6 +830,29 @@ describe("Glob tool", () => {
 		expect(text).toContain("a.test.ts");
 		expect(text).toContain("b.test.ts");
 		expect(text).not.toContain("c.ts");
+	});
+
+	test("a walk that stopped at its file cap says the list is incomplete", async () => {
+		const dir = tempDir();
+		const base = defaultOperations();
+		const names = Array.from({ length: 5_001 }, (_, i) => `f${i}.txt`);
+		const key = (path: string) => path.split("\\").join("/");
+		// The tree is 5001 files, one past the 5000-file walk cap. They are
+		// synthetic so the case costs no disk; `stat` answers for them instead of
+		// failing 5001 times against paths that do not exist.
+		const ops: Operations = {
+			...base,
+			readdir: async (path) =>
+				key(path) === key(dir) ? names.map((name) => ({ name, isDirectory: false, isFile: true })) : [],
+			stat: async (path) =>
+				key(path) === key(dir) ? base.stat(path) : { size: 0, isFile: true, isDirectory: false, mtimeMs: 0 },
+		};
+		const result = await call(createGlobTool(dir, ops), { pattern: "*" });
+		const text = (result.content[0] as any).text as string;
+		// Two cuts, said separately: the display cut names how many were left out
+		// of the shown list, and the walk cut says the walk itself never finished.
+		expect(text).toContain("[+4800 more]");
+		expect(text).toContain("[walk stopped at the 5000-file cap; matches past that point are not listed]");
 	});
 
 	test("gitignored files are left out of the listing", async () => {

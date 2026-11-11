@@ -288,6 +288,27 @@ commands, and SHA-256 checksums.
   (image and other blocks do not count), and a single-block result keeps the
   name it always had. `SpillRequest.part` carries the number.
 
+- **BashOutput and KillBash say which ids exist.** An unknown id answered
+  `Unknown shell id: X` or `not found or not running`, which left the caller to
+  re-read the transcript or guess. A miss now lists up to eight known ids with
+  their state, and says how many earlier ones it left out. KillBash separates
+  an id that never existed from a shell that already ended — naming its exit
+  code, or saying it was already killed, and pointing at BashOutput — from a
+  kill the OS did not confirm, where it asks for a poll instead of claiming the
+  shell was not found. BashOutput also stops calling a finished shell's empty
+  log `(no output yet)`: a running shell says `(no output yet)`, an ended one
+  says `(no output)`, and a log holding only the manager's own exit-code
+  marker counts as empty because the status line already carries the code.
+
+- **A search that could not see the whole tree says so.** Glob's `No files
+  matched.` read as a fact about the tree even though `.gitignore` and the
+  built-in skip list had already filtered it. An empty answer now names the
+  pattern and the root, says both filters ran, and points at `**/` and at Read
+  or LS for a path already known. Glob and Grep both report the walk's own
+  file cap when they hit it, and Grep counts the files it skipped for size
+  (over 1 MB) and for being binary, beside the unreadable files and directories
+  it already named.
+
 - **An escaped command is read as the shell runs it.** The classifier read a
   command line as written, so a POSIX backslash left the program `r\m` and the
   target `\/` — names no shell runs — and CMD's caret did the same to `de^l /s

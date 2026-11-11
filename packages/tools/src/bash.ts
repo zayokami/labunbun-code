@@ -306,6 +306,28 @@ export function createBashTool(
 	});
 }
 
+/** How many known ids an error names before it summarizes the rest. */
+const KNOWN_SHELL_IDS_SHOWN = 8;
+
+/**
+ * The ids a caller could have meant, for the two tools whose whole input is an
+ * id from an earlier reply. An error that only says "unknown id" leaves the
+ * model to guess or to re-read the transcript; the list answers directly, and
+ * the cap keeps a session that started fifty servers from paying for all of
+ * them in every miss.
+ */
+function knownShells(background: BackgroundShellManager): string {
+	const shells = background.list();
+	if (shells.length === 0) return "No background shells have been started in this session.";
+	const shown = shells.slice(-KNOWN_SHELL_IDS_SHOWN);
+	const earlier = shells.length - shown.length;
+	const rows = shown.map((shell) => {
+		if (shell.status !== "completed") return `${shell.id} (${shell.status})`;
+		return `${shell.id} (completed, exit code ${shell.exitCode ?? "unknown"})`;
+	});
+	return `Known shell ids: ${rows.join(", ")}${earlier > 0 ? `, and ${earlier} earlier` : ""}.`;
+}
+
 export function createBashOutputTool(background: BackgroundShellManager): AnyTool {
 	return buildTool({
 		name: "BashOutput",
@@ -321,15 +343,31 @@ export function createBashOutputTool(background: BackgroundShellManager): AnyToo
 		call: async (input) => {
 			const shell = background.get(input.shell_id);
 			if (!shell) {
-				return { content: [textContent(`Unknown shell id: ${input.shell_id}`)], isError: true };
+				return {
+					content: [
+						textContent(
+							`Unknown shell id: ${input.shell_id}. ${knownShells(background)} ` +
+								"Start a shell with Bash(run_in_background: true), then poll its id here.",
+						),
+					],
+					isError: true,
+				};
 			}
 			const output = background.output(input.shell_id);
 			const statusLine =
 				shell.status === "running"
 					? `[${shell.id}: still running, ${Math.round((Date.now() - shell.startTime) / 1000)}s]`
 					: `[${shell.id}: ${shell.status}, exit code ${shell.exitCode}]`;
+			// A running shell may legitimately have said nothing yet, and a finished
+			// one may have said nothing at all; the difference tells the model
+			// whether polling again can produce output or whether this is the end.
+			// The manager appends its own "[exit code: N]" line when a shell ends,
+			// so a log holding only that marker is still an empty log — the status
+			// line above already carries the code.
+			const empty = shell.status === "running" ? "(no output yet)" : "(no output)";
+			const saidSomething = output !== "" && !/^\s*\[exit code: -?\d+\]\s*$/.test(output);
 			return {
-				content: [textContent(`${statusLine}\n${output || "(no output yet)"}`)],
+				content: [textContent(`${statusLine}\n${saidSomething ? output : empty}`)],
 			};
 		},
 	});
@@ -344,10 +382,43 @@ export function createKillBashTool(background: BackgroundShellManager): AnyTool 
 		}),
 		isConcurrencySafe: () => false,
 		call: async (input) => {
+			const shell = background.get(input.shell_id);
+			// The three ways a kill can miss are different states, and the caller's
+			// next move differs for each: a wrong id needs the list, a finished
+			// shell needs its output read, and an unconfirmed kill needs a poll.
+			if (!shell) {
+				return {
+					content: [
+						textContent(
+							`Could not kill ${input.shell_id}: no background shell has that id. ${knownShells(background)}`,
+						),
+					],
+					isError: true,
+				};
+			}
+			if (shell.status !== "running") {
+				const ended =
+					shell.status === "killed"
+						? "it was already killed"
+						: `it already finished (exit code ${shell.exitCode ?? "unknown"})`;
+				return {
+					content: [
+						textContent(
+							`Could not kill ${shell.id}: ${ended}. Nothing is running under that id; BashOutput shows what it wrote.`,
+						),
+					],
+					isError: true,
+				};
+			}
 			const killed = background.kill(input.shell_id);
 			if (!killed) {
 				return {
-					content: [textContent(`Could not kill ${input.shell_id}: not found or not running.`)],
+					content: [
+						textContent(
+							`Could not kill ${shell.id}: the shell still reports running, but the kill was not confirmed — ` +
+								"its process may have just ended. Poll BashOutput for its final state.",
+						),
+					],
 					isError: true,
 				};
 			}
