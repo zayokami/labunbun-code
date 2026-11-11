@@ -920,42 +920,47 @@ describeWindows("a confined process", () => {
 		// The shape the timeout kill exists for: the command starts a detached
 		// grandchild that outlives it, and killing only the direct child leaves
 		// that grandchild writing — holding a file, a port, or the inherited
-		// pipes. The heartbeat is the witness: after the run reports failure it
-		// must stop growing, and the recorded pid must be gone.
+		// pipes. The heartbeat is the witness: the grandchild writes it from
+		// inside the container, so content in the file proves the grandchild
+		// existed, and its silence after the return proves the kill reached it.
 		const workspace = `${process.env.LOCALAPPDATA}\\Temp\\ac-tree-${process.pid}`;
 		execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
 		execSync(`cmd /c mkdir "${workspace}"`, { stdio: "ignore" });
-		const pidFile = join(workspace, "grandchild.pid");
 		const heartbeat = join(workspace, "heartbeat.txt");
-		// Progress markers for a run that never gets a pid: which step the batch
-		// reached is the difference between "the container cannot run the batch",
-		// "the batch cannot spawn PowerShell", and "PowerShell is still starting".
-		// Without one, a failed row says only that the deadline fired.
+		// Progress markers for a run whose heartbeat never appears: they
+		// separate "the container cannot run the batch" from "the batch cannot
+		// spawn a grandchild". `spawned:` prefixes the errorlevel because a bare
+		// `echo %errorlevel%>` becomes `echo 0>` when the value is 0, which cmd
+		// reads as a handle redirection and prints "ECHO is off." into an empty
+		// file.
 		const startedFile = join(workspace, "parent.started");
 		const spawnedFile = join(workspace, "parent.spawned");
+		// The grandchild is a plain batch, not PowerShell. The earlier version of
+		// this row launched PowerShell and waited fifteen seconds for the pid it
+		// was to write; on GitHub's `windows-latest` the parent's `start` line
+		// returned yet no pid ever appeared (runs 43003129675, 43008267282,
+		// 43013481627). cmd is already proven to run in the container by the
+		// direct child, so the grandchild is cmd too and the row no longer
+		// depends on PowerShell starting there. The ping spaces the beats about
+		// a second apart, which keeps the file small without making the beats
+		// rarer than the observation window below.
 		writeFileSync(
-			join(workspace, "grandchild.ps1"),
-			[
-				'$PID | Set-Content -Path (Join-Path $PSScriptRoot "grandchild.pid") -Encoding ascii',
-				'$beat = Join-Path $PSScriptRoot "heartbeat.txt"',
-				"while ($true) {",
-				'  Add-Content -Path $beat -Value "beat"',
-				"  Start-Sleep -Milliseconds 50",
-				"}",
-			].join("\r\n"),
+			join(workspace, "grandchild.cmd"),
+			["@echo off", ":beat", 'echo beat>>"%~dp0heartbeat.txt"', "ping -n 2 127.0.0.1 >nul 2>&1", "goto beat"].join(
+				"\r\n",
+			),
 		);
-		// The parent waits for the pid before spinning, so the deadline cannot
-		// land before the grandchild existed. Its spin is what keeps it inside
-		// the container's wait until the timeout.
+		// The parent spins forever, so the deadline always lands while it is
+		// alive and still the grandchild's ancestor. The `call` form matches the
+		// outer invocation: a batch handed to `cmd /c` as its direct target is
+		// refused inside the container with "Access is denied".
 		writeFileSync(
 			join(workspace, "parent.cmd"),
 			[
 				"@echo off",
 				'echo started>"%~dp0parent.started"',
-				'start "" /b "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0grandchild.ps1"',
-				'echo %errorlevel%>"%~dp0parent.spawned"',
-				":wait",
-				'if not exist "%~dp0grandchild.pid" goto wait',
+				'start "" /b "C:\\Windows\\System32\\cmd.exe" /d /s /c "call "%~dp0grandchild.cmd""',
+				'echo spawned:%errorlevel%>"%~dp0parent.spawned"',
 				":spin",
 				"goto spin",
 			].join("\r\n"),
@@ -964,23 +969,13 @@ describeWindows("a confined process", () => {
 		expect(grant.error).toBeUndefined();
 		const profile = grant.profile as AppContainerProfile;
 		try {
-			// The budget is not the assertion, but it must outlast the
-			// in-container PowerShell's cold start: the grandchild records its
-			// pid before the parent spins, and a deadline that fired first would
-			// leave no pid to check and make the row vacuous. Two seconds held on
-			// a local Windows 11 machine, but not on GitHub's `windows-latest`
-			// runner, where the deadline fired before the pid file appeared (runs
-			// 43003129675, 43008267282). Ten seconds was not enough there either,
-			// so this is fifteen, which still ends the row well inside the test's
-			// own 30-second cap. If it fails again, the markers say which step
-			// stalled; three red runs is the point where the next change has to
-			// be aimed by evidence rather than by another guess at the cold start.
-			// `call` rather than the batch path alone: a batch handed to `cmd /c`
-			// as its direct target is refused inside the container with "Access
-			// is denied", while the same file through `call` runs (measured on
-			// this machine) — and this row is about the kill, not about cmd's
-			// command-line resolution.
-			const budgetMs = 15_000;
+			// The budget is not the assertion, but the grandchild has to exist
+			// before the deadline can prove that killing the tree reached it: the
+			// parent spawns it in its first line and then spins, so this only has
+			// to outlast the container's own startup (a few hundred milliseconds
+			// in the local measurements). Ten seconds is generous for that and
+			// ends the row well inside the test's own 30-second cap.
+			const budgetMs = 10_000;
 			const timedOut = runConfined(
 				profile,
 				`"C:\\Windows\\System32\\cmd.exe" /d /s /c "call "${join(workspace, "parent.cmd")}""`,
@@ -989,33 +984,27 @@ describeWindows("a confined process", () => {
 			expect(timedOut.error).toContain(`did not exit within ${budgetMs}ms`);
 			expect(timedOut.killed).toBe(true);
 
-			let grandchildPid: number;
-			try {
-				grandchildPid = Number(readFileSync(pidFile, "utf8").trim());
-			} catch (error) {
-				// A missing pid file means the deadline beat the cold start, not
-				// that the kill failed. Carry the run's own output and the batch's
-				// progress into the failure, so the next reader does not have to
-				// reproduce it on CI.
+			const beatsAtReturn = existsSync(heartbeat) ? readFileSync(heartbeat).length : 0;
+			if (beatsAtReturn === 0) {
+				// A missing heartbeat means the grandchild never ran, not that
+				// the kill failed. Carry the batch's progress into the failure,
+				// so the next reader does not have to reproduce it on CI.
 				const progress = existsSync(spawnedFile)
-					? `parent.cmd started and its start line returned ${readFileSync(spawnedFile, "utf8").trim()}`
+					? `parent.cmd started and its start line returned "${readFileSync(spawnedFile, "utf8").trim()}"`
 					: existsSync(startedFile)
 						? "parent.cmd started but its start line never returned"
 						: "parent.cmd never ran inside the container";
 				throw new Error(
-					`the grandchild recorded no pid within ${budgetMs}ms (${(error as Error).message}); ` +
-						`${progress}; stdout: ${JSON.stringify(timedOut.stdout)}; stderr: ${JSON.stringify(timedOut.stderr)}`,
+					`the grandchild never wrote a heartbeat (${progress}); ` +
+						`stdout: ${JSON.stringify(timedOut.stdout)}; stderr: ${JSON.stringify(timedOut.stderr)}`,
 				);
 			}
-			expect(Number.isInteger(grandchildPid)).toBe(true);
-			// A beat every 50 ms: if the grandchild survived, the file grows
-			// within this window. One read only would pass on timing luck.
-			const beatsAtReturn = readFileSync(heartbeat).length;
-			await new Promise((resolve) => setTimeout(resolve, 600));
+			// An empty heartbeat would let "stopped growing" pass over a
+			// grandchild that never started, which is why the read above must be
+			// non-empty. Against one beat a second, a live grandchild cannot stay
+			// silent for this window.
+			await new Promise((resolve) => setTimeout(resolve, 2_500));
 			expect(readFileSync(heartbeat).length).toBe(beatsAtReturn);
-
-			const listing = execSync(`tasklist /FI "PID eq ${grandchildPid}" /NH`, { encoding: "utf8" });
-			expect(listing).not.toContain(String(grandchildPid));
 		} finally {
 			releaseWorkspaceGrant(workspace);
 			deleteAppContainerProfile(profile.name);
