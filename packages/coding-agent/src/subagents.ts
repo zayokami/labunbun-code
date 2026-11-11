@@ -21,6 +21,7 @@ import {
 	type PermissionRule,
 	type SandboxMode,
 	type SessionStore,
+	type SpillWriter,
 	type ToolResult,
 } from "@labunbun/agent";
 import type { Model, StreamFn, ThinkingLevel, Usage } from "@labunbun/ai";
@@ -35,6 +36,7 @@ import { isProjectTierTrusted } from "./project-trust.ts";
 import { subagentSourceLabel } from "./subagent-commands.ts";
 import { SUBAGENT_END_KIND, SUBAGENT_START_KIND } from "./subagent-ledger.ts";
 import { MAX_RETAINED_SUBAGENTS, type SubagentHandle, SubagentRegistry } from "./subagent-registry.ts";
+import { writeToolOutput } from "./tool-output.ts";
 import { parseJsonCandidates, structuredAnswerInstruction, validateWorkflowSchema } from "./workflow-schema.ts";
 
 export interface AgentDefinition {
@@ -675,12 +677,21 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// store — a subagent's transcript is kept as start/end entries, not as a
 		// conversation to resume — so its compactions are recorded nowhere and
 		// reported here instead.
+		//
+		// The spill root follows the parent cwd the inherited tools were built
+		// around, not `runCwd`: a workflow's runCwd can be a worktree, whose
+		// tool-output root the parent's Read does not allow. A preview the
+		// subagent reads is a path its own inherited Read must be able to open,
+		// and that is the root the tools were given. No session id exists here,
+		// so the files land under `unassigned` and age out with the rest.
+		const spillOutput: SpillWriter = (request) => writeToolOutput(request, { cwd: scope.cwd, sessionId: undefined });
 		const subagentWiring = createCompactionWiring({
 			model,
 			store: undefined,
 			streamFn: ctx.streamFn,
 			trimOldToolResults: ctx.trimOldToolResults,
 			tuning: ctx.compactionTuning,
+			spillOutput,
 			report: (text) => {
 				notes.push(text);
 				ctx.report?.(`[${definition.agentType}] ${text}`);
@@ -712,6 +723,10 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			outputSchema: run?.outputSchema && supportsOutputSchema(model.api) ? run.outputSchema : undefined,
 			deps: {
 				streamFn: ctx.streamFn,
+				// The tool pipeline's own cuts spill too, under the same root: a
+				// result the tool's limit or the round budget truncates is still
+				// recoverable from the preview it shows.
+				spillOutput,
 				// The parent's reader, not its current answer: a `/think` that lands
 				// while the subagent runs is seen by the subagent's next request,
 				// which is the same call-time shape the axes above travel by. A

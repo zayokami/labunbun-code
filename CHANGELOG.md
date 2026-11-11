@@ -288,6 +288,15 @@ commands, and SHA-256 checksums.
   (image and other blocks do not count), and a single-block result keeps the
   name it always had. `SpillRequest.part` carries the number.
 
+- **A subagent's or band member's cut output stays recoverable.** Neither a
+  subagent nor a beetle member has a session file to fall back on, and neither
+  passed a spill writer, so a preview they produced named nothing and the full
+  text was gone. Both now write through the tools' own spiller under the cwd
+  their inherited tools were built for — the parent's root, not a workflow
+  worktree that root's Read may not open — and the same writer serves the tool
+  pipeline's own cuts. With no session id on either run, the files land under
+  `unassigned` and age out with the rest.
+
 - **BashOutput and KillBash say which ids exist.** An unknown id answered
   `Unknown shell id: X` or `not found or not running`, which left the caller to
   re-read the transcript or guess. A miss now lists up to eight known ids with

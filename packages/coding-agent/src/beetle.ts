@@ -47,6 +47,7 @@ import {
 	type PermissionMode,
 	type PermissionRule,
 	type SandboxMode,
+	type SpillWriter,
 } from "@labunbun/agent";
 import { type Model, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
 import { type AgentTask, TASK_BOARD_TOOL_NAMES, type TaskStore } from "@labunbun/tools";
@@ -57,6 +58,7 @@ import { costStateFromMessages } from "./cost-tracker.ts";
 import { NO_SIGN_INS, type SubscriptionSignIns, unrunnableSuffix } from "./credential-presence.ts";
 import { offeredModels } from "./model-offer.ts";
 import { TaskPheromoneRecorder } from "./task-pheromone.ts";
+import { writeToolOutput } from "./tool-output.ts";
 
 export const BEETLE_MEMBERS = ["john", "paul", "george", "ringo"] as const;
 export type BeetleMember = (typeof BEETLE_MEMBERS)[number];
@@ -1146,12 +1148,18 @@ export class BeetleBand {
 		if (member.session) return member.session;
 		const options = this.#options;
 		const name = member.name;
+		// A member has no store, so a draft it trims has no session file to fall
+		// back on. The spill root is the band's cwd — the same tree the inherited
+		// worker tools were built for, and the one Read allows. No member session
+		// id exists, so the files land under `unassigned` beside subagents'.
+		const spillOutput: SpillWriter = (request) => writeToolOutput(request, { cwd: options.cwd, sessionId: undefined });
 		const wiring = createCompactionWiring({
 			model: member.model,
 			store: undefined,
 			streamFn: options.streamFn,
 			trimOldToolResults: options.trimOldToolResults,
 			tuning: options.compactionTuning,
+			spillOutput,
 			report: (text) => options.report?.(`[beetle] ${DISPLAY_NAME[name]}: ${text}`),
 		});
 		const memberTools = this.#memberTools(name);
@@ -1168,6 +1176,9 @@ export class BeetleBand {
 			deps: {
 				streamFn: options.streamFn,
 				thinkingLevel: options.thinkingLevel,
+				// The pipeline's cuts spill under the same root, so a truncated
+				// result in a member's context stays recoverable.
+				spillOutput,
 				checkCompaction: wiring.checkCompaction,
 				// Members inherit the session's rules but have no dialog of their own
 				// to resolve an "ask" — fail closed rather than hang or auto-allow.
