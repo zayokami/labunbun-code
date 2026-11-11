@@ -176,15 +176,17 @@ describe("resolveApiKey", () => {
 		// when both are set, GOOGLE_API_KEY takes precedence — so that is the
 		// order the rows declare, and a machine carrying only the other name
 		// still works through the fallback.
-		const model = resolveModel("google/gemini-4-argon");
-		if (!model) throw new Error("expected the built-in model to resolve");
-		expect(apiKeyEnvNames(model)).toEqual(["GOOGLE_API_KEY", "GEMINI_API_KEY"]);
-		setEnv("GOOGLE_API_KEY", undefined);
-		setEnv("GEMINI_API_KEY", "gemini-key");
-		expect(resolveApiKey(model)).toBe("gemini-key");
-		// Both set: the page's precedence decides, not the table's habit.
-		setEnv("GOOGLE_API_KEY", "google-key");
-		expect(resolveApiKey(model)).toBe("google-key");
+		for (const reference of ["google/gemini-4-carbon", "google/gemini-4-argon"]) {
+			const model = resolveModel(reference);
+			if (!model) throw new Error(`expected ${reference} to resolve`);
+			expect(apiKeyEnvNames(model)).toEqual(["GOOGLE_API_KEY", "GEMINI_API_KEY"]);
+			setEnv("GOOGLE_API_KEY", undefined);
+			setEnv("GEMINI_API_KEY", "gemini-key");
+			expect(resolveApiKey(model)).toBe("gemini-key");
+			// Both set: the page's precedence decides, not the table's habit.
+			setEnv("GOOGLE_API_KEY", "google-key");
+			expect(resolveApiKey(model)).toBe("google-key");
+		}
 	});
 
 	test("apiKeyEnvNames lists the primary first, for error messages", () => {
