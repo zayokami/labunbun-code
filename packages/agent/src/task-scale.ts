@@ -55,7 +55,7 @@ const CHANGE_VERB_EN =
 
 /** The Chinese verbs. `改`, `修`, `加`, `删` and `补` are listed bare because a Chinese verb is not space-delimited. */
 const CHANGE_VERB_ZH =
-	"修复|修改|改成|改为|改一下|改下|添加|增加|实现|重构|重写|迁移|升级|替换|调整|删除|移除|创建|新建|写一个|写个|加上|加个|支持|接入|合并|拆|适配|对接|修|加|删|补";
+	"修复|修改|改成|改为|改一下|改下|添加|增加|实现|重构|重写|迁移|升级|替换|调整|删除|移除|创建|新建|写一个|写个|加上|加个|支持|接入|合并|拆|适配|对接|修|加|删|补|改";
 
 /** The same pattern with `g`, for walking every occurrence; `test` on a `g` pattern would carry `lastIndex`. */
 const CHANGE_VERB_ALL = new RegExp(`\\b(?:${CHANGE_VERB_EN})\\b|(?:${CHANGE_VERB_ZH})`, "giu");
@@ -69,7 +69,7 @@ const CHANGE_VERB_ALL = new RegExp(`\\b(?:${CHANGE_VERB_EN})\\b|(?:${CHANGE_VERB
  * non-negation character after it cancels the match.
  */
 const NEGATION_BEFORE =
-	/(?:\b(?:do not|not|don't|dont|never|without|no need to|avoid)\b(?:\s+[a-z]+){0,2}|(?:不要|别|无需|不用|不需要|不必|勿)(?:再|去|乱|随便)?)\s*$/iu;
+	/(?:\b(?:do not|not|don't|dont|never|without|no need to|avoid)\b(?:\s+[a-z]+){0,2}|(?:不要|别|无需|不用|不需要|不必|勿|不)(?:再|去|乱|随便)?)\s*$/iu;
 
 /** "change nothing" negates from the other side. Kept to unambiguous objects. */
 const NEGATION_AFTER = /^\s*(?:nothing|no files?|no code|none of)\b/iu;
@@ -125,8 +125,8 @@ function sizeOf(text: string): number {
 	return words + Math.ceil(cjk / 2);
 }
 
-/** "Remember to …" and "don't forget to …" end a negation rather than start one. */
-const NEGATION_CANCEL = /\b(?:forget|remember)\s+(?:to\s+)?$|忘(?:了)?\s*$/iu;
+/** "Remember to …" and "don't forget to …" end a negation rather than start one; `不得不` is a double negative. */
+const NEGATION_CANCEL = /\b(?:forget|remember)\s+(?:to\s+)?$|(?:忘(?:了)?|不得不)\s*$/iu;
 
 /** Distinct path-shaped tokens, URLs excluded. */
 function countPaths(text: string): number {
@@ -193,6 +193,10 @@ export function classifyTask(text: string): TaskShape {
 		(match) => !negatedAt(trimmed, match.index ?? 0, match[0].length),
 	);
 	const answerVerb = ANSWER_VERB.test(trimmed);
+	// A polite request with no listed change verb is still an action request;
+	// "can you explain…" is the exception, and so is a request whose only listed
+	// verb is negated ("please don't refactor the codebase").
+	const requestedChange = request && !answerVerb && (changeMatches.length === 0 || positive.length > 0);
 
 	let score = 0;
 	const signals: string[] = [];
@@ -230,7 +234,8 @@ export function classifyTask(text: string): TaskShape {
 	if (!changeVerb && changeMatches.length > 0) signals.push("negated-change");
 
 	const kind: TaskKind =
-		(advice && !imperative && !later) || (changeVerb ? question && !request : question || answerVerb)
+		(advice && !imperative && !later) ||
+		(!requestedChange && (changeVerb ? question && !request : question || answerVerb))
 			? "answer"
 			: "change";
 	const scale: TaskScale = score >= 3 ? "complex" : score <= -2 ? "trivial" : "standard";

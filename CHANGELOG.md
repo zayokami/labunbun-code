@@ -31,6 +31,15 @@ commands, and SHA-256 checksums.
   requests a compaction keeps verbatim. `LBB_TASK_SCALE=off` turns it off. See
   `docs/dev/task-scale.md`.
 
+- **The task scale reads negated requests and the bare Chinese verbs.** `改` is
+  back in the verb list (a regression from the split-request change), a bare
+  `不` now negates the verb after it, and `不得不` is not read as a negation. A
+  polite request whose only listed verb is negated stays an answer ("Please
+  don't refactor the entire codebase"), while a request with no listed verb is
+  a change ("Could you enable the cache?", "Can you swap these two
+  arguments?"). A question that only asks for an explanation still stays an
+  answer.
+
 - **The sandbox stops paying for scans that cannot change its answer.** Write
   and Edit, and Bash outside workspace-write, no longer run the depth-4
   protected-path walk whose result they discard — 76 ms for the walk and a

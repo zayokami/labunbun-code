@@ -54,6 +54,11 @@ const CASES: Array<{ text: string; kind: TaskKind; scale: TaskScale; why: string
 		why: "one negated verb does not cancel a positive one",
 	},
 	{ text: "不要改配置，只加一行日志", kind: "change", scale: "trivial", why: "改 is negated, 加 is not" },
+	{ text: "改这里？", kind: "change", scale: "standard", why: "a bare 改 is a change verb" },
+	{ text: "不修改 API，解释一下", kind: "answer", scale: "standard", why: "a bare 不 negates 修改" },
+	{ text: "不改代码，解释一下", kind: "answer", scale: "standard", why: "a bare 不 negates 改" },
+	{ text: "不删文件，只加日志", kind: "change", scale: "trivial", why: "删 is negated, 加 is not" },
+	{ text: "不得不改这个配置", kind: "change", scale: "standard", why: "不得不 is a double negative, not a negation" },
 	{
 		text: "change everything everywhere",
 		kind: "change",
@@ -102,6 +107,48 @@ const CASES: Array<{ text: string; kind: TaskKind; scale: TaskScale; why: string
 		kind: "change",
 		scale: "standard",
 		why: "a second-person request is not advice",
+	},
+	{
+		text: "Could you enable the cache?",
+		kind: "change",
+		scale: "standard",
+		why: "a polite request with an unlisted verb is still a change",
+	},
+	{
+		text: "can you set the default timeout to 30s?",
+		kind: "change",
+		scale: "standard",
+		why: "a polite request with an unlisted verb is still a change",
+	},
+	{
+		text: "Can you swap these two arguments?",
+		kind: "change",
+		scale: "standard",
+		why: "a polite request with an unlisted verb is still a change",
+	},
+	{
+		text: "Could you clean up the dead code?",
+		kind: "change",
+		scale: "standard",
+		why: "a polite request with an unlisted verb is still a change",
+	},
+	{
+		text: "can you explain the cache?",
+		kind: "answer",
+		scale: "standard",
+		why: "an explanation request stays an answer",
+	},
+	{
+		text: "Please don't refactor the entire codebase",
+		kind: "answer",
+		scale: "complex",
+		why: "a request whose only change verb is negated is not a request to change",
+	},
+	{
+		text: "Could you not change the config?",
+		kind: "answer",
+		scale: "standard",
+		why: "the only listed verb is negated",
 	},
 	{ text: "怎么修复这个 bug", kind: "answer", scale: "standard", why: "怎么 asks how, not for the fix" },
 	{
@@ -195,6 +242,8 @@ describe("classifyTask", () => {
 		expect(classifyTask("don't refactor everything").signals).not.toContain("explicit-large");
 		expect(classifyTask("fix the typo").signals).toContain("request");
 		expect(classifyTask("explain first, then fix it").signals).toContain("request");
+		expect(classifyTask("只改 README 里的标题").signals).toContain("change-verb");
+		expect(classifyTask("不修改 API").signals).toContain("negated-change");
 	});
 
 	test("URLs are links, not files the request names", () => {
@@ -228,6 +277,10 @@ describe("the contract", () => {
 		const block = taskScaleContract(classifyTask("why does this fail?"));
 		expect(block).toContain('<task-scale scale="standard" kind="answer">');
 		expect(block).toContain("do not edit files, run builds or tests");
+	});
+
+	test("a polite action request is a change, not the answer contract", () => {
+		expect(taskScaleContract(classifyTask("Could you enable the cache?"))).toBeUndefined();
 	});
 
 	test("the block leads the stored message and the separator survives a round trip", () => {
