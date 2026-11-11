@@ -857,6 +857,7 @@ export class BackgroundShellManager {
 				resolution.grantRoots.slice(1),
 				resolution.executableRoots,
 				resolution.protectedRoots,
+				resolution.readOnly,
 			);
 			if (grant.error !== undefined || grant.profile === undefined) {
 				// Fail closed and legibly, as the foreground path does: no grant
@@ -883,13 +884,13 @@ export class BackgroundShellManager {
 				// The grant was acquired for this spawn, and there is no shell
 				// whose end could release it — it comes back here, and a failed
 				// cleanup rides in the thrown message rather than vanishing.
-				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network);
+				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network, resolution.readOnly);
 				const cleanup = dropError !== null && dropError !== "" ? ` [sandbox cleanup: ${dropError}]` : "";
 				throw new Error(`${spawned.error}${cleanup}`);
 			}
 			proc = spawned;
 			release = () => {
-				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network);
+				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network, resolution.readOnly);
 				// A failed cleanup is logged, not thrown: the shell already ran
 				// and its exit code is what the caller acts on.
 				if (dropError !== null && dropError !== "") append(`\n[sandbox cleanup: ${dropError}]`);

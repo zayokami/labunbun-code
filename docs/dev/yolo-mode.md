@@ -251,7 +251,7 @@ All existing tool-layer enforcement stays:
   writable roots.
 - `read-only` still refuses `Write` and `Edit`, and still refuses `Bash` where
   the platform has no read-only backend
-  (`packages/tools/src/sandbox/index.ts:454-461`).
+  (`packages/tools/src/sandbox/index.ts:487-494`).
 - The network proxy and its domain table are unchanged.
 
 The classifier was the last automatic *semantic* check before a command ran.

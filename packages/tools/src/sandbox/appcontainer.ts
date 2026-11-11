@@ -413,25 +413,44 @@ function buildSecurityCapabilities(
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** The profile name for a workspace, deterministic so two runs agree on the SID a grant names. */
-export function appContainerProfileName(workspace: string, network = false): string {
+/**
+ * The profile name for a workspace, deterministic so two runs agree on the SID
+ * a grant names.
+ *
+ * The access mode rides in the name, like the network capability already does.
+ * A profile is one identity with one DACL: a read-only grant that joined a
+ * write grant (or the reverse) would run a command with more access than the
+ * policy it was built from promises, and a refcount cannot narrow an ACE the
+ * other caller still holds. Two names make the two grants two identities, so
+ * neither can be mistaken for the other.
+ */
+export function appContainerProfileName(workspace: string, network = false, readOnly = false): string {
 	// Backslash and forward slash are the same separator on Windows; two
 	// spellings of one directory must not get two profiles.
 	const normalized = workspace.toLowerCase().replace(/\\/g, "/");
 	const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
-	return network ? `labunbun-net-${digest}` : `labunbun-${digest}`;
+	const mode = readOnly ? (network ? "net-ro" : "ro") : network ? "net" : "";
+	return mode === "" ? `labunbun-${digest}` : `labunbun-${mode}-${digest}`;
 }
 
 // Long-form design notes: docs/dev/sandbox.md
 /** Create the profile if this user does not have it yet, and derive its SID. */
-export function ensureAppContainerProfile(workspace: string, network = false): AppContainerProfile | { error: string } {
+export function ensureAppContainerProfile(
+	workspace: string,
+	network = false,
+	readOnly = false,
+): AppContainerProfile | { error: string } {
 	const lib = userenv();
 	if (lib === null) return { error: "userenv.dll is not loadable on this platform" };
-	const name = appContainerProfileName(workspace, network);
+	const name = appContainerProfileName(workspace, network, readOnly);
 	const nameBuf = wbuf(name);
 	const sidOut = new BigUint64Array(1);
 	const display = wbuf("LaBunbun sandbox");
-	const description = wbuf("Holds commands a LaBunbun session runs under the workspace-write sandbox.");
+	const description = wbuf(
+		readOnly
+			? "Holds commands a LaBunbun session runs under the read-only sandbox."
+			: "Holds commands a LaBunbun session runs under the workspace-write sandbox.",
+	);
 	// The capabilities, as the SID_AND_ATTRIBUTES array creation wants — NOT
 	// the SECURITY_CAPABILITIES struct: passing the struct in the fourth
 	// parameter is E_INVALIDARG (0x80070057), measured. With no capabilities
@@ -1656,15 +1675,25 @@ export interface GrantOutcome {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** Grants the container SID write access to the workspace and any extra roots, read+execute to any toolchain roots, refcounted. */
+/**
+ * Grants the container SID write access to the workspace and any extra roots,
+ * read+execute to any toolchain roots, refcounted.
+ *
+ * With `readOnly`, the workspace and every extra root join the read+execute
+ * set instead: no root carries a write right, so the kernel refuses a write to
+ * the workspace itself. That is the whole of the read-only mode's promise —
+ * the mask is the policy — and it is why the mode is a different profile
+ * name: a grant cannot be narrowed while another command still holds it.
+ */
 export function acquireWorkspaceGrant(
 	workspace: string,
 	network = false,
 	extraRoots: readonly string[] = [],
 	executableRoots: readonly string[] = [],
 	protectedRoots: readonly string[] = [],
+	readOnly = false,
 ): GrantOutcome {
-	const profile = ensureAppContainerProfile(workspace, network);
+	const profile = ensureAppContainerProfile(workspace, network, readOnly);
 	if ("error" in profile) return { error: profile.error };
 	const existing = activeGrants.get(profile.name);
 	if (existing !== undefined) {
@@ -1679,7 +1708,9 @@ export function acquireWorkspaceGrant(
 		// less access than the policy promises. Both failures are returned
 		// without a reference, so the caller's error path cannot release a
 		// grant it never held.
-		const requestedWrites = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
+		const requestedWrites = readOnly
+			? []
+			: [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
 		const missingWrite = requestedWrites.find((root) => !coveredByGrant(root, existing.writeRoots));
 		if (missingWrite !== undefined) {
 			return {
@@ -1687,7 +1718,13 @@ export function acquireWorkspaceGrant(
 				error: `the grant for ${workspace} is already open without write access to ${missingWrite}; release it before granting more`,
 			};
 		}
-		const requestedExec = Array.from(new Set(executableRoots.map(canonicalPathForChild)));
+		// Read-only has no write list, so the roots that must already be granted
+		// are the read+execute ones: the workspace, every extra root, and the
+		// toolchain roots. Same join rule in both modes: a root the open grant
+		// never reached is refused rather than run with less access than asked.
+		const requestedExec = Array.from(
+			new Set((readOnly ? [workspace, ...extraRoots, ...executableRoots] : executableRoots).map(canonicalPathForChild)),
+		);
 		const missingExec = requestedExec.find((root) => !coveredByGrant(root, existing.roots));
 		if (missingExec !== undefined) {
 			return {
@@ -1734,13 +1771,18 @@ export function acquireWorkspaceGrant(
 	// runner failure: an ACE against the 8.3 short spelling does not cover a
 	// child that opens the same directory by another spelling.
 	// Long-form design notes: docs/dev/sandbox.md
-	const writeRoots = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
+	const writeRoots = readOnly
+		? []
+		: [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
 	// A toolchain root is read and executed, never written: read+execute is
 	// the whole grant. A root the write list already covers is dropped —
 	// FILE_ALL_ACCESS is a superset, and the bigger ACE is the whole grant.
-	const execRoots = Array.from(new Set(executableRoots.map(canonicalPathForChild))).filter(
-		(root) => !writeRoots.includes(root),
-	);
+	// Under read-only there is no write list, so the workspace and the extra
+	// roots join the read+execute set: the mode's mask is what refuses the
+	// write, and those roots are exactly what the policy says may be read.
+	const execRoots = Array.from(
+		new Set((readOnly ? [workspace, ...extraRoots, ...executableRoots] : executableRoots).map(canonicalPathForChild)),
+	).filter((root) => !writeRoots.includes(root));
 	// A root a shallower root already covers by inheritance is dropped from
 	// the plan: writing it too pays a second full-tree ACL propagation and, on
 	// the failure path, a second rollback of it. Measured 2026-10-15 on this
@@ -1819,10 +1861,16 @@ export function acquireWorkspaceGrant(
 	// one has just received the SID's ACE by inheritance, and that copy is
 	// what narrows in place. Part of the same all-or-nothing rule — a failure
 	// here rolls the whole grant back through `fail`.
-	for (const dir of [...new Set(protectedRoots.map(canonicalPathForChild))]) {
-		const outcome = protectDirForGrant(dir, sid, writeRoots);
-		if (outcome.error !== undefined) return fail(outcome.error);
-		if (outcome.restore !== undefined) protectRestores.push(outcome.restore);
+	// Nothing is writable under a read-only grant, so there is nothing to
+	// narrow: the mask already refuses every write the protection would. A
+	// protected path handed in anyway is dropped, not refused — it names a
+	// write this grant never grants.
+	if (!readOnly) {
+		for (const dir of [...new Set(protectedRoots.map(canonicalPathForChild))]) {
+			const outcome = protectDirForGrant(dir, sid, writeRoots);
+			if (outcome.error !== undefined) return fail(outcome.error);
+			if (outcome.restore !== undefined) protectRestores.push(outcome.restore);
+		}
 	}
 	activeGrants.set(profile.name, {
 		sid,
@@ -1836,12 +1884,13 @@ export function acquireWorkspaceGrant(
 }
 
 /** Drops one reference, and on the last one removes every ACE this grant added. */
-export function releaseWorkspaceGrant(workspace: string, network = false): string | null {
-	const grant = activeGrants.get(appContainerProfileName(workspace, network));
+export function releaseWorkspaceGrant(workspace: string, network = false, readOnly = false): string | null {
+	const name = appContainerProfileName(workspace, network, readOnly);
+	const grant = activeGrants.get(name);
 	if (grant === undefined) return null;
 	grant.refs -= 1;
 	if (grant.refs > 0) return null;
-	activeGrants.delete(appContainerProfileName(workspace, network));
+	activeGrants.delete(name);
 	let firstError: string | null = null;
 	// The narrowed directories first: the write-back re-fuses inheritance
 	// and runs while the grant's ACEs are still in place, so the sweep that

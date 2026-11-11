@@ -42,6 +42,14 @@ export type SandboxResolution =
 	| {
 			kind: "appcontainer";
 			/**
+			 * True when the policy permits no write. The grant then carries
+			 * read+execute on every root — the workspace included — so the kernel
+			 * refuses a write to the workspace itself, which is the read-only
+			 * mode's whole promise. The profile is a different name from the
+			 * write grant's, so the two modes never share one identity.
+			 */
+			readOnly: boolean;
+			/**
 			 * The workspace the container profile is derived from — and therefore
 			 * the root whose grant the caller must hold before the spawn.
 			 */
@@ -74,9 +82,9 @@ export type SandboxResolution =
 	  }
 	/**
 	 * The command does not run. The policy permits no write, and no backend this
-	 * machine has can hold that. The reason is what the model and the user read.
-	 * Only the read-only policy produces it, and only where no wrapper can be
-	 * placed — see `resolveSandboxExecution`.
+	 * machine has can hold that — neither a wrapper nor the container's
+	 * read+execute grant. The reason is what the model and the user read. Only
+	 * the read-only policy produces it — see `resolveSandboxExecution`.
 	 */
 	| { kind: "refused"; reason: string }
 	| { kind: "simulated"; reason: string }
@@ -358,31 +366,56 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	const exists = options.exists ?? ((path: string) => existsSync(path));
 	const present = presentEntries(policy, exists);
 
-	// A policy that permits no write can only be held by a wrapper. The container branch below grants
-	// writes, and an unwrapped spawn writes anywhere the user can, so where no wrapper can be placed the
-	// command is refused rather than run. This reads the declared policy, not `present`, so a missing
-	// skip-marked root cannot change the answer.
-	if (permitsNoWrites(policy) && !(hasNativeSandboxBackend(platform) && (options.hasNativeBackend ?? true))) {
+	// The AppContainer branch's conditions, shared with the refusal below: a
+	// read-only policy can now be held by this branch too, so the refusal is
+	// reached only when the branch cannot take the command either.
+	const containerBranch = platform === "win32" && policy.network === "enabled" && (options.hasAppContainer ?? false);
+	// The read+execute grant is the whole of the read-only mode's promise: no
+	// root carries a write right, so the kernel refuses a write to the workspace
+	// itself. It needs one readable root to anchor the profile on, which the
+	// read-only policy always has — its workspace entry is never skip-marked.
+	const containerHoldsReadOnly =
+		containerBranch &&
+		present.fileSystem.entries.some((entry) => entry.access === "read" && entry.missingPathBehavior !== "skip");
+	// A policy that permits no write can be held only by a wrapper or by that
+	// grant. An unwrapped spawn writes anywhere the user can, so where neither
+	// is available the command is refused rather than run. This reads the
+	// declared policy, not `present`, so a missing skip-marked root cannot
+	// change the answer.
+	if (
+		permitsNoWrites(policy) &&
+		!containerHoldsReadOnly &&
+		!(hasNativeSandboxBackend(platform) && (options.hasNativeBackend ?? true))
+	) {
 		return { kind: "refused", reason: readOnlyRefusal(platform) };
 	}
 
 	// The AppContainer branch sits after the unrestricted short-circuit and
 	// before the `hasNativeSandboxBackend` check, which answers false for win32.
-	// The grant list covers every writable root and is read from `present`.
-	// The policy's protected paths ride along, filtered to the grant: the grant
-	// is what narrows them, and it may only narrow what it owns.
+	// The grant list is read from `present`: every writable root in the
+	// workspace-write policy, every readable root in the read-only one. The
+	// policy's protected paths ride along in the write mode, filtered to the
+	// grant: the grant is what narrows them, and it may only narrow what it
+	// owns. A read-only grant narrows nothing, because it never grants a write.
 	// Long-form design notes: docs/dev/sandbox.md
-	if (platform === "win32" && policy.network === "enabled" && (options.hasAppContainer ?? false)) {
+	if (containerBranch) {
+		const readOnly = permitsNoWrites(policy);
+		const readable = present.fileSystem.entries.filter((entry) => entry.access === "read");
 		const writable = present.fileSystem.entries.filter((entry) => entry.access === "write");
-		const workspace = writable.find((entry) => entry.missingPathBehavior !== "skip");
-		if (workspace !== undefined) {
-			const grantRoots = [...new Set([workspace.path, ...writable.map((entry) => entry.path)])];
+		// The anchor is the root the profile derives from and the one the policy
+		// will not skip: the workspace in both modes. Read-only has no writable
+		// root to anchor on, so its workspace comes from the read list.
+		const anchor = (readOnly ? readable : writable).find((entry) => entry.missingPathBehavior !== "skip");
+		if (anchor !== undefined) {
+			const granted = readOnly ? readable : writable;
+			const grantRoots = [...new Set([anchor.path, ...granted.map((entry) => entry.path)])];
 			return {
 				kind: "appcontainer",
-				workspace: workspace.path,
+				readOnly,
+				workspace: anchor.path,
 				grantRoots,
 				executableRoots: [...(options.executableRoots ?? [])],
-				protectedRoots: protectedWithinGrant(policy.protected, grantRoots),
+				protectedRoots: readOnly ? [] : protectedWithinGrant(policy.protected, grantRoots),
 				network: true,
 			};
 		}
@@ -456,7 +489,7 @@ function presentEntries(policy: SandboxPolicy, exists: (path: string) => boolean
  */
 function readOnlyRefusal(platform: SandboxPlatform): string {
 	if (platform === "win32") {
-		return "the read-only sandbox has no OS backend on Windows in this build: the container backend can grant write access to a workspace but has no read-only grant, so a command here would run with the session's full write access. Bash is refused under read-only; Read, Grep and Glob are not affected, and Write and Edit are refused by the tool layer. Switch the sandbox to workspace-write to run commands";
+		return "the read-only sandbox is not enforced on Windows for this session: the container backend either was not selected for this machine or cannot hold a session whose network axis is restricted, so a command here would run with the session's full write access. Bash is refused under read-only; Read, Grep and Glob are not affected, and Write and Edit are refused by the tool layer. Switch the sandbox to workspace-write to run commands, or switch the network axis to enabled, which the container can hold";
 	}
 	return `the read-only sandbox needs ${nativeSandboxProgram(platform)}, which is not on PATH, and a command without it would run with the session's full write access. Install it, or switch the sandbox to workspace-write to run commands`;
 }
@@ -529,6 +562,7 @@ export function describeSandboxBackend(
 	platform: SandboxPlatform = process.platform,
 	appContainerReason?: string,
 	classifierActive = true,
+	network: "restricted" | "enabled" = "enabled",
 ): string {
 	/** The classifier is a separate limit from the sandbox; under YOLO it is not one. */
 	const limits = classifierActive ? "the deny rules and the dangerous-command classifier" : "the deny rules";
@@ -550,9 +584,19 @@ export function describeSandboxBackend(
 		if (backend === "native") {
 			return `Sandbox: read-only, enforced by the OS. Commands run under ${nativeSandboxProgram(platform)} with no writable path on the disk, so the kernel refuses every write to one apart from the device nodes every process uses. Reads are not narrowed. The kernel is what holds this rather than this process, and it is attached to the process rather than the command, so it survives however the process tree is arranged.`;
 		}
+		// The container holds this mode by the mask: the grant is read+execute on
+		// every root, so a write to the workspace itself is refused by the kernel.
+		// It is reachable only with the enabled network axis — the restricted
+		// axis lives on a loopback proxy a container child cannot reach — so a
+		// restricted session gets the refusal sentence below instead.
+		if (backend === "appcontainer" && network === "enabled") {
+			return `Sandbox: read-only, enforced by the OS. Commands run in a Windows AppContainer profile derived from this workspace, and every granted root carries read and execute only — no write right, the workspace included — so the kernel refuses a write to the workspace itself. Reads are limited to the granted roots: the workspace and this session's read-only roots. The confinement is the child's own token rather than a wrapper around it, so it is attached to the process and survives however the process tree is arranged.`;
+		}
 		const why =
 			platform === "win32"
-				? "this build's Windows container backend has no read-only grant"
+				? backend === "appcontainer"
+					? "the container backend cannot hold a restricted network axis, because the proxy that enforces it listens on loopback, which a container child cannot reach"
+					: "this machine's Windows container backend was not selected for this session"
 				: `${nativeSandboxProgram(platform)} is not installed`;
 		return `Sandbox: read-only, not enforced here, so Bash is refused under this mode: ${why}. Read, Grep and Glob are not affected, and Write and Edit are refused by the tool layer.`;
 	}

@@ -28,7 +28,7 @@ The plan seat is described in "The plan seat" below.
 
 There are two user doors, and neither goes through `enterPlanMode`:
 
-- `/mode plan`, by argument or by picker. The host records the pair *before* moving the session: the pair to restore is the one the session is in now, not `plan` itself (`packages/coding-agent/src/interactive.ts:4477-4484`, `:4512-4523`). Re-selecting `plan` while already in plan mode records nothing (`:4480-4482`, `:4520-4522`).
+- `/mode plan`, by argument or by picker. The host records the pair *before* moving the session: the pair to restore is the one the session is in now, not `plan` itself (`packages/coding-agent/src/interactive.ts:4478-4485`, `:4512-4523`). Re-selecting `plan` while already in plan mode records nothing (`:4480-4482`, `:4520-4522`).
 - Shift+Tab. The REPL owns the key and moves both axes before the app layer hears about it, so the host passes the pair it left as `previous` (`interactive.ts:2173-2184`). `recordPlanEntry(previous)` stores that pair and the model that is live now; it does not move the model, because this callback records rather than enters (`plan-mode.ts:205-219`).
 
 Both doors therefore produce the same state as a model-driven entry, minus the model swap: a saved pair that an approval can restore.

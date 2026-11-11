@@ -7,6 +7,19 @@ commands, and SHA-256 checksums.
 
 ### Added
 
+- **Windows enforces read-only without a native backend.** A read-only policy
+  that used to resolve `refused` on Windows now runs under an AppContainer
+  grant that carries only `FILE_READ_EXECUTE` on every granted root — the
+  workspace included — so the command can read the tree and run what it
+  needs, and writes both inside the workspace and outside the grant fail.
+  The grant gets its own profile name (`labunbun-ro-<digest>`,
+  `labunbun-net-ro-<digest>`) so it never shares a refcounted identity with a
+  write grant, and no `.git` narrowing is needed because the mask already
+  refuses every write. Read-only with `network: "restricted"` still resolves
+  `refused`: the container can only reach the restricted axis through a
+  loopback proxy it cannot see. `describeSandboxBackend` says which of the
+  two modes is in force. See `docs/dev/sandbox.md`.
+
 - **The process scales to the request.** Every user prompt is now read for its
   size before the model sees it: `trivial` (an explicit small cue such as
   `just`, `typo`, `只改`), `complex` (scope words such as `all`, `refactor`,

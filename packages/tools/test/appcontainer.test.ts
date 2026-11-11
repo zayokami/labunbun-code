@@ -72,6 +72,21 @@ describe("the profile name", () => {
 		// And a different workspace's net profile is a different profile.
 		expect(net).not.toBe(appContainerProfileName("C:\\Other", true));
 	});
+
+	test("the read-only variant is a name of its own — the mask rides in the identity", () => {
+		// A read-only grant and a write grant are two DACLs with two masks. If
+		// they shared a name, the refcount would hand the second caller a grant
+		// whose ACE the first still holds — one of the two modes would run with
+		// more access than its policy promises. The name is what keeps them apart.
+		const write = appContainerProfileName("C:\\Ws", true);
+		const readOnly = appContainerProfileName("C:\\Ws", true, true);
+		expect(readOnly).not.toBe(write);
+		expect(readOnly).toMatch(/^labunbun-net-ro-[0-9a-f]{16}$/);
+		expect(appContainerProfileName("C:\\Ws", false, true)).toMatch(/^labunbun-ro-[0-9a-f]{16}$/);
+		// Case and separators still fold, and a different workspace still differs.
+		expect(readOnly).toBe(appContainerProfileName("c:/ws", true, true));
+		expect(readOnly).not.toBe(appContainerProfileName("C:\\Other", true, true));
+	});
 });
 
 describe("the protected narrowing's boundary", () => {
@@ -295,6 +310,45 @@ describeWindows("the grant that lets a confined command touch the workspace", ()
 		} finally {
 			releaseWorkspaceGrant(root);
 		}
+	});
+
+	test("a read-only grant keeps the workspace readable and refuses a write to it", () => {
+		// The mask is the mode: every root carries read+execute, and the
+		// workspace is no exception. A write inside the workspace has nowhere
+		// left to land, which is the one thing the read-only mode promises.
+		scaffold(root);
+		const grant = acquireWorkspaceGrant(root, false, [], [], [], true);
+		expect(grant.error).toBeUndefined();
+		const profile = grant.profile as AppContainerProfile;
+		try {
+			const read = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${root}\\src\\file.txt"`, {
+				cwd: root,
+			});
+			expect(read.exitCode).toBe(0);
+			expect(read.stdout).toContain("workspace file");
+
+			const wrote = runConfined(
+				profile,
+				`"C:\\Windows\\System32\\cmd.exe" /c echo nope > "${root}\\src\\read-only.txt" && exit 43`,
+				{ cwd: root },
+			);
+			expect(wrote.exitCode).not.toBe(43);
+			expect(existsSync(join(root, "src", "read-only.txt"))).toBe(false);
+
+			// Outside the grant is refused for the same reason it is under the
+			// write grant: the ACL, not the mask.
+			const escaped = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c echo pwned > "${outside}" && exit 43`, {
+				cwd: root,
+			});
+			expect(escaped.exitCode).not.toBe(43);
+			expect(existsSync(outside)).toBe(false);
+		} finally {
+			expect(releaseWorkspaceGrant(root, false, true)).toBeNull();
+		}
+		// The owner's own write still works after release: the grant only ever
+		// removed its own identity's ACE.
+		writeFileSync(join(root, "src", "owner-after-read-only.txt"), "mine\n");
+		expect(existsSync(join(root, "src", "owner-after-read-only.txt"))).toBe(true);
 	});
 
 	test("after release the grant's ACEs are gone and the workspace is as it was", () => {

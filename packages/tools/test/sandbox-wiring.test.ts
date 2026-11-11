@@ -2833,10 +2833,35 @@ describe("the read-only sandbox is refused where no wrapper can hold it", () => 
 		expect(resolution).toMatchObject({ reason: expect.stringContaining("bwrap") });
 	});
 
-	test("on Windows the container cannot hold it either, so it is refused even when the container is selected", () => {
+	test("on Windows the container holds it by a read+execute grant, anchored on the readable workspace", () => {
 		const cwd = workspace();
 		const resolution = resolveSandboxExecution({
 			policy: readOnlyPolicy(cwd),
+			command: ["cmd.exe", "/c", "echo hi"],
+			platform: "win32",
+			hasNativeBackend: false,
+			hasAppContainer: true,
+			executableRoots: [],
+		});
+		expect(resolution.kind).toBe("appcontainer");
+		if (resolution.kind !== "appcontainer") return;
+		// The mode's whole promise is the mask: `readOnly` tells the grant to
+		// write read+execute on every root instead of write access on the
+		// workspace, so a write to the workspace itself is refused.
+		expect(resolution.readOnly).toBe(true);
+		expect(resolution.workspace).toBe(cwd.replace(/\\/g, "/"));
+		expect(resolution.grantRoots).toEqual([cwd.replace(/\\/g, "/")]);
+		// Nothing is writable, so there is nothing to narrow.
+		expect(resolution.protectedRoots).toEqual([]);
+	});
+
+	test("with the restricted network axis the container cannot hold it, so it is refused", () => {
+		// A restricted axis lives on the loopback proxy, which a container child
+		// cannot reach; running it unconfined would grant the workspace's writes.
+		const cwd = workspace();
+		const restricted = buildSandboxPolicy({ sandbox: "read-only", workspace: cwd, network: "restricted" });
+		const resolution = resolveSandboxExecution({
+			policy: restricted,
 			command: ["cmd.exe", "/c", "echo hi"],
 			platform: "win32",
 			hasNativeBackend: false,
@@ -2913,8 +2938,16 @@ describe("the read-only sandbox is refused where no wrapper can hold it", () => 
 		expect(unavailable).toContain("bwrap is not installed");
 		expect(unavailable).not.toContain("enforced by the OS");
 		const simulated = describeSandboxBackend("simulated", "read-only", "win32");
-		expect(simulated).toContain("no read-only grant");
+		expect(simulated).toContain("not selected");
 		expect(simulated).toContain("Bash is refused");
+		const container = describeSandboxBackend("appcontainer", "read-only", "win32");
+		expect(container).toContain("enforced by the OS");
+		expect(container).toContain("read and execute only");
+		// The container's read-only grant is reachable only on the enabled axis;
+		// a restricted session must not read a sentence claiming enforcement.
+		const restricted = describeSandboxBackend("appcontainer", "read-only", "win32", undefined, true, "restricted");
+		expect(restricted).toContain("not enforced here");
+		expect(restricted).not.toContain("enforced by the OS");
 	});
 
 	test("the writable-roots line and the simulated summary both say the sandbox is read-only", () => {

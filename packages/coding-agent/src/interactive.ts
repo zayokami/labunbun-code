@@ -4132,6 +4132,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					process.platform,
 					ctx.appContainerReason,
 					!session.yolo,
+					session.network.access,
 				),
 				// The third axis, from the same source as the other two — read off
 				// the session rather than off settings, so a session that changed it

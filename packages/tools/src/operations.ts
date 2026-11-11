@@ -928,6 +928,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 				resolution.grantRoots.slice(1),
 				resolution.executableRoots,
 				resolution.protectedRoots,
+				resolution.readOnly,
 			);
 			if (grant.error !== undefined || grant.profile === undefined) {
 				// Fail closed and legibly: no grant means the child could not
@@ -986,7 +987,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 					};
 				}
 			} finally {
-				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network);
+				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network, resolution.readOnly);
 				// A failed cleanup is reported, not thrown: the command already
 				// ran and its exit code is what the caller acts on, so raising
 				// here would turn a successful command into an exception. The

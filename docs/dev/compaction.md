@@ -106,7 +106,7 @@ The host hook doors are wired next to the manager. The REPL wires `PreCompact` a
 
 ## Visibility
 
-`/context` builds rows from the manager's own limits and state (`packages/coding-agent/src/context-report.ts:122-180`, `packages/coding-agent/src/interactive.ts:4701-4729`). `Auto-compact` says `on`, `off (settings)`, or `paused after repeated failures` (`packages/coding-agent/src/context-report.ts:157-163`). `Hard limit` gives the refusal line (`packages/coding-agent/src/context-report.ts:164`). `Fixed (system + tools)` gives the part no summary can touch, and warns when that part alone is over the hard limit (`packages/coding-agent/src/context-report.ts:165-177`).
+`/context` builds rows from the manager's own limits and state (`packages/coding-agent/src/context-report.ts:122-180`, `packages/coding-agent/src/interactive.ts:4702-4730`). `Auto-compact` says `on`, `off (settings)`, or `paused after repeated failures` (`packages/coding-agent/src/context-report.ts:157-163`). `Hard limit` gives the refusal line (`packages/coding-agent/src/context-report.ts:164`). `Fixed (system + tools)` gives the part no summary can touch, and warns when that part alone is over the hard limit (`packages/coding-agent/src/context-report.ts:165-177`).
 
 With automatic compaction off in settings, the wiring says so once when the estimate crosses the threshold (`packages/coding-agent/src/compaction-wiring.ts:32-46`, `packages/coding-agent/src/compaction-wiring.ts:461-476`). The notice is edge-triggered: one per crossing, not one per turn (`packages/coding-agent/src/compaction-wiring.ts:342-348`).
 
@@ -124,7 +124,7 @@ A tripped breaker is announced once per trip through the same path (`packages/co
 | `/compact [focus]` | Runs a manual summary. The focus text is added to the prompt. Prints the receipt and the over-limit warning. Esc cancels it until the record is written. | `packages/coding-agent/src/commands.ts:148-212` |
 | `/trim` | Runs the cheap rung on request. No model call. Clears the read record. | `packages/coding-agent/src/commands.ts:286-314` |
 | `/autocompact [on\|off\|<percent>]` | Reports or changes the automatic passes and the trigger line, in the settings file and in the live manager. | `packages/coding-agent/src/interactive.ts:3957-3980`, `packages/coding-agent/src/autocompact.ts:1-14` |
-| `/context` | Shows the window's parts, the auto-compact and hard limits, the fixed part, and the last compaction. | `packages/coding-agent/src/interactive.ts:4701-4729` |
+| `/context` | Shows the window's parts, the auto-compact and hard limits, the fixed part, and the last compaction. | `packages/coding-agent/src/interactive.ts:4702-4730` |
 
 ## Why
 
