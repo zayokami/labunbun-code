@@ -41,6 +41,16 @@ export type SessionEntry =
 			message: AgentMessage;
 			summary: string;
 			preservedFiles: PreservedFile[];
+			/**
+			 * The suffix entries this boundary was written in front of, in order.
+			 *
+			 * The suffix lands one message at a time after the boundary, so a kill
+			 * between those writes leaves a summary with no context under it. These
+			 * ids are the commit record: a load that finds only a prefix of them on
+			 * the chain rolls the leaf back to the transcript the boundary replaced.
+			 * Absent on records written before the field existed.
+			 */
+			suffixIds?: string[];
 			preTokens: number;
 			postTokens: number;
 			/** Which model wrote the summary. */
@@ -268,6 +278,8 @@ export class SessionStore {
 	#leafId: string | null = null;
 	#skippedLines = 0;
 	#truncated = false;
+	/** Compactions whose retained suffix was torn on disk when this store loaded. */
+	#recoveredCompactions = 0;
 	/**
 	 * The file ends in a line with no terminator: a writer that died mid-line left
 	 * it. The next append has to start a line of its own, or its entry is glued onto
@@ -295,6 +307,16 @@ export class SessionStore {
 	/** True when the file was longer than the caller let this store read. */
 	get truncated(): boolean {
 		return this.#truncated;
+	}
+
+	/**
+	 * Compactions this load found with only part of their retained suffix on
+	 * disk, and rolled back to the transcript the summary replaced. The caller's
+	 * warning channel reports it the way it reports skipped lines: a session that
+	 * lost a summary is readable, but not unchanged.
+	 */
+	get recoveredCompactions(): number {
+		return this.#recoveredCompactions;
 	}
 
 	static startNew(cwd: string, home?: string): SessionStore {
@@ -355,6 +377,7 @@ export class SessionStore {
 			throw new SessionReadError(path, error);
 		}
 		store.#recomputeLeaf();
+		store.#recoverTornCompaction();
 		return store;
 	}
 
@@ -430,9 +453,16 @@ export class SessionStore {
 		this.#linear = null;
 	}
 
-	appendMessage(message: AgentMessage): SessionEntry {
+	/**
+	 * Append a message below the active leaf.
+	 *
+	 * `id` is for the caller that must name the entry before it is written: a
+	 * compaction boundary lists the suffix entries it is about to append, so the
+	 * file can tell a complete commit from a torn one.
+	 */
+	appendMessage(message: AgentMessage, id?: string): SessionEntry {
 		const entry: SessionEntry = {
-			id: newEntryId(),
+			id: id ?? newEntryId(),
 			parentId: this.#leafId ?? this.entries[this.entries.length - 1]?.id ?? "",
 			type: "message",
 			timestamp: Date.now(),
@@ -560,6 +590,10 @@ export class SessionStore {
 			return null;
 		}
 
+		// Ids are claimed before the boundary is written, so the record can name the
+		// suffix entries it is about to append. Without them a kill between those
+		// writes is indistinguishable from a branch inside the suffix.
+		const suffixIds = record.suffix.map(() => newEntryId());
 		const entry: SessionEntry = {
 			id: newEntryId(),
 			// The chain's root: the header for a session this store started, or
@@ -570,13 +604,35 @@ export class SessionStore {
 			message: record.boundary,
 			summary: record.summary,
 			preservedFiles: record.preservedFiles,
+			suffixIds,
 			preTokens: record.preTokens,
 			postTokens: record.postTokens,
 			model: record.model,
 			trigger: record.trigger,
 		};
-		this.append(entry);
-		for (const message of record.suffix) this.appendMessage(message);
+		const previousLength = this.entries.length;
+		const previousLeafId = this.#leafId;
+		const previousLinear = this.#linear;
+		const previousUnterminatedTail = this.#unterminatedTail;
+		try {
+			this.append(entry);
+			for (let i = 0; i < record.suffix.length; i++) {
+				const message = record.suffix[i];
+				const id = suffixIds[i];
+				if (message === undefined || id === undefined) continue;
+				this.appendMessage(message, id);
+			}
+		} catch (error) {
+			// The write failed mid-suffix. The file now ends in a partial commit, but
+			// this process is still running on the transcript the summary replaced:
+			// adopting the boundary would send the model a summary whose context this
+			// process never had. A later load recovers the same way from the file.
+			this.entries.length = previousLength;
+			this.#leafId = previousLeafId;
+			this.#linear = previousLinear;
+			this.#unterminatedTail = previousUnterminatedTail;
+			throw error;
+		}
 		return entry;
 	}
 
@@ -634,6 +690,46 @@ export class SessionStore {
 			}
 		}
 		return lines.join("\n") || "(empty session)";
+	}
+
+	/**
+	 * Undo a compaction whose retained suffix was only partly written.
+	 *
+	 * The boundary names the suffix entries it was written in front of. When the
+	 * active chain holds only a strict prefix of them, the commit was torn: the
+	 * summary landed and the messages under it did not, so resuming on it would
+	 * replay the summary alone and lose the request and tool results it stood in
+	 * front of. The leaf goes back to the entry written immediately before the
+	 * boundary — the transcript the summary replaced — where a later append
+	 * continues the conversation it interrupted.
+	 *
+	 * A branch inside the suffix is not a prefix of those ids, so a choice the
+	 * user made is never read as a crash. A capped read is the caller's cut, not
+	 * the file's ending, and is left alone for the same reason `#unterminatedTail`
+	 * is.
+	 */
+	#recoverTornCompaction(): void {
+		if (this.#truncated) return;
+		const chain = this.linearEntries();
+		let boundaryIndex = -1;
+		for (let i = chain.length - 1; i >= 0; i--) {
+			if (chain[i]?.type === "compaction") {
+				boundaryIndex = i;
+				break;
+			}
+		}
+		if (boundaryIndex === -1) return;
+		const boundary = chain[boundaryIndex];
+		if (boundary?.type !== "compaction" || !boundary.suffixIds?.length) return;
+		const written = chain.slice(boundaryIndex + 1);
+		if (written.length >= boundary.suffixIds.length) return;
+		if (!written.every((entry, i) => entry.id === boundary.suffixIds?.[i])) return;
+		const position = this.entries.indexOf(boundary);
+		const previous = position > 0 ? this.entries[position - 1] : undefined;
+		if (!previous) return;
+		this.#leafId = previous.id;
+		this.#linear = null;
+		this.#recoveredCompactions++;
 	}
 
 	#recomputeLeaf(): void {

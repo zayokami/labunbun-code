@@ -47,6 +47,14 @@ commands, and SHA-256 checksums.
   writing, locking files, or holding ports after the tool has reported failure.
   The normal-exit path is untouched.
 
+- **A half-written compaction no longer erases the turn it kept.** The boundary
+  records the ids of the retained suffix messages. A load that finds only a
+  strict prefix on the chain rolls the leaf back to the transcript the summary
+  replaced, and the resume notice names it ("1 interrupted compaction rolled
+  back to the previous transcript"). A write that fails mid-suffix leaves the
+  live transcript on its old leaf, and a real branch inside the suffix is not a
+  prefix, so a choice the user made is never read as a crash.
+
 - **Malformed tool arguments fail before validation.** A tool call whose
   arguments are not JSON is carried as a dedicated `MalformedToolArguments`
   value and answered before schema validation, `validateInput`, hooks, and

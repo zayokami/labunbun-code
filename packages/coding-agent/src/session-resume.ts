@@ -188,7 +188,9 @@ export function loadSessionForResume(
  * line, which would make one lost line read as two lost things. An interrupted
  * call is not a loss at all: it is answered with an error result, and saying so
  * is what keeps a synthetic answer from reading as something a tool said. A
- * count the user cannot check is worse than three they can.
+ * compaction rolled back to its previous transcript did lose its summary, so it
+ * is named beside the damaged lines rather than left silent. A count the user
+ * cannot check is worse than three they can.
  */
 export function damagedSessionNotice(store: SessionStore, removed: number, synthesized = 0): string | undefined {
 	const losses: string[] = [];
@@ -200,6 +202,11 @@ export function damagedSessionNotice(store: SessionStore, removed: number, synth
 	}
 	if (synthesized > 0) {
 		losses.push(`${synthesized} interrupted tool call${synthesized === 1 ? "" : "s"} answered with an error result`);
+	}
+	if (store.recoveredCompactions > 0) {
+		losses.push(
+			`${store.recoveredCompactions} interrupted compaction${store.recoveredCompactions === 1 ? "" : "s"} rolled back to the previous transcript`,
+		);
 	}
 	if (losses.length === 0) return undefined;
 	return `Session file damaged: ${losses.join(" and ")} (${store.path}). The rest of the conversation is intact.`;

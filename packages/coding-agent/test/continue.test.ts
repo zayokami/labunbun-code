@@ -638,6 +638,18 @@ describe("a session file that lost a line", () => {
 		expect(damagedSessionNotice(capped, 0)).toBeUndefined();
 	});
 
+	test("reports a compaction it rolled back, even with no damaged line", () => {
+		const { home, cwd } = fixture();
+		const store = SessionStore.startNew(cwd, home);
+		// The counter comes from a load that found a half-written suffix; the
+		// wording is what this test pins, so the value is placed directly.
+		Object.defineProperty(store, "recoveredCompactions", { value: 1 });
+
+		const notice = damagedSessionNotice(store, 0);
+		expect(notice).toContain("Session file damaged: 1 interrupted compaction rolled back to the previous transcript");
+		expect(notice).toContain(store.path);
+	});
+
 	test("continue on a damaged file keeps the newest turn and warns", async () => {
 		const { home, cwd } = fixture();
 		const store = SessionStore.startNew(cwd, home);

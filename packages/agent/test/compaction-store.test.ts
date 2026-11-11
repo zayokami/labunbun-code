@@ -6,7 +6,7 @@
  * at full price, and only to summarize it again.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
@@ -191,5 +191,125 @@ describe("appendCompaction", () => {
 		expect(store.appendCompaction(RECORD(boundary, [user("something else")]))).toBeNull();
 		expect(store.appendCompaction(RECORD(boundary, [assistant("real two"), user("real one")]))).toBeNull();
 		expect(store.contextMessages()).toEqual([user("real one"), assistant("real two")]);
+	});
+});
+
+/** The entry lines of a session file, without the empty tail after the last newline. */
+function fileLines(path: string): string[] {
+	return readFileSync(path, "utf8")
+		.split("\n")
+		.filter((line) => line.trim().length > 0);
+}
+
+function writeFileLines(path: string, lines: string[]): void {
+	writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+}
+
+/** The line index of the compaction boundary. */
+function boundaryLine(lines: string[]): number {
+	const index = lines.findIndex((line) => (JSON.parse(line) as { type?: string }).type === "compaction");
+	if (index === -1) throw new Error("expected a compaction boundary");
+	return index;
+}
+
+describe("a compaction torn mid-suffix", () => {
+	const old = [user("old request"), assistant("old answer")];
+	const tail = [user("current request"), toolResult("call-1")];
+
+	test("a boundary whose suffix never landed resumes on the transcript it replaced", () => {
+		// The boundary is written first and the suffix one message at a time. A kill
+		// between them used to leave the boundary as the leaf, so resume replayed the
+		// summary alone: the request being answered and the result it was waiting on
+		// were gone.
+		const store = newStore();
+		fill(store, [...old, ...tail]);
+		expect(store.appendCompaction(RECORD(compactionBoundary("summary"), tail))).not.toBeNull();
+
+		const lines = fileLines(store.path);
+		writeFileLines(store.path, lines.slice(0, boundaryLine(lines) + 1));
+
+		const reloaded = SessionStore.load(store.path);
+		expect(reloaded.recoveredCompactions).toBe(1);
+		expect(reloaded.contextMessages()).toEqual([...old, ...tail]);
+	});
+
+	test("a boundary with one suffix message written is rolled back the same way", () => {
+		const store = newStore();
+		fill(store, [...old, ...tail]);
+		store.appendCompaction(RECORD(compactionBoundary("summary"), tail));
+
+		const lines = fileLines(store.path);
+		writeFileLines(store.path, lines.slice(0, boundaryLine(lines) + 2));
+
+		const reloaded = SessionStore.load(store.path);
+		expect(reloaded.recoveredCompactions).toBe(1);
+		expect(reloaded.contextMessages()).toEqual([...old, ...tail]);
+	});
+
+	test("a record without suffix metadata is a complete commit", () => {
+		// Files written before the field existed carry no commit record. They are not
+		// torn, and nothing may be rolled back on their behalf.
+		const store = newStore();
+		const kept = [user("current request")];
+		fill(store, [user("old request"), assistant("old answer"), ...kept]);
+		const boundary = compactionBoundary("summary");
+		store.appendCompaction(RECORD(boundary, kept));
+		expect(store.compactions()).toHaveLength(1);
+
+		const lines = fileLines(store.path).map((line) => {
+			const entry = JSON.parse(line) as Record<string, unknown>;
+			if (entry.type !== "compaction") return line;
+			delete entry.suffixIds;
+			return JSON.stringify(entry);
+		});
+		writeFileLines(store.path, lines);
+
+		const reloaded = SessionStore.load(store.path);
+		expect(reloaded.recoveredCompactions).toBe(0);
+		expect(reloaded.contextMessages()).toEqual([boundary, ...kept]);
+	});
+
+	test("a suffix write that fails leaves the live transcript on the old leaf", () => {
+		// The disk refuses the second suffix message. The file now ends in a partial
+		// commit, but this process is still running on the transcript the summary
+		// replaced — the two must not disagree about what is being sent.
+		const store = newStore();
+		fill(store, [...old, ...tail]);
+		const oldLeaf = store.linearEntries().at(-1);
+		if (!oldLeaf) throw new Error("expected a pre-compaction leaf");
+
+		const realAppend = store.appendMessage.bind(store);
+		let suffixWrites = 0;
+		store.appendMessage = (message: AgentMessage, id?: string) => {
+			suffixWrites++;
+			if (suffixWrites === 2) throw new Error("ENOSPC: no space left on device");
+			return realAppend(message, id);
+		};
+
+		expect(() => store.appendCompaction(RECORD(compactionBoundary("summary"), tail))).toThrow("ENOSPC");
+		expect(store.contextMessages()).toEqual([...old, ...tail]);
+
+		const appended = store.appendMessage(user("after the failure"));
+		expect(appended.parentId).toBe(oldLeaf.id);
+		expect(store.contextMessages()).toEqual([...old, ...tail, user("after the failure")]);
+	});
+
+	test("a branch inside the suffix is not read as a torn commit", () => {
+		// Branching to a retained entry and continuing from it writes a chain that
+		// is not a prefix of the recorded ids — deliberately different, not cut
+		// short. Rolling the leaf back here would throw away the user's branch.
+		const store = newStore();
+		fill(store, [user("old request"), ...tail]);
+		const boundary = compactionBoundary("summary");
+		store.appendCompaction(RECORD(boundary, tail));
+		const firstSuffix = store.entries.filter((entry) => entry.type === "message").at(-tail.length);
+		if (firstSuffix?.type !== "message") throw new Error("expected the first suffix entry");
+
+		expect(store.branch(firstSuffix.id)).toBe(true);
+		store.appendMessage(user("a different direction"));
+
+		const reloaded = SessionStore.load(store.path);
+		expect(reloaded.recoveredCompactions).toBe(0);
+		expect(reloaded.contextMessages()).toEqual([boundary, tail[0], user("a different direction")]);
 	});
 });
