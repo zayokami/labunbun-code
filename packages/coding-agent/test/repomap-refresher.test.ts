@@ -45,8 +45,14 @@ const RECURSIVE_WATCH = (() => {
  * Call the refresher until `check` holds. Every call is after a pause long
  * enough for the watcher's own window to close, so the loop is about event
  * delivery rather than about guessing the debounce.
+ *
+ * The wait is fifteen seconds because delivery is not this test's claim: the
+ * macOS CI runner delivered the event later than four seconds on two runs in a
+ * row (43008267282) while the same row had passed on earlier runs, and the whole
+ * suite runs every test file at once on that machine. The assertions after the
+ * loop are unchanged — one apply, carrying the change, and no churn after.
  */
-async function settle(refresh: () => Promise<void>, check: () => boolean, timeoutMs = 4_000): Promise<void> {
+async function settle(refresh: () => Promise<void>, check: () => boolean, timeoutMs = 15_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (!check() && Date.now() < deadline) {
 		await new Promise((resolve) => setTimeout(resolve, 80));
