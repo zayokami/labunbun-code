@@ -7,7 +7,14 @@
  */
 import { describe, expect, test } from "bun:test";
 import { textContent, toolResultMessage } from "@labunbun/ai";
-import { capRoundResults, cutText, MAX_ROUND_RESULT_CHARS, MIN_ROUND_RESULT_CHARS } from "../src/output-limits.ts";
+import {
+	capRoundResults,
+	cutContent,
+	cutText,
+	MAX_ROUND_RESULT_CHARS,
+	MIN_ROUND_RESULT_CHARS,
+	type SpillRequest,
+} from "../src/output-limits.ts";
 
 /** A writer that keeps what it was given, so the spilled text is assertable. */
 function keeper() {
@@ -228,6 +235,45 @@ describe("cutText", () => {
 	test("no room for a head still leaves the pointer and the notice", () => {
 		const text = cutText("f".repeat(500), 0);
 		expect(text).toBe("... [truncated 500 chars of output]");
+	});
+});
+
+describe("cutContent", () => {
+	test("blocks of one result spill to files of their own, numbered by text-block order", () => {
+		const seen: Array<{ part: number | undefined; text: string }> = [];
+		const writer = (request: SpillRequest) => {
+			seen.push({ part: request.part, text: request.text });
+			return `/spill/${request.toolName}-${request.callId}${request.part ? `-part-${request.part}` : ""}.txt`;
+		};
+		const blocks = [
+			{ type: "text" as const, text: "A".repeat(5_000) },
+			{ type: "text" as const, text: "B".repeat(5_000) },
+		];
+		const cut = cutContent(blocks, 100, writer, { callId: "call_9", toolName: "Grep", text: "" });
+
+		// One call id, two files: without the part suffix the second write would
+		// replace the first, and block one's pointer would name block two's bytes.
+		expect(seen.map((entry) => entry.part)).toEqual([1, 2]);
+		expect(seen[0]?.text).toBe("A".repeat(5_000));
+		expect(seen[1]?.text).toBe("B".repeat(5_000));
+		expect((cut[0] as { text: string }).text).toContain("-part-1.txt");
+		expect((cut[1] as { text: string }).text).toContain("-part-2.txt");
+		expect((cut[1] as { text: string }).text).not.toContain("-part-1.txt");
+	});
+
+	test("a single text block keeps the unnamed file every earlier pointer named", () => {
+		const seen: Array<number | undefined> = [];
+		const cut = cutContent(
+			[{ type: "text", text: "x".repeat(5_000) }],
+			100,
+			(request) => {
+				seen.push(request.part);
+				return "/spill/Bash-call_1.txt";
+			},
+			request,
+		);
+		expect(seen).toEqual([undefined]);
+		expect((cut[0] as { text: string }).text).toContain("/spill/Bash-call_1.txt");
 	});
 });
 

@@ -27,6 +27,21 @@ describe("writeToolOutput", () => {
 		expect(readFileSync(path as string, "utf8")).toBe("the whole build log");
 	});
 
+	test("each text block of one result gets its own file", () => {
+		// The blocks share a call id; a name keyed on the id alone made every
+		// preview after the first point at text its file no longer held.
+		const home = tempHome();
+		const first = writeToolOutput({ ...REQUEST, part: 1 }, { cwd: "/work/project", sessionId: "s1", home });
+		const second = writeToolOutput(
+			{ ...REQUEST, part: 2, text: "the second block" },
+			{ cwd: "/work/project", sessionId: "s1", home },
+		);
+		expect(first).toBe(join(toolOutputDir("/work/project", "s1", home), "Bash-call_1-part-1.txt"));
+		expect(second).toBe(join(toolOutputDir("/work/project", "s1", home), "Bash-call_1-part-2.txt"));
+		expect(readFileSync(first as string, "utf8")).toBe("the whole build log");
+		expect(readFileSync(second as string, "utf8")).toBe("the second block");
+	});
+
 	test("a run with no session still has somewhere to put it", () => {
 		const home = tempHome();
 		const path = writeToolOutput(REQUEST, { cwd: "/work/project", sessionId: undefined, home });

@@ -279,6 +279,15 @@ commands, and SHA-256 checksums.
 
 ### Fixed
 
+- **A multi-block result keeps every block's full text on disk.** When one cut
+  spilled more than one text block of the same result, each block was written
+  to a file named from the call id, and the blocks share that id, so each
+  write replaced the one before: every preview's pointer but the last named
+  bytes it did not hold. The writer now suffixes `-part-N`, counted by
+  occurrence among text blocks
+  (image and other blocks do not count), and a single-block result keeps the
+  name it always had. `SpillRequest.part` carries the number.
+
 - **An escaped command is read as the shell runs it.** The classifier read a
   command line as written, so a POSIX backslash left the program `r\m` and the
   target `\/` — names no shell runs — and CMD's caret did the same to `de^l /s

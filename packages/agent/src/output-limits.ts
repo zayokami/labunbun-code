@@ -19,6 +19,13 @@ export interface SpillRequest {
 	/** Named so the file it lands in is attributable to the tool that made it. */
 	toolName: string;
 	text: string;
+	/**
+	 * Which text block of the result this is, counted by occurrence among text
+	 * blocks (not by array index — image and other blocks do not count). Absent
+	 * for a single-block result, which keeps the plain `tool-call.txt` name, and
+	 * absent for writers that spill the whole result as one file.
+	 */
+	part?: number;
 }
 
 /**
@@ -135,15 +142,24 @@ export function cutContent(
 	request?: SpillRequest,
 ): ToolResultContent[] {
 	let used = 0;
+	// Text blocks share one call id, so a writer keyed on the id alone would have
+	// every block of a multi-block result overwrite the same file: the first
+	// preview's pointer would end up naming the last block's text. The part
+	// number is assigned by occurrence among text blocks, so it stays stable
+	// when a non-text block sits between two of them.
+	const textBlocks = content.filter((block) => block.type === "text").length;
+	let part = 0;
 	return content.map((block) => {
 		if (block.type !== "text") return block;
+		part += 1;
+		const partRequest = request && textBlocks > 1 ? { ...request, part } : request;
 		const remaining = limit - used;
 		if (block.text.length <= remaining) {
 			used += block.text.length;
 			return block;
 		}
 		used = limit;
-		return { ...block, text: cutText(block.text, Math.max(0, remaining), spill, request) };
+		return { ...block, text: cutText(block.text, Math.max(0, remaining), spill, partRequest) };
 	});
 }
 

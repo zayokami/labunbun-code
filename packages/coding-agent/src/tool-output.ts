@@ -70,7 +70,12 @@ export function toolSpillDir(cwd: string, home?: string): string {
 function fileNameFor(request: SpillRequest): string {
 	const safe = request.callId.replace(/[^\w-]/g, "_").slice(0, 100);
 	const tool = request.toolName.replace(/[^\w-]/g, "").slice(0, 20) || "tool";
-	return `${tool}-${safe}.txt`;
+	// A part exists only when one result has more than one text block. They
+	// share a call id, so without the suffix each write replaces the previous
+	// block and every pointer but the last names bytes it does not hold. A
+	// single-block result keeps the name it always had.
+	const part = request.part === undefined ? "" : `-part-${request.part}`;
+	return `${tool}-${safe}${part}.txt`;
 }
 
 export interface SpillWriterOptions {
