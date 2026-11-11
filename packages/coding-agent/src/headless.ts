@@ -739,6 +739,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// message in this run records what it cost. In memory only, like the
 	// accumulator beside it.
 	const summaryUsage = new CostTracker();
+	// The turns a compaction replaced. They were in the transcript and are not
+	// any more, so the final re-cost of the messages cannot see them; this run is
+	// resumed from a session file as often as not, which is exactly when the
+	// dropped prefix is someone else's spend. In memory only, like its neighbours.
+	const droppedUsage = new CostTracker();
 	// The fleet as the host watches it, the same table the REPL injects: the
 	// close-out note's live count has to be read from the registry the tools
 	// write to, or it would be a claim rather than an observation.
@@ -885,6 +890,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// JSON result both read. Its message never enters the transcript, so
 		// nothing else in this run would ever count it.
 		onSummaryUsage: (provider, modelId, usage) => summaryUsage.recordUsage(provider, modelId, usage),
+		// Assistant turns the summary replaces leave the transcript at the same
+		// swap; their usage is booked here so the final re-cost still bills them.
+		onDroppedUsage: (provider, modelId, usage) => droppedUsage.recordUsage(provider, modelId, usage),
 		noteRewrite: (cause) => transport.tracker?.note(cause),
 		// The cheap rung replaces old tool results with previews, so the bytes the
 		// model was shown are gone from its context and the read record goes too.
@@ -970,13 +978,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// whole outline; a large one gets no section and the RepoMap tool instead.
 	const repoMapText = await repoMapPromptSection(repoMap);
 	// What this run has spent so far: the transcript, re-costed from its own
-	// usage records, plus the two requests that never enter it — a subagent's
-	// conversation and the summary call. One reader for the budget gate and the
-	// JSON result, so the two cannot disagree about the bill.
+	// usage records, plus the requests and turns that never stay in it — a
+	// subagent's conversation, the summary call, and the assistant turns a
+	// summary replaced. One reader for the budget gate and the JSON result, so
+	// the two cannot disagree about the bill.
 	const totalSpendUSD = (): number =>
 		costStateFromMessages(session.messages).totalCostUSD +
 		subagentUsage.state.totalCostUSD +
-		summaryUsage.state.totalCostUSD;
+		summaryUsage.state.totalCostUSD +
+		droppedUsage.state.totalCostUSD;
 	// Annotated because `checkBudget` below reads this very session's messages:
 	// without the annotation the type would be inferred from its own initializer.
 	const session: AgentSession = new AgentSession({
@@ -1251,10 +1261,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const finalIncomplete = finalMessage?.incomplete === true;
 	const usage = totalUsage(session.messages);
 	// The summary call is a request this run sent whose message never enters the
-	// transcript, so its tokens join the total here — the same reason `cost_usd`
-	// has an accumulator. Subagent tokens stay out: their conversations are
-	// separate runs, and their money is reported beside the bill instead.
+	// transcript, and the turns it replaced left it, so both sets of tokens join
+	// the total here — the same reason `cost_usd` has accumulators. Subagent
+	// tokens stay out: their conversations are separate runs, and their money is
+	// reported beside the bill instead.
 	addUsageTotals(usage, summaryUsage.state);
+	addUsageTotals(usage, droppedUsage.state);
 
 	// Before the result goes to stdout, so a script that reads the file as soon
 	// as the process exits can never win a race with the write. A missing
@@ -1303,7 +1315,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// conversations never enter this transcript, so a sum of the messages
 			// alone under-reported every run that fanned out. The summary call is
 			// added for the same reason, though it is not named separately: it is
-			// this run's own request, and a full-prefix one.
+			// this run's own request, and a full-prefix one. The turns a summary
+			// replaced are added too, from the accumulator that watched them leave.
 			cost_usd: totalSpendUSD(),
 			subagent_cost_usd: subagentUsage.state.totalCostUSD,
 			duration_ms: Date.now() - startedAt,

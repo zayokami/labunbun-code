@@ -799,6 +799,21 @@ export interface CompactionManagerDeps {
 	 * the summarizer that was asked when a fallback chain answered instead.
 	 */
 	onUsage?: (provider: string, modelId: string, usage: Usage) => void;
+	/**
+	 * Book the usage of assistant messages a successful summary replaces.
+	 *
+	 * The rebuilt context keeps the compaction boundary and the retained suffix;
+	 * every assistant message above them leaves the transcript. Its usage was
+	 * billed when it was admitted, and a host that costs the conversation from
+	 * its messages alone would lose it at this swap — the same hole `onUsage`
+	 * fills for the summary request itself.
+	 *
+	 * Called once per replaced message that billed something, after the pass has
+	 * committed and before the caller adopts the new context. A failed or
+	 * cancelled pass replaces nothing and books nothing; a message kept in the
+	 * suffix stays in the transcript and is not reported here.
+	 */
+	onDroppedUsage?: (provider: string, modelId: string, usage: Usage) => void;
 }
 
 export class CompactionManager {
@@ -1220,6 +1235,16 @@ export class CompactionManager {
 			// After the record, so a listener that reads the store's compaction list
 			// on this news sees the one being reported rather than the previous one.
 			await this.#deps.onPhase?.({ kind: "done", preTokens, postTokens: this.#lastPostTokens, trigger, verification });
+			// The swap that follows removes the prefix from the transcript, and with
+			// it every usage figure a host could still read there. Booked before the
+			// caller adopts `rebuilt`, so no reader ever sees the new conversation
+			// without the spend it inherited. Only the messages actually leaving are
+			// reported: the suffix stays in `rebuilt` (the rescue trim touches tool
+			// results, never assistant turns), and an empty pass books nothing.
+			for (const message of prefix) {
+				if (message.role !== "assistant" || !billedSomething(message.usage)) continue;
+				this.#deps.onDroppedUsage?.(message.provider, message.model, message.usage);
+			}
 
 			return { ...context, messages: rebuilt };
 		} catch (error) {

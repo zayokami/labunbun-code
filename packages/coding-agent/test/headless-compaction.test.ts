@@ -53,6 +53,7 @@ async function runCaptured(
 	options: {
 		streamFn: ReturnType<typeof fauxProvider>["streamFn"];
 		noSession?: boolean;
+		resumeSessionId?: string;
 		outputFormat?: "json" | "stream-json";
 	},
 ): Promise<{ code: number; stdout: string }> {
@@ -68,6 +69,7 @@ async function runCaptured(
 			modelRef: "anthropic/claude-haiku-4-5",
 			cwd: f.cwd,
 			noSession: options.noSession ?? true,
+			resumeSessionId: options.resumeSessionId,
 			outputFormat: options.outputFormat ?? "json",
 			streamFn: options.streamFn,
 			home: f.home,
@@ -170,6 +172,72 @@ describe("a `-p` run that runs out of room", () => {
 		// The summary is this run's own spend, not a subagent's: it must not be
 		// attributed to the accumulator that names another conversation.
 		expect(result.subagent_cost_usd).toBe(0);
+	});
+
+	test("a turn the summary replaces stays on the bill, and in the usage total", async () => {
+		// The resumed run is where this hole was widest: the transcript it starts
+		// from was paid for by an earlier process, and the summary then removes the
+		// message that carried the record. Re-costing the messages alone reports a
+		// run that inherited a conversation for free. The conversation needs two
+		// rounds before the overflow: the retained suffix is the last user turn and
+		// what follows it, so only the round before that is replaced. Haiku 4.5 is
+		// $1/$5 per Mtok: the dropped turn's 1M output is $5.00, the summary (1M in,
+		// 100k out) is $1.50, and the prompt again (1M in) is $1.00.
+		const prepared = async (): Promise<{ f: Fixture; sessionId: string }> => {
+			const f = fixture();
+			const first = await runCaptured(f, {
+				streamFn: fauxProvider([{ text: "first answer", usage: { output: 1_000_000 } }]).streamFn,
+				noSession: false,
+			});
+			expect(first.code).toBe(0);
+			const [session] = SessionStore.listSessions(f.cwd, f.home);
+			if (!session) throw new Error("the first run saved no session");
+			// A second round, kept whole by the summary's suffix: this is the boundary
+			// between what the summary replaces and what it retains.
+			const second = await runCaptured(f, {
+				streamFn: fauxProvider([{ text: "second answer" }]).streamFn,
+				noSession: false,
+				resumeSessionId: session.sessionId,
+			});
+			expect(second.code).toBe(0);
+			return { f, sessionId: session.sessionId };
+		};
+		const overflow = (): ReturnType<typeof fauxProvider>["streamFn"] =>
+			fauxProvider([
+				OVERFLOW,
+				{ text: "<summary>1. Primary Request: hello</summary>", usage: { input: 1_000_000, output: 100_000 } },
+				{ text: "done", usage: { input: 1_000_000 } },
+			]).streamFn;
+
+		// Tokens and money are reported on different result shapes, and a resumed
+		// run writes its own compaction back to the session file — so each surface
+		// gets a conversation prepared for it rather than reading the other's.
+		const forUsage = await prepared();
+		const resumed = await runCaptured(forUsage.f, {
+			streamFn: overflow(),
+			noSession: false,
+			resumeSessionId: forUsage.sessionId,
+			outputFormat: "stream-json",
+		});
+		expect(resumed.code).toBe(0);
+		const lines = resumed.stdout
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { type: string; usage?: { input: number; output: number } });
+		const result = lines.find((line) => line.type === "result");
+		// The surviving prompt again (1M in) plus the summary's 1M in; the dropped
+		// turn's 1M out rides beside the summary's 100k out.
+		expect(result?.usage?.input).toBe(2_000_000);
+		expect(result?.usage?.output).toBe(1_100_000);
+
+		const forCost = await prepared();
+		const json = await runCaptured(forCost.f, {
+			streamFn: overflow(),
+			noSession: false,
+			resumeSessionId: forCost.sessionId,
+		});
+		const spent = JSON.parse(json.stdout) as { cost_usd: number };
+		expect(spent.cost_usd).toBeCloseTo(7.5, 10);
 	});
 
 	test("a stream-json result counts the summary's tokens in its usage total", async () => {

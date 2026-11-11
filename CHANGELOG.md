@@ -291,8 +291,20 @@ commands, and SHA-256 checksums.
   asked when a fallback took over. A `-p` run's stream-json `usage` total
   carries the summary's tokens for the same reason its money does. A
   subagent's compaction books on the run's own seat, so the light ceiling sees
-  it too. A beetle member's summaries are still outside its cost: a member is
-  costed from its post-compaction transcript, which does not hold them.
+  it too.
+
+- **A summary puts the turns it replaces on the bill too.** A successful
+  compaction keeps the boundary and the retained suffix and drops every
+  assistant message above them; the usage those turns recorded was paid for
+  when they were admitted, and a transcript re-costed after the swap no longer
+  holds it. The manager now reports each replaced message that billed
+  something, and every surface that costs the conversation from its messages
+  adds it: a `-p` run's `cost_usd` and stream-json `usage` (which is what makes
+  a resumed run count what the earlier one spent on a turn the summary
+  removed), the ACP budget gate, and a beetle member's tally — which now also
+  books the member's own summary requests, closing the gap the entry above
+  described. A host that books every `turn_end` as it happens (the REPL, a
+  subagent) is not given the new callback, so nothing is counted twice.
 
 - **A multi-block result keeps every block's full text on disk.** When one cut
   spilled more than one text block of the same result, each block was written

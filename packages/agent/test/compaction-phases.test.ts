@@ -376,3 +376,110 @@ describe("what a summary spent", () => {
 		expect(booked).toEqual([]);
 	});
 });
+
+describe("what a summary replaces", () => {
+	const summaryOnly = (): StreamFn => fauxProvider([{ text: SUMMARY_TEXT, usage: { input: 10, output: 10 } }]).streamFn;
+
+	test("an assistant turn above the retained suffix is booked once, with its own model", async () => {
+		// The swap removes the message from the transcript; the usage it carried
+		// was already paid for. A host that costs the conversation from its
+		// messages alone would lose it here, so the pass reports it — attributed to
+		// the provider and model that answered, not the summarizer's.
+		const booked: Array<{ provider: string; modelId: string; usage: Usage }> = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: summaryOnly(),
+			summarizerModel: SUMMARIZER,
+			onDroppedUsage: (provider, modelId, usage) => booked.push({ provider, modelId, usage }),
+		});
+		const messages: AgentMessage[] = [
+			userMessage("do the thing"),
+			assistantMessage({
+				provider: "turn-provider",
+				model: "turn-model",
+				usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			}),
+			userMessage("and now this"),
+		];
+
+		await manager.compact({ systemPrompt: "", messages });
+
+		expect(booked).toEqual([
+			{
+				provider: "turn-provider",
+				modelId: "turn-model",
+				usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			},
+		]);
+	});
+
+	test("a turn the suffix keeps is not reported, because it is still readable", async () => {
+		// `keepSuffix` retains the last user message and everything after it. Those
+		// messages survive in the rebuilt context, so their usage is still there for
+		// the transcript's own re-cost; reporting them too would count them twice.
+		const booked: Usage[] = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: summaryOnly(),
+			summarizerModel: SUMMARIZER,
+			onDroppedUsage: (_provider, _modelId, usage) => booked.push(usage),
+		});
+		const messages: AgentMessage[] = [
+			userMessage("do the thing"),
+			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+			userMessage("keep going"),
+			assistantMessage({ usage: { input: 95_000, output: 200, cacheRead: 0, cacheWrite: 0 } }),
+		];
+
+		await manager.compact({ systemPrompt: "", messages });
+
+		expect(booked.map((usage) => usage.input)).toEqual([90_000]);
+	});
+
+	test("a ladder that gives up a round still reports every turn it replaced", async () => {
+		// The retry sends a smaller prefix, but the transcript is replaced from the
+		// original one: both rounds leave, so both are on the bill.
+		const booked: Usage[] = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([
+				{ stopReason: "error", errorMessage: "too long", errorKind: "context_overflow" },
+				{ text: SUMMARY_TEXT, usage: { input: 10, output: 10 } },
+			]).streamFn,
+			summarizerModel: SUMMARIZER,
+			onDroppedUsage: (_provider, _modelId, usage) => booked.push(usage),
+		});
+		const messages: AgentMessage[] = [
+			userMessage("do the thing"),
+			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+			userMessage("keep going"),
+			assistantMessage({ usage: { input: 95_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+			userMessage("and now this"),
+		];
+
+		await manager.compact({ systemPrompt: "", messages });
+
+		expect(booked.map((usage) => usage.input)).toEqual([90_000, 95_000]);
+	});
+
+	test("a pass that fails or keeps nothing replaces nothing, and books nothing", async () => {
+		// The transcript is untouched when the summary request throws and when the
+		// reply is refused for being empty; there is nothing to report either time.
+		// Booking at the start of the pass would bill a swap that never happened.
+		const thrown: Usage[] = [];
+		const down = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ throwError: new Error("provider down") }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			onDroppedUsage: (_provider, _modelId, usage) => thrown.push(usage),
+		});
+		const empty: Usage[] = [];
+		const refused = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "", usage: { input: 5_000 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			onDroppedUsage: (_provider, _modelId, usage) => empty.push(usage),
+		});
+
+		await expect(down.compact(bigContext())).rejects.toThrow("provider down");
+		await expect(refused.compact(bigContext())).rejects.toThrow("empty summary");
+
+		expect(thrown).toEqual([]);
+		expect(empty).toEqual([]);
+	});
+});

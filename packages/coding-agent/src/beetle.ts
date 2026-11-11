@@ -54,7 +54,7 @@ import { type AgentTask, TASK_BOARD_TOOL_NAMES, type TaskStore } from "@labunbun
 import { z } from "zod";
 import { BlackboardDispatcher, type BoardReport } from "./blackboard.ts";
 import { type CompactionTuning, type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
-import { costStateFromMessages } from "./cost-tracker.ts";
+import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { NO_SIGN_INS, type SubscriptionSignIns, unrunnableSuffix } from "./credential-presence.ts";
 import { offeredModels } from "./model-offer.ts";
 import { TaskPheromoneRecorder } from "./task-pheromone.ts";
@@ -554,11 +554,18 @@ interface MemberRuntime {
 	 * Spend from sessions this member has already finished, in USD.
 	 *
 	 * Like the live half in `status()`, it is costed from the session's
-	 * messages, and a compaction's own request is not one of them — its message
-	 * never enters the transcript, and the band has no `onSummaryUsage` to book
-	 * it. A member that compacted mid-task is therefore costed a summary low.
+	 * messages. What those messages cannot hold — the summary request and the
+	 * assistant turns a summary replaced — is booked into `offTranscriptUsage`
+	 * as it happens instead.
 	 */
 	settledCostUSD: number;
+	/**
+	 * Spend the member's transcripts do not hold: each compaction's own request
+	 * and the turns its summary replaced, booked at the swap. It lives as long
+	 * as the member, for the same reason `settledCostUSD` does — a destroyed
+	 * session is not a refund, and neither is a summary.
+	 */
+	offTranscriptUsage: CostTracker;
 	lastActivity: string | null;
 	/** When this member's last event landed, for the quiet watchdog. */
 	lastEventAt: number;
@@ -902,9 +909,10 @@ export class BeetleBand {
 	}
 
 	/**
-	 * What the four are doing, priced from their own transcripts. A worker
-	 * between tasks has no transcript; its spend and turns still count, because
-	 * a destroyed session is not a refund.
+	 * What the four are doing, priced from their own transcripts and the spend
+	 * those transcripts no longer hold. A worker between tasks has no
+	 * transcript; its spend and turns still count, because a destroyed session
+	 * is not a refund.
 	 */
 	status(): BeetleMemberStatus[] {
 		return BEETLE_MEMBERS.map((name) => {
@@ -920,7 +928,7 @@ export class BeetleBand {
 				pendingRef: member.pendingRef,
 				state: member.state,
 				turns: member.turns,
-				costUSD: member.settledCostUSD + liveCost,
+				costUSD: member.settledCostUSD + liveCost + member.offTranscriptUsage.state.totalCostUSD,
 				unpriced: model.pricing === undefined,
 				lastActivity: member.lastActivity,
 				messages: member.session?.messages.length ?? 0,
@@ -1116,6 +1124,7 @@ export class BeetleBand {
 			state: "idle",
 			turns: 0,
 			settledCostUSD: 0,
+			offTranscriptUsage: new CostTracker(),
 			lastActivity: null,
 			lastEventAt: Date.now(),
 			stallNotified: false,
@@ -1168,6 +1177,12 @@ export class BeetleBand {
 			tuning: options.compactionTuning,
 			spillOutput,
 			report: (text) => options.report?.(`[beetle] ${DISPLAY_NAME[name]}: ${text}`),
+			// A member has no store and no per-turn ledger, so its bill is the
+			// transcript plus these two accumulators: the summary's own request
+			// never enters the transcript, and the turns it replaces leave it at
+			// the swap. Both are the member's spend and belong to its tally.
+			onSummaryUsage: (provider, modelId, usage) => member.offTranscriptUsage.recordUsage(provider, modelId, usage),
+			onDroppedUsage: (provider, modelId, usage) => member.offTranscriptUsage.recordUsage(provider, modelId, usage),
 		});
 		const memberTools = this.#memberTools(name);
 		// The member's plan gate reads the same declarations the session's does,

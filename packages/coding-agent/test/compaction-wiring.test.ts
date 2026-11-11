@@ -24,6 +24,7 @@ import {
 } from "@labunbun/agent";
 import {
 	type AgentMessage,
+	assistantMessage,
 	type CachePolicy,
 	clearCustomModels,
 	FAUX_MODEL,
@@ -99,6 +100,7 @@ function wiring(
 		store?: SessionStore;
 		phases?: CompactionPhase[];
 		spillOutput?: SpillWriter;
+		onDroppedUsage?: (provider: string, modelId: string, usage: Usage) => void;
 	} = {},
 ): Harness {
 	let summaries = 0;
@@ -125,6 +127,7 @@ function wiring(
 		spillOutput: options.spillOutput,
 		noteRewrite: (cause) => causes.push(cause),
 		onContextReduced: () => reducedClears++,
+		onDroppedUsage: options.onDroppedUsage,
 		onPhase: options.phases
 			? (phase) => {
 					options.phases?.push(phase);
@@ -280,6 +283,41 @@ describe("which rung runs at the threshold", () => {
 		const untouched = wiring();
 		expect(await untouched.check({ systemPrompt: "", messages: [userMessage("short")] })).toBeNull();
 		expect(untouched.reducedClears()).toBe(0);
+	});
+});
+
+describe("what a summary replaces", () => {
+	test("the turns above the retained suffix are forwarded to the host's accumulator", async () => {
+		// Entry points that cost the conversation from its messages need the spend
+		// of the turns a summary removes; the wiring's job is to pass that door
+		// through unchanged, so the accumulator sees the answering model's own
+		// usage. The suffix's turn is not forwarded: it survives the swap.
+		const dropped: Array<{ provider: string; modelId: string; usage: Usage }> = [];
+		const harness = wiring({
+			trimOldToolResults: false,
+			onDroppedUsage: (provider, modelId, usage) => dropped.push({ provider, modelId, usage }),
+		});
+		const messages: AgentMessage[] = [
+			userMessage("read those files"),
+			assistantMessage({
+				provider: "turn-provider",
+				model: "turn-model",
+				usage: { input: 30_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			}),
+			userMessage("and the rest"),
+			...overThreshold().slice(1),
+		];
+
+		const decision = await harness.check({ systemPrompt: "", messages });
+
+		expect(decision?.action).toBe("compact");
+		expect(dropped).toEqual([
+			{
+				provider: "turn-provider",
+				modelId: "turn-model",
+				usage: { input: 30_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			},
+		]);
 	});
 });
 

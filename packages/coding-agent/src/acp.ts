@@ -1233,6 +1233,11 @@ class AcpAgent {
 		// every request — would never see the most expensive request this session
 		// sends. In memory only: an editor session keeps no ledger of its own.
 		const summaryUsage = new CostTracker();
+		// The assistant turns a summary replaces. The swap removes them from the
+		// transcript, so the gate's re-cost would lose spend the conversation
+		// already incurred — including, on a resumed conversation, turns an earlier
+		// editor run paid for. In memory only, like the summary accumulator.
+		const droppedUsage = new CostTracker();
 		const compactionWiring = createCompactionWiring({
 			model,
 			store,
@@ -1253,6 +1258,9 @@ class AcpAgent {
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId, home }),
 			// The summary's own request, into the accumulator the budget gate reads.
 			onSummaryUsage: (provider, modelId, usage) => summaryUsage.recordUsage(provider, modelId, usage),
+			// The turns it replaces leave the transcript at the same swap; booked
+			// beside the summary so the gate still sees what they cost.
+			onDroppedUsage: (provider, modelId, usage) => droppedUsage.recordUsage(provider, modelId, usage),
 			noteRewrite: (cause) => transport.tracker?.note(cause),
 			// The cheap rung replaces old tool results with previews, so the bytes
 			// the model was shown are gone from its context and the record goes too.
@@ -1361,11 +1369,15 @@ class AcpAgent {
 				// from. A resumed conversation counts what it already spent,
 				// because the costed messages are the ones it was resumed with.
 				// The summary accumulator is added for the one request the
-				// transcript does not keep.
+				// transcript does not keep, and the dropped one for the turns the
+				// summary replaced and the swap removed.
 				checkBudget: ({ model: answering }) => {
 					const seat = seatTable.get(modelRefKey(answering));
 					if (!seat) return { action: "ok" };
-					const spent = costStateFromMessages(session.messages).totalCostUSD + summaryUsage.state.totalCostUSD;
+					const spent =
+						costStateFromMessages(session.messages).totalCostUSD +
+						summaryUsage.state.totalCostUSD +
+						droppedUsage.state.totalCostUSD;
 					return budgetVerdict(spent, seat);
 				},
 				errorRemedy,

@@ -338,6 +338,14 @@ export interface CompactionWiringOptions {
 	 * ones whose summary was refused or discarded.
 	 */
 	onSummaryUsage?: (provider: string, modelId: string, usage: Usage) => void;
+	/**
+	 * Book the usage of assistant turns a successful summary replaces. Those
+	 * messages leave the transcript at the swap, so a host costing the
+	 * conversation from its messages alone loses spend that was already
+	 * incurred. A host that books every `turn_end` as it happens already holds
+	 * it and must leave this unset.
+	 */
+	onDroppedUsage?: (provider: string, modelId: string, usage: Usage) => void;
 }
 
 export interface CompactionWiring {
@@ -450,6 +458,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				// covers the request that follows the rewrite, not the summary's own.
 				onSummarizeRequest: () => options.noteRewrite?.(rewriteCause("compact")),
 				onUsage: options.onSummaryUsage,
+				onDroppedUsage: options.onDroppedUsage,
 			},
 		);
 	};

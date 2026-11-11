@@ -1478,6 +1478,49 @@ describe("the budget guardrails", () => {
 		expect(band.status().find((entry) => entry.name === "paul")?.costUSD).toBeCloseTo(1, 10);
 	});
 
+	test("a member that compacted is billed for the summary and the turn it replaced", async () => {
+		// A member has no store and no per-turn ledger: its cost is its transcript,
+		// and a compaction removes the assistant message that recorded the earlier
+		// spend while sending a summary request that never enters it. Both are
+		// booked as the pass commits, so the tally is the whole $0.16 — not the
+		// $0.01 the post-compaction transcript alone shows. John is priced at
+		// $10/Mtok output: first answer $0.10, summary $0.05, second answer $0.01.
+		registerOpenAICompatibleProvider({
+			id: "faux",
+			baseUrl: "http://faux.invalid",
+			apiKeyEnv: "FAUX_API_KEY",
+			models: [
+				{
+					id: "john",
+					contextWindow: 200_000,
+					maxOutputTokens: 8_192,
+					pricing: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0 },
+				},
+			],
+		});
+		const steps: FauxStep[] = [
+			{ text: "first answer", usage: { output: 10_000 } },
+			{ stopReason: "error", errorMessage: "too long", errorKind: "context_overflow" },
+			{ text: "<summary>1. Primary Request: first</summary>", usage: { output: 5_000 } },
+			{ text: "second answer", usage: { output: 1_000 } },
+		];
+		const { band, faux } = makeBand({ script: { john: steps }, models: { john: "faux/john" } });
+
+		const first = endedReason(sessionOf(band, "john"));
+		band.deliver({ kind: "user" }, "john", "first");
+		expect(await within(first, 5_000)).toBe("completed");
+
+		const second = endedReason(sessionOf(band, "john"));
+		band.deliver({ kind: "user" }, "john", "second");
+		expect(await within(second, 5_000)).toBe("completed");
+
+		// The refused request, the summary, and the retry really were sent: the
+		// dropped turn and the summary spend are the difference between the
+		// transcript's $0.01 and the tally below.
+		expect(faux.calls("john")).toHaveLength(4);
+		expect(band.status().find((entry) => entry.name === "john")?.costUSD).toBeCloseTo(0.16, 10);
+	});
+
 	test("maxTurns caps a run that wants another turn", async () => {
 		// A pin on the band-level option, not a bug fix: BeetleBand already
 		// forwards maxTurns to every member session, and this holds that wire
