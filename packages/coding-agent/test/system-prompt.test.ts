@@ -30,6 +30,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { localDayKey } from "@labunbun/agent";
+import type { Model } from "@labunbun/ai";
 import {
 	buildSubagentContext,
 	buildSystemPrompt,
@@ -133,15 +134,41 @@ const CLAUSES = [
 	// # Context — see the section tests below for what this one may not claim.
 	"compacted for you automatically",
 	"belongs in a file, not in the conversation",
+	// Grounding: the model must not describe code it has not opened, and must be
+	// allowed to say it does not know instead of filling the gap.
+	"read a file before editing it, and before making any claim",
+	"say what you do not know and go find out",
+	// Tool calls carry actions, not descriptions or placeholders.
+	"Give each tool call complete arguments",
 	// Scope: the model adds unrequested tests and docs at every effort level.
 	"Stop when the work asked for is done",
 	"the exception is a regression test for a bug you just fixed",
+	// A change that was asked for is made, not proposed.
+	"make it in this turn rather than describing the change",
+	// Generality: a solution coded to the example is not a solution.
+	"Solve the problem generally",
+	// A regression test is only evidence when it goes red without the fix.
+	"Confirm a regression test fails without the fix",
+	"not only the happy path",
 	// Verification: the old bullet said "when they exist", which lets a turn end
 	// with the work unexercised.
 	"A check that only parses, or a command that failed to start, does not count",
+	"Say a check passed only when a tool result",
 	"name the one you did not run and why",
-	// Narration.
+	// Persistence: long turns used to end with a to-do list and an offer to
+	// continue. Obstacles are for the agent to work through; deliberate blockers
+	// are for reporting, not for working around. The safety line bounds the
+	// persistence rule: an obstacle is not a reason to bypass a guard.
+	"Carry the task through to the end",
+	"an ordinary obstacle is not a reason to hand the task back",
+	"Offering to wait, or inviting the user to redirect you, is not progress",
+	"never bypass a safety check",
+	// Iteration files are scratch, not deliverables.
+	"remove them before you report",
+	"re-read the request",
+	// Narration, including the recap a low-context reader needs.
 	"Say in one line what you are about to do before your first tool call",
+	"Close with a short recap that stands on its own",
 ];
 
 /** The `# Context` section on its own, so an assertion cannot pass on a neighbour. */
@@ -234,6 +261,47 @@ describe("the language setting", () => {
 		// itself; the configured value is the more specific one, so the generic
 		// line is gone, not merely preceded.
 		expect(prompt).not.toContain("the user's language");
+	});
+});
+
+/**
+ * The short prompt for a small model or a tiny window. It is a different body,
+ * not a suffix, so it is tested on its own for the same reason: a rule that
+ * matters can be dropped from it silently, because the full prompt's tests
+ * never read these bytes.
+ */
+describe("the short prompt", () => {
+	const model = { provider: "ollama", id: "qwen3:7b", contextWindow: 8192 } as unknown as Model;
+	const prompt = () => buildSystemPrompt([], { ...BASE, model });
+
+	test("is the lean body, not a suffix of the full one", () => {
+		expect(prompt()).toContain("# Rules");
+		expect(prompt()).not.toContain("# Attitude");
+		expect(prompt()).not.toContain("# Doing tasks");
+	});
+
+	test("keeps the hard rules that change an action", () => {
+		for (const clause of [
+			"Read a file before editing it or claiming what it contains",
+			"Make the smallest change",
+			"except a regression test for the bug you just fixed",
+			"make it rather than describing it",
+			"must fail without the fix",
+			"Never bypass a safety check",
+			"Carry the task through to the end",
+			"check passed only counts when its output is in this conversation",
+			"Close with a short recap",
+			"Do not commit unless explicitly asked",
+		]) {
+			expect(prompt(), `"${clause}" is missing from the short prompt`).toContain(clause);
+		}
+	});
+
+	test("sits above the boundary, with the model guidance below it", () => {
+		const text = prompt();
+		const marker = text.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
+		expect(marker).toBeGreaterThan(text.indexOf("Carry the task through to the end"));
+		expect(text.indexOf("# Model guidance")).toBeGreaterThan(marker);
 	});
 });
 

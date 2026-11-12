@@ -922,8 +922,9 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			agentCatalogue(ctx.definitions()),
 		inputSchema: taskInputSchema,
 		prompt:
-			"- Launch subagents for context-heavy, self-contained work (research, broad searches).\n" +
-			"- Always include a complete, self-contained prompt — subagents don't see this conversation.\n" +
+			"- A subagent costs a separate context window and its own tokens; delegate to parallelise or to keep context-heavy work out of this conversation, not by default.\n" +
+			"- Do not delegate a quick lookup or a single-file edit; doing it directly is faster and cheaper.\n" +
+			"- Always include a complete, self-contained prompt — subagents don't see this conversation. State the goal, the constraints, and what the report must contain.\n" +
 			"- Multiple Task calls run concurrently when safe.\n" +
 			"- Every result ends with a [subagent id: …] line — the handle SendMessage and TaskStop take.",
 		isConcurrencySafe: () => true,

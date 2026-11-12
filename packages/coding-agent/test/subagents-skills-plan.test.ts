@@ -97,6 +97,17 @@ describe("Task tool (subagents)", () => {
 		return { taskTool: createSubagentTools(ctx)[0], ctx };
 	}
 
+	// Delegation has a price: a second context window and a second set of
+	// tokens. The tool description is where the model learns that, and that the
+	// prompt it writes is the worker's only view of the task.
+	test("the description prices delegation and asks for a self-contained prompt", () => {
+		const { taskTool } = makeHarness();
+		const prompt = taskTool.prompt ?? "";
+		expect(prompt).toContain("costs a separate context window");
+		expect(prompt).toContain("Do not delegate a quick lookup or a single-file edit");
+		expect(prompt).toContain("State the goal, the constraints, and what the report must contain");
+	});
+
 	test("runs a nested session and returns its final report", async () => {
 		const { taskTool } = makeHarness();
 		const result = await taskTool.call(
