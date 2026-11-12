@@ -8,18 +8,19 @@ Memory is a prompt section and not a user message for one reason: the model has 
 
 ## Loading and precedence
 
-- The user tier loads first: `~/.labunbun/MEMORY.md`, then every `*.md` file in `~/.labunbun/rules/` (`packages/coding-agent/src/memory.ts:470-472`, `:265-293`).
-- The project walk reads one directory at a time. At each level the loader tries `LABUNBUN.md`, then `AGENTS.md`, then `CLAUDE.md`. It reads the first one that exists and stops the list. Exactly one of the three enters the prompt per level (`packages/coding-agent/src/memory.ts:295-318`, `:308-314`).
-- Each level also contributes every `*.md` file in `.labunbun/rules/` (`packages/coding-agent/src/memory.ts:316`).
-- Files are deduplicated by path, with the user tier first. When the working directory sits under the home directory, the walk revisits the user rules, and this step keeps the copy that already loaded (`packages/coding-agent/src/memory.ts:483-492`).
-- Render order and budget order differ on purpose. The text renders user tier first, then root to cwd, so the nearest file is last. The budget is spent user tier first, then project files nearest-first (`packages/coding-agent/src/memory.ts:494-501`).
-- The total is at most 40000 characters, and the completeness note is inside that cap (`packages/coding-agent/src/memory.ts:58`, `:530-533`).
-- A file that does not fit contributes a prefix, cut without splitting a surrogate pair. Every farther file is omitted (`packages/coding-agent/src/memory.ts:337-343`, `:374-388`).
-- The note names the partial files and the omitted files. It names at most eight paths across both lists. A path is shortened relative to the cwd or home, stripped of control characters, and capped at 80 characters (`packages/coding-agent/src/memory.ts:60-63`, `:419-430`, `:445-457`).
-- The note describes the source. It does not ask the model to read the named files (`packages/coding-agent/src/memory.ts:439-444`, `:456`).
-- The loader reports the contributing files, the partial files, the omitted files, and a `truncated` flag (`packages/coding-agent/src/memory.ts:66-84`, `:535-542`).
-- A file or rules directory that exists and cannot be read contributes nothing, and is named instead: each failure is a warning beside those fields (`packages/coding-agent/src/memory.ts:76-83`, `:106-121`, `:265-289`). The three hosts say each once at startup as `Memory: <message>` — the REPL through its notice channel, `-p` and ACP on stderr (`packages/coding-agent/src/interactive.ts:856-859`, `packages/coding-agent/src/headless.ts:560-564`, `packages/coding-agent/src/acp.ts:1124-1125`). A missing path is the ordinary empty answer and produces nothing.
-- A session with an untrusted project lists the files the gate holds back through a separate, un-gated reading of the same walk. The user tier is subtracted, because it still loads (`packages/coding-agent/src/memory.ts:545-565`).
+- The user tier loads first: `~/.labunbun/MEMORY.md`, then every `*.md` file in `~/.labunbun/rules/` (`packages/coding-agent/src/memory.ts:486-488`, `:273-300`).
+- The project walk reads one directory at a time. At each level the loader tries `LABUNBUN.md`, then `AGENTS.md`, then `CLAUDE.md`. It reads the first one that exists and stops the list. Exactly one of the three enters the prompt per level (`packages/coding-agent/src/memory.ts:311-334`, `:324-330`).
+- Each level also contributes every `*.md` file in `.labunbun/rules/` (`packages/coding-agent/src/memory.ts:332`).
+- A rule file with a `paths:` frontmatter is not part of this join. `collectRules` drops it from the startup memory (`packages/coding-agent/src/memory.ts:307`), and `loadPathRules` returns it for the session to attach when a matching file is opened ([Path-scoped rules](path-rules.md)).
+- Files are deduplicated by path, with the user tier first. When the working directory sits under the home directory, the walk revisits the user rules, and this step keeps the copy that already loaded (`packages/coding-agent/src/memory.ts:499-508`).
+- Render order and budget order differ on purpose. The text renders user tier first, then root to cwd, so the nearest file is last. The budget is spent user tier first, then project files nearest-first (`packages/coding-agent/src/memory.ts:510-517`).
+- The total is at most 40000 characters, and the completeness note is inside that cap (`packages/coding-agent/src/memory.ts:65`, `:546-549`).
+- A file that does not fit contributes a prefix, cut without splitting a surrogate pair. Every farther file is omitted (`packages/coding-agent/src/memory.ts:353-359`, `:390-404`).
+- The note names the partial files and the omitted files. It names at most eight paths across both lists. A path is shortened relative to the cwd or home, stripped of control characters, and capped at 80 characters (`packages/coding-agent/src/memory.ts:67-70`, `:435-446`, `:461-473`).
+- The note describes the source. It does not ask the model to read the named files (`packages/coding-agent/src/memory.ts:455-460`, `:472`).
+- The loader reports the contributing files, the partial files, the omitted files, and a `truncated` flag (`packages/coding-agent/src/memory.ts:73-91`, `:551-558`).
+- A file or rules directory that exists and cannot be read contributes nothing, and is named instead: each failure is a warning beside those fields (`packages/coding-agent/src/memory.ts:83-90`, `:113-128`, `:273-300`). The three hosts say each once at startup as `Memory: <message>` — the REPL through its notice channel, `-p` and ACP on stderr (`packages/coding-agent/src/interactive.ts:932`, `packages/coding-agent/src/headless.ts:638`, `packages/coding-agent/src/acp.ts:1213`). A missing path is the ordinary empty answer and produces nothing.
+- A session with an untrusted project lists the files the gate holds back through a separate, un-gated reading of the same walk. The user tier is subtracted, because it still loads (`packages/coding-agent/src/memory.ts:601-621`).
 
 ## Includes
 
