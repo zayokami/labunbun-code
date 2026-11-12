@@ -604,3 +604,103 @@ describe("△ and the command wheel", () => {
 		h.unmount();
 	}, 20_000);
 });
+
+/**
+ * Button legends wait for a controller.
+ *
+ * The bridge exists for the whole run whether or not anything is plugged in —
+ * `/gamepad on` has to reach a mounted tree — so "a pad is wired" and "a pad is
+ * in hand" are different claims, and the gamepad is off by default. Every legend
+ * is drawn off the second one: a first screen that teaches ✕ and ○ to someone
+ * pressing a keyboard is telling them about buttons they do not have. A pad that
+ * connects gains its legends, and one that goes away loses them, on the same
+ * status subscription the status line already reads.
+ */
+describe("hints wait for a controller", () => {
+	const wheelUp = (h: ReturnType<typeof setup>) => h.frame().includes("Commands");
+	const WHEEL_HINT = "✕ run";
+	const DIALOG_HINT = "pad may not approve · ○ deny";
+
+	test("the wheel's legend is drawn only while a pad is connected", async () => {
+		const h = setup();
+		await delay(40);
+		await push(h, padAction("wheel", { button: "triangle" }), () => wheelUp(h));
+		expect(h.frame()).toContain(WHEEL_HINT);
+
+		h.pad.setStatus("searching");
+		await waitFor(() => !h.frame().includes(WHEEL_HINT));
+		// The wheel is the app's screen, not the pad's: it stays up, and only the
+		// legend goes with the controller.
+		expect(wheelUp(h)).toBe(true);
+		expect(h.frame()).not.toContain(WHEEL_HINT);
+
+		h.pad.setStatus("connected");
+		await waitFor(() => h.frame().includes(WHEEL_HINT));
+		expect(h.frame()).toContain(WHEEL_HINT);
+
+		h.unmount();
+	}, 20_000);
+
+	test("the on-screen keyboard's legend follows the pad too", async () => {
+		const h = setup();
+		await delay(40);
+		await push(h, padAction("osk", { button: "share" }), () => h.frame().includes("On-screen keyboard"));
+		expect(h.frame()).toContain("✕ type");
+
+		h.pad.setStatus("off");
+		await waitFor(() => !h.frame().includes("✕ type"));
+		// The keyboard stays open — it is the prompt's, not the pad's — and the
+		// legend that named buttons nobody is holding is the only thing gone.
+		expect(h.frame()).not.toContain("✕ type");
+		expect(h.frame()).toContain("On-screen keyboard");
+
+		h.unmount();
+	}, 20_000);
+
+	test("a dialog names buttons only while a pad is connected", async () => {
+		const h = setup();
+		await delay(40);
+		await showPermission(h);
+		// allowApprove is off by default, so this is the line the dialog draws.
+		expect(h.frame()).toContain(DIALOG_HINT);
+
+		h.pad.setStatus("off");
+		await waitFor(() => !h.frame().includes(DIALOG_HINT));
+		// Not one stray button name left in the question.
+		expect(h.frame()).not.toContain("○ deny");
+
+		h.pad.setStatus("connected");
+		await waitFor(() => h.frame().includes(DIALOG_HINT));
+		expect(h.frame()).toContain(DIALOG_HINT);
+
+		h.unmount();
+	}, 20_000);
+
+	test("the question and plan dialogs lose theirs too", async () => {
+		const h = setup();
+		await delay(40);
+		// These two dialogs are handed the bridge at their own call sites in the
+		// REPL, apart from the permission one — a call site missed there keeps
+		// naming buttons nobody is holding.
+		h.store.set((state) => ({
+			...state,
+			question: {
+				questions: [{ question: "Which one?", header: "Test", options: [{ label: "A" }] }],
+				resolve: () => {},
+			},
+			planReview: { plan: "Step one.", resolve: () => {} },
+		}));
+		await waitFor(() => h.frame().includes("✕ answer") && h.frame().includes("✕ confirm"));
+
+		h.pad.setStatus("searching");
+		await waitFor(() => !h.frame().includes("✕ answer"));
+		// Both dialogs stay up; only the legends they read from the bridge go.
+		expect(h.frame()).not.toContain("✕ answer");
+		expect(h.frame()).not.toContain("✕ confirm");
+		// The plan dialog is still on screen, so the legend going is the only
+		// change — the dialogs themselves were never the pad's to keep.
+		expect(h.frame()).toContain("Plan for your approval");
+
+		h.unmount();
+	}, 20_000);
+});

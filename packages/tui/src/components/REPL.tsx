@@ -521,6 +521,19 @@ export function REPL({
 	/** The same hand-off for the pad: the editor claims what it can use. */
 	const padRef: PadPromptRef = useRef<PadPromptHandle | null>(null);
 	const padStatus = usePadStatus(pad);
+	/**
+	 * The bridge as the screen should hear it, which is only while a controller
+	 * is actually connected.
+	 *
+	 * The bridge itself exists for the whole run — `/gamepad on` has to reach a
+	 * mounted tree — and the gamepad is off by default, so "a bridge is here" is
+	 * not the same claim as "a controller is in hand". Every surface that draws
+	 * a button hint takes this one instead: a dialog offering ✕/○ over a machine
+	 * with no pad names keys that do nothing, and it says so on the first screen
+	 * a user ever sees. A pad that connects mid-session gains its hints, and one
+	 * that goes away loses them, off the same status subscription.
+	 */
+	const connectedPad = padStatus?.phase === "connected" ? pad : undefined;
 	/** The command wheel: the app's commands and the user's phrases, one press away. */
 	const [wheelOpen, setWheelOpen] = useState(false);
 	const [wheelIndex, setWheelIndex] = useState(0);
@@ -1379,14 +1392,14 @@ export function REPL({
 						onResolve={(allow, alwaysAllow, alwaysAsk, message) =>
 							dialog.resolve(allow, alwaysAllow, alwaysAsk, message)
 						}
-						pad={pad}
+						pad={connectedPad}
 					/>
 				) : null}
 				{question && !transcriptMode ? (
-					<QuestionDialog questions={question.questions} resolve={question.resolve} pad={pad} />
+					<QuestionDialog questions={question.questions} resolve={question.resolve} pad={connectedPad} />
 				) : null}
 				{planReview && !transcriptMode ? (
-					<PlanReviewDialog plan={planReview.plan} resolve={planReview.resolve} pad={pad} />
+					<PlanReviewDialog plan={planReview.plan} resolve={planReview.resolve} pad={connectedPad} />
 				) : null}
 				{phraseConfirm && !transcriptMode ? (
 					<PhraseConfirmDialog
@@ -1397,7 +1410,7 @@ export function REPL({
 						sandbox={phraseConfirm.sandbox}
 						note={phraseConfirm.note}
 						resolve={phraseConfirm.resolve}
-						pad={pad}
+						pad={connectedPad}
 					/>
 				) : null}
 				{picker && !transcriptMode ? (
@@ -1414,10 +1427,10 @@ export function REPL({
 						onHighlight={picker.onHighlight}
 						onCancel={picker.onCancel}
 						preview={picker.preview}
-						pad={pad}
+						pad={connectedPad}
 					/>
 				) : null}
-				{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
+				{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} padHints={connectedPad !== undefined} />}
 				{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ editor: editor.mode, commands: suggestions })} />}
 				{activity && !transcriptMode && (
 					<ActivityPanel
@@ -1512,7 +1525,7 @@ export function REPL({
 					onQueue={(text) => sendMidRun(text, "queue")}
 					onSteer={(text) => sendMidRun(text, "steer")}
 					onInterruptSend={interruptAndSend}
-					pad={pad}
+					pad={connectedPad}
 					padRef={padRef}
 					hidden={transcriptMode}
 				/>

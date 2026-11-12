@@ -7,6 +7,12 @@ export interface OnScreenKeyboardProps {
 	pageIndex: number;
 	cursor: OskCursor;
 	shift: boolean;
+	/**
+	 * Whether a controller is connected. The keyboard is opened from a pad, but
+	 * a pad can go away while it is up — and the footer names buttons, so it is
+	 * drawn only while those buttons are on a pad somebody is holding.
+	 */
+	padHints?: boolean;
 }
 
 /**
@@ -15,7 +21,7 @@ export interface OnScreenKeyboardProps {
  * a terminal with no colours at all, which is the same terminal the tests run
  * against.
  */
-export function OnScreenKeyboard({ pageIndex, cursor, shift }: OnScreenKeyboardProps) {
+export function OnScreenKeyboard({ pageIndex, cursor, shift, padHints = false }: OnScreenKeyboardProps) {
 	const theme = useTheme();
 	const page = oskPage(pageIndex);
 	// Clamped before anything is drawn: a cursor that moved down from a long row
@@ -48,9 +54,11 @@ export function OnScreenKeyboard({ pageIndex, cursor, shift }: OnScreenKeyboardP
 					</Text>
 				))}
 			</Box>
-			<Box marginTop={1}>
-				<Text dimColor>✕ type · ⏎ send · L1/R1 page · △ shift · □ backspace · ○ close</Text>
-			</Box>
+			{padHints ? (
+				<Box marginTop={1}>
+					<Text dimColor>✕ type · ⏎ send · L1/R1 page · △ shift · □ backspace · ○ close</Text>
+				</Box>
+			) : null}
 		</Box>
 	);
 }

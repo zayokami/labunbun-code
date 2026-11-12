@@ -948,7 +948,16 @@ export function PromptInput({
 			{selected && state.text !== selected[0] && <Text dimColor> </Text>}
 			{/* Above the prompt, where the suggestion lists go: it is a thing to
 			    read and press while typing, not a modal standing over the app. */}
-			{osk && <OnScreenKeyboard pageIndex={oskPageIndex} cursor={oskCursor} shift={oskShift} />}
+			{osk && (
+				<OnScreenKeyboard
+					pageIndex={oskPageIndex}
+					cursor={oskCursor}
+					shift={oskShift}
+					/* `pad` here is already the connected-only bridge: the REPL stops
+					   handing one over the moment the controller disconnects. */
+					padHints={pad !== undefined}
+				/>
+			)}
 			{/* Rounded, and with the shell's `>` in the margin: the box is the one
 			    element on screen that is always there, and a square corner with a
 			    bare line of text reads as an output log rather than something

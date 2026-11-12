@@ -6,6 +6,12 @@ export interface CommandWheelProps {
 	entries: WheelEntry[];
 	/** Which entry is under the ✕. Any integer; the ring wraps. */
 	index: number;
+	/**
+	 * Whether a controller is connected. The wheel is opened from a pad, but a
+	 * pad can go away while it is up — and the footer names buttons, so it is
+	 * drawn only while those buttons are on a pad somebody is holding.
+	 */
+	padHints?: boolean;
 }
 
 /**
@@ -13,7 +19,7 @@ export interface CommandWheelProps {
  * reason the picker's does: a highlight that walked off the bottom of a box
  * would leave the user pressing ✕ on something they cannot see.
  */
-export function CommandWheel({ entries, index }: CommandWheelProps) {
+export function CommandWheel({ entries, index, padHints = false }: CommandWheelProps) {
 	const theme = useTheme();
 	const start = wheelStart(entries.length, index);
 	const rows = entries.slice(start, start + WHEEL_ROWS);
@@ -42,9 +48,11 @@ export function CommandWheel({ entries, index }: CommandWheelProps) {
 					})}
 				</Box>
 			)}
-			<Box marginTop={1}>
-				<Text dimColor>✕ run · ↑/↓ move · L1/R1 page · ○ close</Text>
-			</Box>
+			{padHints ? (
+				<Box marginTop={1}>
+					<Text dimColor>✕ run · ↑/↓ move · L1/R1 page · ○ close</Text>
+				</Box>
+			) : null}
 		</Box>
 	);
 }
