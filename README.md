@@ -5,6 +5,7 @@
 </p>
 
 [![CI](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml/badge.svg)](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml)
+[![X](https://img.shields.io/badge/X-@LaBunbunCode-000000?logo=x&logoColor=white)](https://x.com/LaBunbunCode)
 
 LaBunbun Code is a terminal coding agent.
 
