@@ -283,6 +283,10 @@ export function builtInCommands(): Command[] {
 				const question = args.trim();
 				if (!question) return "Usage: /btw [question] — a question answered from this conversation, not added to it.";
 				if (ctx.session.isRunning) return "/btw waits for the current run to finish.";
+				// The answer is deliberately not in the transcript, so its question has
+				// to be on screen: without this, a scrollback of answers has nothing
+				// saying what each one answered.
+				ctx.pushInfo(`btw: ${question}`);
 				// One model call takes a while, and the REPL prints only the return
 				// value: without this line the command looks hung.
 				ctx.pushInfo("Asking…");

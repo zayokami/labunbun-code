@@ -160,6 +160,12 @@ describe("the /btw command", () => {
 		expect(handleCommandDispatch("/btw what did that mean?", h.ctx)).toBe(true);
 		await waitFor(() => h.transcript().some((entry) => entry.kind === "info" && entry.text === "aside answer"));
 
+		// The question is on screen beside the answer: the answer is not in the
+		// transcript, so this is the only record of what was asked.
+		expect(h.transcript().some((entry) => entry.kind === "info" && entry.text === "btw: what did that mean?")).toBe(
+			true,
+		);
+
 		// The request carried the question with no tools, and the session is still
 		// empty: there is no turn for the next prompt to inherit.
 		expect(h.faux.receivedContexts[0]?.tools).toEqual([]);
