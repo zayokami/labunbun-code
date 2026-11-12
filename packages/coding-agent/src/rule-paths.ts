@@ -23,7 +23,7 @@
  * Long-form design notes: docs/dev/path-rules.md
  */
 import { relative, resolve } from "node:path";
-import type { ToolResultMessage } from "@labunbun/ai";
+import type { AgentMessage, ToolResultMessage } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
 import { caseInsensitivePaths } from "@labunbun/tools";
 
@@ -80,13 +80,41 @@ function readPaths(frontmatter: string): string[] {
 	return patterns.filter((pattern) => pattern.length > 0);
 }
 
-/** `a, b`, `[a, b]`, or one value — quoted or not. */
+/**
+ * `a, b`, `[a, b]`, or one value — quoted or not.
+ *
+ * Commas inside a quote or a brace are part of the value, not separators:
+ * `src/**\/*.{ts,tsx}` is one glob, and splitting it on the comma would hand
+ * `Bun.Glob` two patterns that match nothing.
+ */
 function splitList(value: string): string[] {
 	const inner = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
-	return inner
-		.split(",")
-		.map((entry) => unquote(entry))
-		.filter((entry) => entry.length > 0);
+	const entries: string[] = [];
+	let current = "";
+	let quote: string | undefined;
+	let braces = 0;
+	for (const char of inner) {
+		if (quote) {
+			current += char;
+			if (char === quote) quote = undefined;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			quote = char;
+			current += char;
+			continue;
+		}
+		if (char === "{") braces++;
+		if (char === "}" && braces > 0) braces--;
+		if (char === "," && braces === 0) {
+			entries.push(current);
+			current = "";
+			continue;
+		}
+		current += char;
+	}
+	entries.push(current);
+	return entries.map((entry) => unquote(entry)).filter((entry) => entry.length > 0);
 }
 
 function unquote(value: string): string {
@@ -146,6 +174,16 @@ export interface PathRuleInjector {
 	 * leaving the session working under a rule it no longer has.
 	 */
 	reset(): void;
+	/**
+	 * Mark as attached the rules a loaded transcript already carries.
+	 *
+	 * A resumed session arrives with the tool results a previous process
+	 * produced, the attached rule text among them. Starting with an empty set
+	 * would paste a rule the model can already read a second time on the next
+	 * matching call — and a hot swap would do the same against a conversation
+	 * whose rules differ. Read from the text the injector itself wrote.
+	 */
+	seed(messages: readonly AgentMessage[]): void;
 }
 
 export interface PathRuleInjectorOptions {
@@ -171,6 +209,13 @@ export function createPathRuleInjector(options: PathRuleInjectorOptions): PathRu
 		return slashed(file);
 	};
 
+	// The header is the marker seed() looks for in a loaded transcript. It is
+	// built in one place so the two meanings cannot drift.
+	const headerFor = (rule: PathRule): string => `[path rule — ${oneLine(shownFile(rule.file))} (`;
+
+	const blockFor = (rule: PathRule): string =>
+		`${headerFor(rule)}${rule.patterns.map(oneLine).join(", ")})]\n${rule.body.trim()}\n[end of path rule]`;
+
 	return {
 		apply(toolName, input, result) {
 			const filePath = filePathOf(toolName, input);
@@ -185,17 +230,22 @@ export function createPathRuleInjector(options: PathRuleInjectorOptions): PathRu
 			);
 			if (matched.length === 0) return undefined;
 			for (const rule of matched) attached.add(rule.file);
-
-			const blocks = matched.map(
-				(rule) =>
-					`[path rule — ${oneLine(shownFile(rule.file))} (${rule.patterns.map(oneLine).join(", ")})]\n` +
-					`${rule.body.trim()}\n` +
-					`[end of path rule]`,
-			);
-			return { ...result, content: [...result.content, textContent(blocks.join("\n\n"))] };
+			return { ...result, content: [...result.content, textContent(matched.map(blockFor).join("\n\n"))] };
 		},
 		reset() {
 			attached.clear();
+		},
+		seed(messages) {
+			for (const rule of rules) {
+				if (attached.has(rule.file)) continue;
+				const header = headerFor(rule);
+				const carried = messages.some(
+					(message) =>
+						message.role === "toolResult" &&
+						message.content.some((block) => block.type === "text" && block.text.includes(header)),
+				);
+				if (carried) attached.add(rule.file);
+			}
 		},
 	};
 }

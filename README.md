@@ -174,7 +174,7 @@ paths:
 Every handler answers with the envelope in `api/respond.ts`.
 ```
 
-The tool does not load such a rule at startup. The tool attaches it to the result of the first `Read`, `Edit`, or `Write` call that names a matching path. The paths are relative to the working directory. The rule then stays in the conversation. A compaction clears it, and the next matching call attaches it again. A trailing `/` in a pattern means every file under that directory. A subagent does not receive these rules.
+The tool does not load such a rule at startup. The tool attaches it to the result of the first `Read`, `Edit`, or `Write` call that names a matching path. The paths are relative to the working directory. The rule then stays in the conversation. A compaction or a trim clears it, and the next matching call attaches it again. A resumed conversation keeps the rules its own history carries. A trailing `/` in a pattern means every file under that directory. A subagent does not receive these rules.
 
 The project tier is behind the trust gate. The tool reads no project memory file, from any directory of the walk, until you approve this project with `/agents approve`. The tool prints the number of held-back files at startup. Restart the session after the approval.
 

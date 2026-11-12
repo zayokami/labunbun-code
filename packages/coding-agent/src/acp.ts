@@ -1267,8 +1267,12 @@ class AcpAgent {
 			onDroppedUsage: (provider, modelId, usage) => droppedUsage.recordUsage(provider, modelId, usage),
 			noteRewrite: (cause) => transport.tracker?.note(cause),
 			// The cheap rung replaces old tool results with previews, so the bytes
-			// the model was shown are gone from its context and the record goes too.
-			onContextReduced: () => readState.clear(),
+			// the model was shown are gone from its context; the read record and any
+			// path rule attached to those results go with them.
+			onContextReduced: () => {
+				readState.clear();
+				pathRules.reset();
+			},
 			// The same hook the REPL consults before a pass. An editor session has
 			// a client, not a transcript scroller, so a hook is one of the few ways
 			// the workspace gets a word in — and it has to defer the same passes it
@@ -1409,6 +1413,10 @@ class AcpAgent {
 		// it — the same seeding `headless.ts` does for `--resume`. A session that
 		// was just started has none.
 		if (resumed) session.messages.push(...resumed.messages);
+		// The transcript can already carry a path rule from the process that wrote
+		// it; seeding from its own markers keeps the next matching read from
+		// pasting it a second time.
+		pathRules.seed(session.messages);
 		// An editor saves files between turns, and the map section built above is
 		// otherwise frozen for the life of the session. The refresher watches the
 		// tree and rebuilds before each `session/prompt`; its own note says why

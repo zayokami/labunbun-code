@@ -1112,9 +1112,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if (phase.kind === "failed") planAtPassStart = null;
 		},
 		// The cheap rung's previews replace text the model was shown, so the
-		// Edit gate's records go with them — the same reason as the `done` clear
-		// below, one rung earlier.
-		onContextReduced: () => readState.clear(),
+		// Edit gate's records and any attached path rules go with them — the same
+		// reason as the `done` clears below, one rung earlier.
+		onContextReduced: () => {
+			readState.clear();
+			pathRules.reset();
+		},
 		readFile: readFileOrNull,
 		// The same writer the tools use, read through the holder so a /resume's
 		// spills land in the session that is live when the preview is made.
@@ -1892,6 +1895,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	if (store) {
 		session.messages.push(...(resumedMessages ?? store.contextMessages()));
 	}
+	// A resumed transcript can already carry a rule this process never attached.
+	// Seeding from the transcript's own markers keeps the next matching read from
+	// pasting a rule the model can already read.
+	pathRules.seed(session.messages);
 
 	// ---- cost tracking + context indicator + session-scoped listeners ----
 	// "This session" is the conversation being opened, not the project it lives
@@ -2136,6 +2143,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// reason: the new conversation starts from what it itself knows, and the
 		// safe direction is a re-read.
 		readState.clear();
+		// The attachment set follows the transcript, not the process: the outgoing
+		// conversation's rules go, and the incoming one's already-attached rules
+		// are read back from its messages.
+		pathRules.reset();
+		pathRules.seed(next.messages);
 		handle.setTasks(taskStore.summary());
 		handle.setSession(next);
 		// The incoming session's own sidecar: a title belongs to the conversation
@@ -2645,6 +2657,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// shown, so the read record has to go with them — the same clear the
 				// automatic reduced rung and a compaction's `done` phase make.
 				clearReads: () => readState.clear(),
+				resetPathRules: () => pathRules.reset(),
 				// `/autocompact` applies the change to this session, not only the
 				// file: the manager reads its switch from the config the wiring
 				// builds, so one rebuild after the flip is what makes the next
@@ -3627,6 +3640,13 @@ interface AppCommandContext {
 	 * see. Optional because a context built by hand has no tool set behind it.
 	 */
 	clearReads?(): void;
+	/**
+	 * Forget which path rules have been attached. `/trim` removes the tool
+	 * results that carried them, so the next matching read has to attach them
+	 * again; the automatic reduced rung resets the same set through the
+	 * compaction wiring's `onContextReduced`.
+	 */
+	resetPathRules?(): void;
 	mcpConnections: McpConnection[];
 	/**
 	 * The tool-list-change handler the startup connections carry (see
@@ -3741,6 +3761,7 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			// The read evidence describes the full results `/trim` just replaced
 			// with previews, so it must not outlive them.
 			clearReads: () => ctx.clearReads?.(),
+			resetPathRules: () => ctx.resetPathRules?.(),
 		};
 		void Promise.resolve(command.call(localCtx, args))
 			.then((result) => {

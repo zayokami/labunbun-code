@@ -110,6 +110,13 @@ export interface LocalCommandContext {
 	 */
 	clearReads?(): void;
 	/**
+	 * Forget which path rules the session has attached. `/trim` replaces tool
+	 * results with previews, and a rule attached to one of them goes with it;
+	 * without this the session believes the model still carries a rule that is
+	 * no longer in its context. Optional for the same reason as `clearReads`.
+	 */
+	resetPathRules?(): void;
+	/**
 	 * The abort signal of the command's own run, when the host keeps one.
 	 *
 	 * `/compact` is a full-prefix model call and may take half a minute; a host
@@ -385,6 +392,9 @@ export function builtInCommands(): Command[] {
 				// The full results are now previews in the conversation: the model can no
 				// longer see what the read record says it saw, so the record goes too.
 				ctx.clearReads?.();
+				// A path rule attached to one of those results is gone with it; the
+				// next matching read has to be allowed to attach it again.
+				ctx.resetPathRules?.();
 				ctx.refreshContext?.();
 				const after = estimateContextUsage(trimmed.context);
 				const freed = Math.max(0, before - after);

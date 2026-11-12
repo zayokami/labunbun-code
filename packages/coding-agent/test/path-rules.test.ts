@@ -42,6 +42,13 @@ describe("parseRulePaths", () => {
 		expect(parsed.body).toBe("BODY\n");
 	});
 
+	test("an inline list keeps a brace alternative together", () => {
+		// The comma inside the braces is part of one glob; splitting there would
+		// leave two patterns that match nothing.
+		const parsed = parseRulePaths("---\npaths: [src/**/*.{ts,tsx}, docs/**]\n---\nBODY");
+		expect(parsed.patterns).toEqual(["src/**/*.{ts,tsx}", "docs/**"]);
+	});
+
 	test("reads an inline scalar, an inline list, and quoted entries", () => {
 		expect(parseRulePaths("---\npaths: src/api/**\n---\nBODY").patterns).toEqual(["src/api/**"]);
 		expect(parseRulePaths("---\npaths: [\"a/*.ts\", 'b/*.md']\n---\nBODY").patterns).toEqual(["a/*.ts", "b/*.md"]);
@@ -81,6 +88,12 @@ describe("ruleMatches", () => {
 		expect(ruleMatches("src/api/", "src/api/deep/nested/file.ts")).toBe(true);
 	});
 
+	test("a brace alternative matches either extension", () => {
+		expect(ruleMatches("src/**/*.{ts,tsx}", "src/app.ts")).toBe(true);
+		expect(ruleMatches("src/**/*.{ts,tsx}", "src/app.tsx")).toBe(true);
+		expect(ruleMatches("src/**/*.{ts,tsx}", "src/app.md")).toBe(false);
+	});
+
 	test("an absolute-looking or backslashed pattern is normalized", () => {
 		expect(ruleMatches("./src/**", "src/app.ts")).toBe(true);
 		expect(ruleMatches("src\\api\\**", "src/api/handler.ts")).toBe(true);
@@ -114,6 +127,31 @@ describe("createPathRuleInjector", () => {
 		expect(injector.apply("Edit", { file_path: "src/api/handler.ts" }, result())).toBeUndefined();
 		// Reset makes the next matching call carry it again.
 		injector.reset();
+		expect(injector.apply("Read", { file_path: "src/api/handler.ts" }, result())).toBeDefined();
+	});
+
+	test("a resumed transcript's attached rule is not pasted again", () => {
+		const { cwd, rules } = setup();
+		const applied = createPathRuleInjector({ cwd, rules }).apply("Read", { file_path: "src/api/handler.ts" }, result());
+		if (!applied) throw new Error("the matching read did not attach the rule");
+		const carried = toolResultMessage("call-1", "Read", applied.content);
+
+		// A new process starts with an empty set; the transcript is what it has.
+		const resumed = createPathRuleInjector({ cwd, rules });
+		resumed.seed([carried]);
+		expect(resumed.apply("Read", { file_path: "src/api/handler.ts" }, result())).toBeUndefined();
+
+		// A rule the transcript does not carry is still new to this process.
+		const other = { file: join(cwd, ".labunbun", "rules", "other.md"), patterns: ["src/**"], body: "OTHER" };
+		const fresh = createPathRuleInjector({ cwd, rules: [...rules, other] });
+		fresh.seed([carried]);
+		expect(fresh.apply("Read", { file_path: "src/app.ts" }, result())).toBeDefined();
+	});
+
+	test("seeding ignores text that is not a rule header", () => {
+		const { cwd, rules } = setup();
+		const injector = createPathRuleInjector({ cwd, rules });
+		injector.seed([toolResultMessage("call-1", "Read", [{ type: "text", text: "[path rule mentioned in prose]" }])]);
 		expect(injector.apply("Read", { file_path: "src/api/handler.ts" }, result())).toBeDefined();
 	});
 

@@ -59,14 +59,25 @@ Every handler answers with the envelope in `api/respond.ts`.
 The header names the rule file and the globs that pulled it in, so the model
 can tell a project rule from tool output. The rule then lives in the transcript
 like any other tool result and is part of every later request. Each rule
-attaches once per session (`rule-paths.ts:183`); reading forty files that match
+attaches once per session (`rule-paths.ts:230`); reading forty files that match
 the same glob does not paste it forty times.
 
 A finished compaction replaces the messages above the boundary, which is where
 the attachment lived. Every host calls `reset()` on the compaction `done` phase
-(`interactive.ts:1022`, `headless.ts:937`, `acp.ts:1304`), so the next matching
-read attaches the rule again rather than leaving the session working under a
-rule it can no longer see.
+(`interactive.ts:1022`, `headless.ts:941`, `acp.ts:1308`). The cheap and idle
+rungs do the same one rung earlier: they replace old tool results with previews
+without a `done` phase, so the wiring's `onContextReduced` resets the set in
+every host (`interactive.ts:1117`, `headless.ts:905`, `acp.ts:1272`), and a
+manual `/trim` resets it through the command context's `resetPathRules`
+(`commands.ts:401`). The next matching read attaches the rule again rather
+than leaving the session working under a rule it can no longer see.
+
+A resumed session is the other direction: its transcript may already carry a
+rule the new process never attached. Each host calls `seed()` over the loaded
+messages after restoring them (`interactive.ts:1901`, `headless.ts:1099`,
+`acp.ts:1419`), which marks a rule attached when its own header appears in a
+tool result — so a resume, and a `/resume` hot swap (`interactive.ts:2149`),
+do not paste a rule the model can already read.
 
 ## Where the hosts wire it
 

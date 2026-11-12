@@ -900,8 +900,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		onDroppedUsage: (provider, modelId, usage) => droppedUsage.recordUsage(provider, modelId, usage),
 		noteRewrite: (cause) => transport.tracker?.note(cause),
 		// The cheap rung replaces old tool results with previews, so the bytes the
-		// model was shown are gone from its context and the read record goes too.
-		onContextReduced: () => readState.clear(),
+		// model was shown are gone from its context; the read record and any path
+		// rule attached to those results go with them.
+		onContextReduced: () => {
+			readState.clear();
+			pathRules.reset();
+		},
 		// The same hook the REPL consults before a pass. A `-p` run has no dialog
 		// to ask, so a hook is the only way a script gets a word in — and a veto
 		// has to defer the same passes it defers interactively: the estimate's,
@@ -1090,6 +1094,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// A newly started store has none, and a compacted one resumes from its
 	// boundary — the same seed the REPL applies at startup.
 	if (store) session.messages.push(...(resumedMessages ?? store.contextMessages()));
+	// A resumed transcript can already carry a path rule; seeding from its own
+	// markers keeps the next matching read from pasting it a second time.
+	pathRules.seed(session.messages);
 
 	const startedAt = Date.now();
 	/**

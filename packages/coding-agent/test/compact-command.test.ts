@@ -359,6 +359,21 @@ describe("/trim", () => {
 		expect(h.session.messages.at(-1)?.role).toBe("user");
 	});
 
+	test("lets a path rule attach again after its result became a preview", async () => {
+		const h = harness();
+		let resets = 0;
+		h.ctx.resetPathRules = () => {
+			resets++;
+		};
+		await h.command.call(h.ctx, "");
+		expect(resets).toBe(1);
+
+		// Nothing replaced, nothing lost: the record stays as it was.
+		h.session.messages = [userMessage("short"), userMessage("and now this")];
+		expect(await h.command.call(h.ctx, "")).toContain("Nothing to trim");
+		expect(resets).toBe(1);
+	});
+
 	test("leaves the record of what was actually said alone", async () => {
 		// A trim is a smaller view of the conversation, not a rewrite of it. The
 		// session file keeps the full results, `--continue` reloads them, and the
