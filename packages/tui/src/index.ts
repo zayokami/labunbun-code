@@ -35,6 +35,7 @@ export {
 	batteryBar,
 	StatusLine,
 } from "./components/StatusLine.tsx";
+export { TextPromptDialog } from "./components/TextPromptDialog.tsx";
 export {
 	chunkForConPTY,
 	chunkWritesForConPTY,
@@ -164,6 +165,8 @@ export {
 	reduceEvent,
 	type StatusCardData,
 	type StatusPhase,
+	type TextPromptRequest,
+	type TextPromptState,
 	toolFullView,
 	toolPreview,
 	type UiBackgroundShell,

@@ -42,6 +42,7 @@ import { StatusCard } from "./StatusCard.tsx";
 import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
 import { TerminalTitle } from "./TerminalTitle.tsx";
+import { TextPromptDialog } from "./TextPromptDialog.tsx";
 import { jumpWatchSelection, nextWatchSelection, WatchPanel, type WatchSelection } from "./WatchPanel.tsx";
 import { WelcomeBanner } from "./WelcomeBanner.tsx";
 
@@ -366,6 +367,7 @@ export function REPL({
 	const planReview = useStore(store, (s) => s.planReview);
 	const picker = useStore(store, (s) => s.picker);
 	const phraseConfirm = useStore(store, (s) => s.phraseConfirm);
+	const textPrompt = useStore(store, (s) => s.textPrompt);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const contextActivity = useStore(store, (s) => s.contextActivity);
 	const contextActivitySince = useStore(store, (s) => s.contextActivitySince);
@@ -477,7 +479,12 @@ export function REPL({
 	// answers. The clock, the title and the notification all read it from here so
 	// a new overlay cannot be added to one and forgotten in another.
 	const awaitingUser =
-		dialog !== null || question !== null || planReview !== null || picker !== null || phraseConfirm !== null;
+		dialog !== null ||
+		question !== null ||
+		planReview !== null ||
+		picker !== null ||
+		phraseConfirm !== null ||
+		textPrompt !== null;
 	/** A key pressed now would land mid-turn, so the prompt's keys change meaning. */
 	const busy = statusPhase !== "idle";
 	/**
@@ -814,6 +821,7 @@ export function REPL({
 		planReview !== null ||
 		picker !== null ||
 		phraseConfirm !== null ||
+		textPrompt !== null ||
 		statusCard !== null ||
 		activity !== null ||
 		wheelOpen ||
@@ -895,7 +903,7 @@ export function REPL({
 		// explaining itself: the panel is not a command, and nothing on screen would
 		// be improved by a sentence about a key that just said no.
 		if (key.ctrl && input === "t") {
-			if (dialog || question || planReview || picker || phraseConfirm) return;
+			if (dialog || question || planReview || picker || phraseConfirm || textPrompt) return;
 			if (transcriptMode) return;
 			setWatchOpen((v) => !v);
 			// A view that opens on the tail and remembers a scroll from last time
@@ -915,7 +923,7 @@ export function REPL({
 		// host, and the emacs engine binds no C-v at all — the terminal is the
 		// one place it can be swallowed (recorded in docs/dev/split-pane-design.md).
 		if (key.ctrl && input === "v") {
-			if (dialog || question || planReview || picker || phraseConfirm) return;
+			if (dialog || question || planReview || picker || phraseConfirm || textPrompt) return;
 			if (transcriptMode) return;
 			if (!watchOpen) return;
 			setWatchSelection((current) => nextWatchSelection(backgroundShells, current));
@@ -934,7 +942,7 @@ export function REPL({
 		// move the panel. The engine has the older claim, so the jump stands down
 		// under emacs and does nothing: the user sees one action, not two.
 		if (key.meta && /^[1-9]$/.test(input)) {
-			if (dialog || question || planReview || picker || phraseConfirm) return;
+			if (dialog || question || planReview || picker || phraseConfirm || textPrompt) return;
 			if (transcriptMode) return;
 			if (!watchOpen) return;
 			if (emacs) return;
@@ -948,7 +956,7 @@ export function REPL({
 		// is the pane's own body height, so a press never skips an entry that
 		// was never on screen (the transcript screen's rule).
 		if (splitActive && (key.pageUp || key.pageDown)) {
-			if (dialog || question || planReview || picker || phraseConfirm) return;
+			if (dialog || question || planReview || picker || phraseConfirm || textPrompt) return;
 			// The page is the entries the pane is showing right now, measured by
 			// the same line model that draws them: a press moves roughly one
 			// screenful, never a fixed number of entries that could leap over a
@@ -1004,7 +1012,7 @@ export function REPL({
 		// too would kill the very tool call the user is deciding about, and the
 		// decision they just made would land on a run that no longer exists.
 		if (key.escape) {
-			if (dialog || question || planReview || picker || phraseConfirm) return;
+			if (dialog || question || planReview || picker || phraseConfirm || textPrompt) return;
 			// The editor gets the first look — it may have something of its own to
 			// cancel (an @-list, insert mode, a half-typed vim command) that is not
 			// an interrupt. Only what it declines to use reaches the session.
@@ -1067,7 +1075,7 @@ export function REPL({
 		// A dialog is the user deciding, and its own subscription already has this
 		// action. An ○ here must not abort the very turn the dialog is asking
 		// about — the same rule the Esc branch states above.
-		if (dialog || question || planReview || picker || phraseConfirm) return true;
+		if (dialog || question || planReview || picker || phraseConfirm || textPrompt) return true;
 		if (transcriptMode) {
 			// The button that opened the transcript is the button that closes it, the
 			// way ctrl+o toggles both ways. ○ leaves as well, but a person who used
@@ -1228,6 +1236,7 @@ export function REPL({
 		!planReview &&
 		!picker &&
 		!phraseConfirm &&
+		!textPrompt &&
 		!wheelOpen &&
 		!shortcutsOpen &&
 		!activity &&
@@ -1413,6 +1422,18 @@ export function REPL({
 						pad={connectedPad}
 					/>
 				) : null}
+				{textPrompt && !transcriptMode ? (
+					<TextPromptDialog
+						title={textPrompt.title}
+						hint={textPrompt.hint}
+						initial={textPrompt.initial}
+						mask={textPrompt.mask}
+						optional={textPrompt.optional}
+						validate={textPrompt.validate}
+						resolve={textPrompt.resolve}
+						pad={connectedPad}
+					/>
+				) : null}
 				{picker && !transcriptMode ? (
 					<ListPickerDialog
 						title={picker.title}
@@ -1500,6 +1521,7 @@ export function REPL({
 						planReview !== null ||
 						picker !== null ||
 						phraseConfirm !== null ||
+						textPrompt !== null ||
 						shortcutsOpen ||
 						activity !== null
 					}
@@ -1692,7 +1714,8 @@ export function connectTurnFooter(
 			state.question !== null ||
 			state.planReview !== null ||
 			state.picker !== null ||
-			state.phraseConfirm !== null;
+			state.phraseConfirm !== null ||
+			state.textPrompt !== null;
 		clock = advanceTimer(clock, now(), { busy, frozen });
 		if (busy) workingMs = clock.elapsedMs;
 	};

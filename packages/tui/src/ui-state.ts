@@ -226,6 +226,16 @@ export interface UiState {
 	 * whatever was typed.
 	 */
 	phraseConfirm: PhraseConfirmState | null;
+	/**
+	 * The single-line text prompt, when a caller is asking for a value rather
+	 * than a choice: an API key, a base URL, an endpoint id.
+	 *
+	 * Its own surface because the question dialog's free-text row resolves one
+	 * answer among options and the phrase dialog matches a known sentence;
+	 * neither can collect an unknown value, and neither can hide one — a key
+	 * typed into the prompt stays in the scrollback.
+	 */
+	textPrompt: TextPromptState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
 	/**
 	 * What the app is doing to the context while it does it — a summarization in
@@ -449,6 +459,37 @@ export interface PhraseConfirmState extends PhraseConfirmRequest {
 }
 
 /**
+ * One line of text, asked for on purpose.
+ *
+ * Everything but `resolve` is the caller's: the surface draws the field and
+ * decides nothing about the value — an empty answer, a validator's complaint,
+ * and a cancellation are the three endings it knows.
+ */
+export interface TextPromptRequest {
+	/** The heading, e.g. a variable name or "Base URL". */
+	title: string;
+	/** One line about what the answer is for, under the heading. */
+	hint?: string;
+	/** The field opens with this text, editable. */
+	initial?: string;
+	/** Draw the value as dots — for a secret. */
+	mask?: boolean;
+	/** Accept an empty answer (which resolves as "") instead of requiring one. */
+	optional?: boolean;
+	/**
+	 * Judge the trimmed value; return the reason to keep the dialog open, or
+	 * undefined to accept it. The rule lives beside the thing being asked for,
+	 * not in this surface.
+	 */
+	validate?: (value: string) => string | undefined;
+}
+
+export interface TextPromptState extends TextPromptRequest {
+	/** Resolves with the trimmed value, "" when an optional field was left empty, or null on cancel. */
+	resolve: (value: string | null) => void;
+}
+
+/**
  * What the reviewer said about a plan.
  *
  * `approved: false` with no feedback is "keep planning, no note"; with feedback
@@ -488,6 +529,7 @@ export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiSt
 		planReview: null,
 		picker: null,
 		phraseConfirm: null,
+		textPrompt: null,
 		statusCard: null,
 		activity: null,
 		backgroundShells: [],

@@ -26,12 +26,14 @@ import { createPlanReviewSlot } from "./plan-review-slot.ts";
 import { createQuestionSlot } from "./question-slot.ts";
 import { createStore, type Store, useStore } from "./store.ts";
 import { enterRawModeEarly } from "./terminal-input.ts";
+import { createTextPromptSlot } from "./text-prompt-slot.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
 import {
 	initialUiState,
 	type PhraseConfirmRequest,
 	type PlanReviewResult,
 	type StatusCardData,
+	type TextPromptRequest,
 	toolFullView,
 	toolPreview,
 	type UiBackgroundShell,
@@ -185,6 +187,16 @@ export interface ReplAppHandle {
 	 */
 	confirmPhrase: (request: PhraseConfirmRequest) => Promise<boolean>;
 	/**
+	 * Ask for one line of text; resolves with the trimmed value, "" when an
+	 * optional field was left empty, or null on Esc or replacement.
+	 *
+	 * Its own surface rather than `askUser` because the answer is a value, not
+	 * a choice: `mask` keeps a pasted key out of the scrollback, and
+	 * `validate` lets the caller keep the dialog open on a bad URL or an empty
+	 * required field.
+	 */
+	promptText: (request: TextPromptRequest) => Promise<string | null>;
+	/**
 	 * Show a scrollable pick-one list; resolves with the chosen index or null on
 	 * cancel. The in-app /resume and /model pickers both run on this.
 	 *
@@ -228,6 +240,12 @@ export interface ReplAppHandle {
 	 * and a dialog left behind by an abort would never settle it.
 	 */
 	clearPhraseConfirmRequest: () => void;
+	/**
+	 * Dismiss an open text prompt as canceled, if one is up. The third caller-side
+	 * need of the same kind: a caller is awaiting the promise, and a surface left
+	 * behind by an abort or a replacement would never settle it.
+	 */
+	clearTextPromptRequest: () => void;
 	/**
 	 * Dismiss an open plan review as canceled, if one is up. The third dialog with
 	 * the same caller-side need: its caller is a tool call awaiting an answer.
@@ -571,6 +589,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		show: (phraseConfirm) => store.set((state) => ({ ...state, phraseConfirm })),
 	});
 
+	const textPromptSlot = createTextPromptSlot({
+		show: (textPrompt) => store.set((state) => ({ ...state, textPrompt })),
+	});
+
 	return {
 		store,
 		waitUntilExit: async () => {
@@ -668,10 +690,12 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		},
 		askUser: questionSlot.ask,
 		confirmPhrase: phraseConfirmSlot.confirm,
+		promptText: textPromptSlot.prompt,
 		requestPlanReview: planReviewSlot.request,
 		clearPermissionRequest: permissionQueue.clear,
 		clearQuestionRequest: questionSlot.clear,
 		clearPhraseConfirmRequest: phraseConfirmSlot.clear,
+		clearTextPromptRequest: textPromptSlot.clear,
 		clearPlanReviewRequest: planReviewSlot.clear,
 		clearPickerRequest: () => cancelOpenPicker(store),
 	};
