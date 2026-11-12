@@ -31,6 +31,20 @@ remove rather than rewriting it.
 `/compact focus on …` for the same reason LaBunbun implemented it: the user
 knows what the next task needs better than the automatic pass does. No change.
 
+**Path-scoped rules load with the file they govern.** A rule file in
+`.labunbun/rules/` with a `paths:` frontmatter is no longer part of the startup
+memory. It is attached to the first `Read`, `Edit` or `Write` result whose path
+matches one of its globs, attaches once per session, and re-attaches after a
+compaction reset. The startup memory keeps the unscoped rules. Design and limits
+in [Path-scoped rules](path-rules.md).
+
+**`/btw` asks a side question without making it a turn.** The command builds a
+request from the live context plus the question, with no tools, and shows the
+answer on screen. Nothing is appended to the transcript, so the next request is
+the one the user's work would have sent anyway. The session exposes this as
+`AgentSession.aside()` (`packages/agent/src/session.ts:405`), and the command
+is cancellable like `/compact`.
+
 ## Already present, so nothing to copy
 
 - A runnable check and visible evidence: the base prompt requires a real build,
@@ -58,23 +72,12 @@ background-work deferral, retry/pause rules for provider errors, and a cap on
 runaway turn loops. That is a feature, not a prompt clause, and a prompt cannot
 substitute for it.
 
-**Path-scoped rules.** `.claude/rules/*.md` with a `paths:` frontmatter loads a
-rule when a matching file is read or edited, and reloads it on demand after
-compaction. LaBunbun's rules are unscoped and all load at startup. Useful for
-large monorepos; it needs a matcher on the file tools, a frontmatter reader, and
-a decision about whether scoped rules survive compaction (upstream reloads them
-on demand rather than re-injecting them).
-
 **A prompt audit.** Claude Code's `/doctor prompt-audit` flags instructions
 written for older models, references to files that no longer exist, and rules
 that contradict each other. LaBunbun's `/doctor` checks configuration but does
 not read the memory files for contradictions. A smaller version — duplicate
-headings, `paths:` targets that do not exist once scoped rules land, and lines
-naming commands the project no longer has — would be cheap to add.
-
-**`/btw`.** A side question answered without adding to the conversation
-history. It is a UX affordance rather than a capability, and it depends on the
-session model exposing a throwaway request path.
+headings, `paths:` targets that match no file, and lines naming commands the
+project no longer has — would be cheap to add.
 
 ## Deliberately not copied
 
@@ -97,5 +100,7 @@ session model exposing a throwaway request path.
 ## Where the behaviour is tested
 
 `packages/coding-agent/test/prompt-command-dispatch.test.ts` pins the `/init`
-prompt by the phrases that carry the rule. The prompt-side clauses from the
-companion note are pinned in `system-prompt.test.ts`.
+prompt and the `/btw` dispatch by the phrases and outcomes that carry them.
+The path-rules split is covered by `path-rules.test.ts` and
+`path-rules-e2e.test.ts`. The prompt-side clauses from the companion note are
+pinned in `system-prompt.test.ts`.

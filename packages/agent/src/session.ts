@@ -386,6 +386,57 @@ export class AgentSession {
 	}
 
 	/**
+	 * Answer a question about the conversation without adding it to the
+	 * conversation.
+	 *
+	 * `/btw` exists for the question that arrives mid-task — "what did that
+	 * error mean?" — where answering it as a normal prompt would hand the model
+	 * a turn it never asked for and leave the aside in the history every later
+	 * request pays for. Here the question is read alongside the transcript it
+	 * is about and dropped with the answer: `this.messages` is untouched, so
+	 * the next `prompt()` sends exactly what it would have sent without the
+	 * aside.
+	 *
+	 * No tools are offered, deliberately. An aside is a question, never a task:
+	 * a request that could edit files would need the loop, the permission gate
+	 * and the transcript that records what it did — all of which this method
+	 * exists to stay out of.
+	 */
+	async aside(text: string, options: { signal?: AbortSignal } = {}): Promise<string> {
+		if (this.#running) throw new Error("AgentSession is already running");
+		const context: Context = {
+			systemPrompt: this.#systemPrompt,
+			messages: [...this.messages, userMessage(text)],
+			tools: [],
+		};
+		let terminal: AssistantMessage | undefined;
+		for await (const event of this.#deps.streamFn(this.#model, context, {
+			signal: options.signal,
+			thinkingLevel: this.#deps.thinkingLevel?.(),
+		})) {
+			if (event.type === "done" || event.type === "error") terminal = event.message;
+		}
+		if (!terminal) {
+			const failed = new Error("The provider stream produced no terminal event");
+			failed.name = "AbortError";
+			throw failed;
+		}
+		const answer = terminal.content
+			.flatMap((block) => (block.type === "text" ? [block.text] : []))
+			.join("")
+			.trim();
+		if (terminal.stopReason === "aborted" || options.signal?.aborted) {
+			const cancelled = new Error("Aside interrupted");
+			cancelled.name = "AbortError";
+			throw cancelled;
+		}
+		if (terminal.stopReason === "error" || terminal.stopReason === "refusal") {
+			throw new Error(terminal.errorMessage ?? answer ?? "The aside request did not produce an answer.");
+		}
+		return answer;
+	}
+
+	/**
 	 * Adopt a context that has been made smaller: the live history becomes what
 	 * the pass returned, and — for a summary — the store has already recorded the
 	 * boundary it starts from. Used by the auto path, by `/compact`, and by the

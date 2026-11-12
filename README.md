@@ -674,6 +674,7 @@ Use these commands in the terminal.
 | `/beetle [...]` | Run the four-agent band. See [The four-agent band](#the-four-agent-band). |
 | `/yoshi [...]` | Import from another agent tool. See [Import procedure](#import-procedure). |
 | `/init` | Make a `LABUNBUN.md` file for this project. |
+| `/btw [question]` | Ask a side question about the conversation. The answer appears on screen and is not added to the history; the next request is unchanged. |
 | `/explain [target]` | Ask the model to explain code or a concept. Without a target it explains the code last discussed. |
 | `/hal` | Play a sound. |
 | `/clear` | Clear the display. The session and the model context stay. |

@@ -267,6 +267,30 @@ export function builtInCommands(): Command[] {
 			},
 		},
 		{
+			name: "btw",
+			description: "Ask a side question about the conversation without adding it to the history: /btw [question]",
+			type: "local",
+			// The answer is one model call; Esc must be able to stop it.
+			cancellable: true,
+			call: async (ctx, args) => {
+				const question = args.trim();
+				if (!question) return "Usage: /btw [question] — a question answered from this conversation, not added to it.";
+				if (ctx.session.isRunning) return "/btw waits for the current run to finish.";
+				// One model call takes a while, and the REPL prints only the return
+				// value: without this line the command looks hung.
+				ctx.pushInfo("Asking…");
+				try {
+					const answer = await ctx.session.aside(question, { signal: ctx.signal });
+					return answer || "The model returned no text.";
+				} catch (error) {
+					if (ctx.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+						return "Aside cancelled.";
+					}
+					throw error;
+				}
+			},
+		},
+		{
 			name: "explain",
 			description: "Ask the model to explain code or a concept: /explain [target]",
 			type: "prompt",

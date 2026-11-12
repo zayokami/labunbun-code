@@ -35,8 +35,8 @@ interface Harness {
 	transcript: () => Array<{ kind: string; text: string }>;
 }
 
-function harness(): Harness {
-	const faux = fauxProvider([{ text: "ok" }]);
+function harness(steps: Parameters<typeof fauxProvider>[0] = [{ text: "ok" }]): Harness {
+	const faux = fauxProvider(steps);
 	const session = new AgentSession({
 		model: FAUX_MODEL,
 		systemPrompt: "sys",
@@ -50,6 +50,9 @@ function harness(): Harness {
 	const ctx = {
 		commands: [...builtInCommands(), ...skillsAsCommands([SKILL])],
 		getSession: () => session,
+		// Local commands read these at dispatch even when they do not use them.
+		compaction: () => undefined,
+		beginCommand: undefined,
 		handle: {
 			// The store's contract: an update applied to the current state. Recording
 			// the result rather than the argument is what lets a test see the entry
@@ -134,6 +137,43 @@ describe("what counts as a prompt command", () => {
 			{ name: "short", aliases: ["s"], description: "", type: "prompt" as const, getPrompt: () => "EXPANDED" },
 		];
 		expect(expandPromptCommand(commands, "/s rest")).toBe("EXPANDED");
+	});
+});
+
+/**
+ * `/btw` is a question about the conversation, not a turn in it: the answer
+ * goes to the screen and nowhere else, so the next request is the one the
+ * user's work would have sent anyway.
+ */
+describe("the /btw command", () => {
+	const waitFor = async (check: () => boolean): Promise<void> => {
+		const deadline = Date.now() + 2_000;
+		while (!check()) {
+			if (Date.now() > deadline) throw new Error("timed out waiting for the command");
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+	};
+
+	test("shows the answer and leaves the session history untouched", async () => {
+		const h = harness([{ text: "aside answer" }]);
+
+		expect(handleCommandDispatch("/btw what did that mean?", h.ctx)).toBe(true);
+		await waitFor(() => h.transcript().some((entry) => entry.kind === "info" && entry.text === "aside answer"));
+
+		// The request carried the question with no tools, and the session is still
+		// empty: there is no turn for the next prompt to inherit.
+		expect(h.faux.receivedContexts[0]?.tools).toEqual([]);
+		expect(JSON.stringify(h.faux.receivedContexts[0]?.messages)).toContain("what did that mean?");
+		expect(h.ctx.getSession()?.messages).toEqual([]);
+	});
+
+	test("says how to use it when there is no question", async () => {
+		const h = harness();
+
+		handleCommandDispatch("/btw", h.ctx);
+		await waitFor(() => h.transcript().some((entry) => entry.kind === "info"));
+		expect(h.transcript().at(-1)?.text).toContain("Usage: /btw");
+		expect(h.faux.receivedContexts).toHaveLength(0);
 	});
 });
 
