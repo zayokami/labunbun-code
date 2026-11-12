@@ -34,7 +34,7 @@ The old `starting interactive mode…` line was removed: it stayed in the scroll
 `runWizard` (`wizard.ts:420-572`) is a plain console + readline flow — no ink, because no session exists yet. It prints `Welcome to labunbun — first-time setup. Press Enter to accept [defaults].` and the project directory (`wizard.ts:421`), then shows what the machine holds and asks, in order:
 
 1. The detection block (batch 2) — `Found on this machine:` followed by one row per detected migration source (label and tree), one per set key variable, one per subscription sign-in (`wizard.ts:430-442`, rows composed by `wizardDetectionLines`, `wizard.ts:197-207`). Printed only when non-empty.
-2. `How do you want to use labunbun?` — four numbered rows (`wizard.ts:446-458`), defaulted by `wizardProviderDefault` (`wizard.ts:180-186`): `1` when a Claude config was detected, else `3` when a key variable is set, else `1`. Row `1` runs the Claude sign-in, row `2` the ChatGPT flow (`wizard.ts:475-482`; a failed sign-in prints a retry line and the wizard continues). Row `3` skips the paste when an anthropic variable is already set and otherwise reads it masked (`wizard.ts:484-493`, reader at `wizard.ts:250-295`). Row `4` is the old `openai-compatible` question set (`wizard.ts:494-508`).
+2. `How do you want to use labunbun?` — five numbered rows (`WIZARD_PROVIDER_ROWS`), defaulted by `wizardProviderDefault` (`wizard.ts`): `1` when a Claude config was detected, else `3` when a key variable is set, else `1`. Row `1` runs the Claude sign-in, row `2` the ChatGPT flow (a failed sign-in prints a retry line and the wizard continues). Row `3` skips the paste when an anthropic variable is already set and otherwise reads it masked. Row `4` is the old `openai-compatible` question set. Row `5` skips setup: it writes the same `{}` Cancel does and still offers the import, because the keys that make the provider question unnecessary are exactly the ones that offer can bring.
 3. `Theme (dark/light… or auto) [auto]:` (`wizard.ts:513`, choices built from the TUI's own list at `wizard.ts:153`; the default became `auto` in batch 2).
 4. `Editing model (vim, emacs, or none) [none]:` (`wizard.ts:517`, `wizard.ts:168`).
 
@@ -305,6 +305,7 @@ How do you want to use labunbun?
   2. Sign in with a ChatGPT subscription     the ChatGPT models, on your plan
   3. Use an API key                          paste it now, or export it yourself
   4. Use another endpoint or gateway         DeepSeek, Kimi, GLM, OpenRouter, a local daemon
+  5. Skip for now                            start the session; set things up later
 [1]:
 ```
 
@@ -316,8 +317,9 @@ How do you want to use labunbun?
 ### Screen C — import offer (question 2, only when Screen A found something) — implemented (batch 2), run after the write
 
 ```
-Import your Claude Code setup? Settings, MCP servers, skills and this project's
-conversations. You will see the full plan before anything is written. [Y/n]:
+Import your Claude Code setup? Settings (including API keys), MCP servers, skills
+and this project's conversations. You will see the full plan before anything is
+written. [Y/n]:
 ```
 
 - `Y` runs `runMigration({ only: ["settings", "assets"], from: <detected sources>, home, cwd })` — the dry run — prints `result.report` (`main.ts:321-349` shows the exact shape), and then reuses the wizard's own confirm wording: `Apply these N file(s)?` with `Apply` / `Cancel` (`migrate-wizard.ts:302-311`). `--force` stays off, so nothing already present is overwritten (`docs/dev/migration-framework.md`).
@@ -382,7 +384,7 @@ Four batches. Line counts are rough, and no batch should be started before the d
 
 ### Batch 2 — the wizard grows up — implemented (`9403213`; ~300 lines + ~90 test)
 
-- `wizard.ts`: the detection block (Screen A), the four-way provider question (Screen B), the import offer (Screen C), theme default `auto` (Screen D), and the no-exit skip rule (Screen E).
+- `wizard.ts`: the detection block (Screen A), the five-way provider question (Screen B; row 5 skips the questions and keeps the import offer), the import offer (Screen C), theme default `auto` (Screen D), and the no-exit skip rule (Screen E).
 - Reuses: `detectSources`, `runMigration` (`migrate.ts`), `runClaudeLoginCli`'s flow and `chatGptLoginFlow` (`claude-login.ts:161-210`, `chatgpt-login.ts:124-166`), `askChoice` / `readMasked` (`wizard.ts:235-295`).
 - `buildWizardSettings` (`wizard.ts:97-142`) gains the model implied by a sign-in — `chatgpt/gpt-6-astra` for the ChatGPT row, pinned against `listModels()` in the tests.
 - Tests: `wizard.test.ts` already asserted the trigger and the translation; batch 2 added the chatgpt→settings mapping, the registry pin, the provider-default rule, the detection rows, and "import offer is absent when nothing is detected".

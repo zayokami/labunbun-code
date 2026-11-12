@@ -20,6 +20,8 @@ import {
 	shouldRunWizard,
 	userSettingsPath,
 	WIZARD_CHATGPT_MODEL,
+	WIZARD_PROVIDER_CHOICES,
+	WIZARD_PROVIDER_ROWS,
 	WIZARD_THEME_CHOICES,
 	WIZARD_THEME_DEFAULT,
 	wizardDetectionLines,
@@ -234,6 +236,23 @@ describe("buildWizardSettings", () => {
 	});
 });
 
+describe("the payment question", () => {
+	test("offers the four ways to pay, and a fifth way out", () => {
+		// The skip row is the point: a user with a key in another CLI, or with
+		// no intention of setting anything up tonight, used to have to pick a
+		// provider and back out of its follow-up questions. A row that says so
+		// is the difference between a question and a gate.
+		expect(WIZARD_PROVIDER_ROWS).toHaveLength(5);
+		expect(WIZARD_PROVIDER_ROWS[4]).toContain("Skip");
+		expect(WIZARD_PROVIDER_CHOICES).toEqual(["1", "2", "3", "4", "5"]);
+		// Every row is numbered by its own place, so an answer always names the
+		// row the user was looking at.
+		for (const [index, row] of WIZARD_PROVIDER_ROWS.entries()) {
+			expect(row.trimStart().startsWith(`${index + 1}. `)).toBe(true);
+		}
+	});
+});
+
 describe("wizardProviderDefault", () => {
 	test("the default row is the one that is already true for this machine", () => {
 		expect(wizardProviderDefault({ claudeConfigured: true, envKeysPresent: false })).toBe("1");
@@ -293,6 +312,10 @@ describe("importOfferLine", () => {
 		expect(line).toContain(MIGRATION_SOURCE_LABELS["claude-code"]);
 		expect(line).toContain(MIGRATION_SOURCE_LABELS.codex);
 		expect(line).toContain("full plan");
+		// The settings category carries the sources' `env` entries, so the offer
+		// has to say so: "import API keys from my other tool" is the reason a
+		// user takes this question, and a line that only says "settings" hides it.
+		expect(line).toContain("API keys");
 		// History is the one category the first-run offer leaves out; the question
 		// must not promise the conversations its own plan will not count.
 		expect(line).not.toContain("conversation");

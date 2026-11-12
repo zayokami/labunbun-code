@@ -4,13 +4,16 @@
  * ANTHROPIC_API_KEY" as a user's very first experience.
  *
  * The flow, in the order it runs: what this machine already holds (the
- * detection block), how the user wants to pay for it (the four-way question —
- * the two sign-in rows drive the real login flows), the questions that already
- * existed (theme, editing model), the write, and — only when the detection
- * block found a source — the import offer, run as a dry run the user confirms.
- * The import runs after the write, not before: `--force` stays off, so the
- * import only adds what is missing and every key the wizard just wrote
- * survives the merge by construction (see `offerImport`).
+ * detection block), how the user wants to pay for it (the five-way question —
+ * the two sign-in rows drive the real login flows, and the fifth skips the
+ * questions without leaving the setup half-answered), the questions that
+ * already existed (theme, editing model), the write, and — only when the
+ * detection block found a source — the import offer, run as a dry run the user
+ * confirms. The import runs after the write, not before: `--force` stays off,
+ * so the import only adds what is missing and every key the wizard just wrote
+ * survives the merge by construction (see `offerImport`). Row 5 writes the
+ * same `{}` as Cancel and then offers the import: the keys that make the
+ * provider question unnecessary are exactly the ones that offer can bring.
  *
  * Storage rules, matching the rest of the config system:
  * - The key VALUE goes into `settings.env`, which applySettingsEnv applies at
@@ -186,8 +189,25 @@ export function wizardProviderApi(choice: string): CustomProviderApiId {
 	return "openai-completions";
 }
 
-/** Which row of the payment question a bare Enter takes: `1`–`4`, top to bottom. */
-export type WizardProviderRow = "1" | "2" | "3" | "4";
+/** Which row of the payment question a bare Enter takes: `1`–`5`, top to bottom. */
+export type WizardProviderRow = "1" | "2" | "3" | "4" | "5";
+
+/**
+ * The payment question's rows, in the order shown. Exported so a test can hold
+ * the list the user actually reads — the fifth row is the explicit skip the
+ * original four lacked, and a wizard that silently grew or lost a row would be
+ * one nobody could back out of.
+ */
+export const WIZARD_PROVIDER_ROWS: readonly string[] = [
+	"  1. Sign in with a Claude subscription      a browser opens; no API key needed",
+	"  2. Sign in with a ChatGPT subscription     the ChatGPT models, on your plan",
+	"  3. Use an API key                          paste it now, or export it yourself",
+	"  4. Use another endpoint or gateway         DeepSeek, Kimi, GLM, OpenRouter, a local daemon",
+	"  5. Skip for now                            start the session; set things up later",
+];
+
+/** The answers the payment question accepts, one per row. */
+export const WIZARD_PROVIDER_CHOICES: readonly string[] = WIZARD_PROVIDER_ROWS.map((_, index) => String(index + 1));
 
 /**
  * The row that is already true for this machine — Codex's default rule, same
@@ -245,7 +265,11 @@ export function wizardDetectionLines(found: {
 export function importOfferLine(sources: readonly MigrationSourceId[]): string | undefined {
 	if (sources.length === 0) return undefined;
 	const names = sources.map((source) => MIGRATION_SOURCE_LABELS[source]).join(", ");
-	return `Import from ${names}? Settings, MCP servers, skills and agents. You will see the full plan before anything is written.`;
+	// "including API keys" is the sentence this offer exists for: the settings
+	// category carries the sources' `env` entries, and a user with a key in
+	// another CLI should not have to find that out by reading the plan's file
+	// list. The count-less phrasing stays true whether or not a source holds one.
+	return `Import from ${names}? Settings (including API keys), MCP servers, skills and agents. You will see the full plan before anything is written.`;
 }
 
 type Ask = (question: string) => Promise<string>;
@@ -482,28 +506,56 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		if (found.length > 0) {
 			console.log("Found on this machine:");
 			for (const line of found) console.log(`  ${line}`);
+			// Said before the payment question rather than at the offer: the
+			// point of listing the sources is that the user may not need to
+			// answer that question at all, and a key copied out of another CLI
+			// below is the cheapest way through the wizard there is.
+			if (sources.length > 0) console.log("  Their settings and API keys can be imported below.");
 			console.log("");
 		}
 
-		// Screen B: one question with four answers, defaulted to the row that is
+		// Screen G's note, in its own try: a failed note must not read as a
+		// failed import, and both paths below record the same two facts.
+		const recordFirstRun = (imported: boolean): void => {
+			try {
+				writeUserSettingsPatch({ firstRun: firstRunRecord({ signIns: signedIn, imported, now: new Date() }) }, home);
+			} catch (error) {
+				// One line, never fatal: the file is already written and the session
+				// starts on it; a note that cannot land is not worth a failed start.
+				console.log(`  (first-run note not recorded: ${messageOf(error)})`);
+			}
+		};
+
+		// Screen B: one question with five answers, defaulted to the row that is
 		// already true here.
 		const row = await askChoice(
 			ask,
-			[
-				"How do you want to use labunbun?",
-				"  1. Sign in with a Claude subscription      a browser opens; no API key needed",
-				"  2. Sign in with a ChatGPT subscription     the ChatGPT models, on your plan",
-				"  3. Use an API key                          paste it now, or export it yourself",
-				"  4. Use another endpoint or gateway         DeepSeek, Kimi, GLM, OpenRouter, a local daemon",
-			].join("\n"),
-			["1", "2", "3", "4"],
+			["How do you want to use labunbun?", ...WIZARD_PROVIDER_ROWS].join("\n"),
+			WIZARD_PROVIDER_CHOICES,
 			wizardProviderDefault({
 				claudeConfigured: sources.includes("claude-code"),
 				envKeysPresent: envKeys.length > 0,
 				signIns,
 			}),
-			"1/2/3/4",
+			WIZARD_PROVIDER_CHOICES.join("/"),
 		);
+
+		// Row 5: the explicit skip the four rows lacked. It writes the same `{}`
+		// Cancel does, so the wizard cannot re-trigger, and it still offers the
+		// import — the one step that does not depend on how the user wants to pay,
+		// and the one that may bring the keys that made the question moot. The
+		// theme and editing questions are skipped with it: a user who asked not
+		// to be set up should not then be asked to choose a font.
+		if (row === "5") {
+			writeSettingsFile(userSettingsPath(home), {});
+			wrote = true;
+			const imported = await offerImport(ask, { home, cwd, sources });
+			recordFirstRun(imported);
+			console.log(
+				"\nSetup skipped — the session starts anyway. Run /login or /yoshi in it, or edit ~/.labunbun/settings.json.",
+			);
+			return;
+		}
 
 		let provider: WizardAnswers["provider"] = "anthropic";
 		let apiKey: string | null = null;
@@ -613,16 +665,8 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		const imported = await offerImport(ask, { home, cwd, sources });
 
 		// Screen G: the record of what this run did. Merged through the settings
-		// patch so it cannot disturb the answers just written, and in its own
-		// try — the catch below reads any throw after the write as a failed
-		// import, which a failed note is not.
-		try {
-			writeUserSettingsPatch({ firstRun: firstRunRecord({ signIns: signedIn, imported, now: new Date() }) }, home);
-		} catch (error) {
-			// One line, never fatal: the file is already written and the session
-			// starts on it; a note that cannot land is not worth a failed start.
-			console.log(`  (first-run note not recorded: ${messageOf(error)})`);
-		}
+		// patch so it cannot disturb the answers just written.
+		recordFirstRun(imported);
 
 		console.log("Type /help in a session to see commands.");
 	} catch (error) {
