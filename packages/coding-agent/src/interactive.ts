@@ -38,6 +38,7 @@ import {
 import {
 	type AgentMessage,
 	apiKeyEnvNames,
+	type CatalogRefresh,
 	createTrackedStreamFn,
 	formatCatalogNotice,
 	gatewayProvidersFor,
@@ -2536,6 +2537,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				recoveredShells: observeRecoveredShells(recoveredShells),
 				refreshBackgroundShells: publishShells,
 				settings,
+				// `/model` re-asks on every opening; the setting that turned the
+				// startup refresh off is the same one that turns this off, and
+				// its absence is what a hand-built context shows as "no asking".
+				refreshCatalog: settings.modelDiscovery === false ? undefined : () => refreshModelCatalog(),
 				cwd,
 				repoMap,
 				// `/map-refresh` has already dropped the cache and re-read the tree;
@@ -3361,6 +3366,17 @@ interface AppCommandContext {
 	 * reports a save that will be gone by tomorrow.
 	 */
 	loadedSettings: LoadedSettings;
+	/**
+	 * Ask the providers what they serve, as `/model`'s picker opens.
+	 *
+	 * Supplied by `runInteractive`, which owns the discovery setting: absent
+	 * means asking is off — the user turned discovery off, or this context was
+	 * built by hand and has no providers behind it — and the picker lists the
+	 * table it has. The hook is here rather than called directly because a
+	 * command module that reaches for the network has no way to be tested
+	 * without one.
+	 */
+	refreshCatalog?(): Promise<CatalogRefresh | undefined>;
 	cwd: string;
 	/**
 	 * The session's repository map, shared with the RepoMap tool. `/map` renders
@@ -3866,6 +3882,9 @@ function geminiAuthOf(ctx: AppCommandContext): GeminiAuthHooks {
 		}
 	);
 }
+
+/** A model's wire reference, the spelling every listing and error already uses. */
+const refOf = (model: Model): string => `${model.provider}/${model.id}`;
 
 function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 	const [command] = text.split(/\s+/);
@@ -4376,6 +4395,34 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const handleRef = ctx.handle;
 				if (!handleRef) return;
 				const current = ctx.getSession()?.model;
+				// The picker is an enumeration of what the providers say they
+				// serve, so it is only as current as the last time anyone asked.
+				// Ask again as it opens: a key that arrived since startup
+				// (`/login`, an export in another shell) has a provider whose
+				// rows were empty a minute ago, and one that dropped a model
+				// would otherwise keep offering it. The probes run concurrently
+				// and the whole refresh gives up after five seconds; a provider
+				// that does not answer leaves its rows exactly as they were,
+				// which is the rule the table is already built on. A listing
+				// that changed is said out loud — a row vanishing unannounced
+				// reads as a bug.
+				if (ctx.refreshCatalog) {
+					// What the picker would offer without the refresh. A refresh
+					// that reports the same drops the startup one did — which a
+					// provider serving a subset of the table does every time —
+					// must not relitigate them here; the notice is for a list
+					// that actually moved.
+					const before = offeredModels().map(refOf).join("\n");
+					let refresh: CatalogRefresh | undefined;
+					try {
+						refresh = await ctx.refreshCatalog();
+					} catch {
+						// Discovery failing is not a reason to leave the picker
+						// unopened; the table it stands on is still usable.
+					}
+					const notice = offeredModels().map(refOf).join("\n") === before ? undefined : formatCatalogNotice(refresh);
+					if (notice) pushInfo(handleRef, notice);
+				}
 				// Which models may be offered is a question about what a session can
 				// do, not about how a row looks — see `offeredModels`.
 				const models = offeredModels();
