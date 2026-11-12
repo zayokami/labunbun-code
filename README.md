@@ -163,6 +163,19 @@ The files are rendered from the root to the working directory, so the nearest fi
 
 A memory file can include another file with a line of the form `@path`. The tool expands the include at that position. The included path must stay in the tree of the memory file where the include chain started. The tool reports a circular include, a missing include, and an include outside the tree.
 
+A rule file can name the files it applies to with a `paths:` frontmatter:
+
+```markdown
+---
+paths:
+  - src/api/**/*.ts
+---
+
+Every handler answers with the envelope in `api/respond.ts`.
+```
+
+The tool does not load such a rule at startup. The tool attaches it to the result of the first `Read`, `Edit`, or `Write` call that names a matching path. The paths are relative to the working directory. The rule then stays in the conversation. A compaction clears it, and the next matching call attaches it again. A trailing `/` in a pattern means every file under that directory. A subagent does not receive these rules.
+
 The project tier is behind the trust gate. The tool reads no project memory file, from any directory of the walk, until you approve this project with `/agents approve`. The tool prints the number of held-back files at startup. Restart the session after the approval.
 
 Type a line that starts with `#` to add a note to `~/.labunbun/MEMORY.md`. The tool appends the line, reads the memory files again, and updates the system prompt. The note applies from the next request, with no restart. This shortcut is in the terminal session only. A headless or ACP session reads the memory files once at startup.
