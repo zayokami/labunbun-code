@@ -51,6 +51,17 @@ function userSettingsPath(home: string): string {
 }
 
 /**
+ * The user settings file, for callers that need to show or open it.
+ *
+ * `/config` names it on screen and hands it to the editor; both are about the
+ * file itself rather than about a value inside it, which is why this is a path
+ * and not another writer.
+ */
+export function userSettingsFilePath(home = homedir()): string {
+	return userSettingsPath(home);
+}
+
+/**
  * The user's own settings file, parsed. Missing reads as empty; unparseable
  * throws, because every writer here is a read-merge-write and merging into a
  * file nobody could read would discard it.

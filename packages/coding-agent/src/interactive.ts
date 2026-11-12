@@ -42,6 +42,7 @@ import {
 	createTrackedStreamFn,
 	formatCatalogNotice,
 	gatewayProvidersFor,
+	listModels,
 	type Model,
 	missingApiKey,
 	refreshModelCatalog,
@@ -124,6 +125,7 @@ import {
 	type UiStartupNote,
 } from "@labunbun/tui";
 import { activitySummaryLine } from "./activity-report.ts";
+import { runApiConfig } from "./api-config.ts";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import {
 	applyAutocompactAction,
@@ -369,7 +371,12 @@ import {
 	selectableThemeNames,
 } from "./theme-file.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
-import { persistModelChoice, writeUserSettingsNestedPatch, writeUserSettingsPatch } from "./user-settings.ts";
+import {
+	persistModelChoice,
+	userSettingsFilePath,
+	writeUserSettingsNestedPatch,
+	writeUserSettingsPatch,
+} from "./user-settings.ts";
 import { runWizard, shouldRunWizard } from "./wizard.ts";
 import { loadWorkflowDefinitions, type WorkflowDefinition, withheldProjectWorkflows } from "./workflow-definitions.ts";
 import { createWorkflowTool } from "./workflow-tool.ts";
@@ -492,7 +499,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Before provider registration and the API-key check below, both of which
 	// read process.env — a key configured via settings.env has to be in place
 	// by then or it would have no effect at all.
-	applySettingsEnv(settings);
+	const settingsEnvApplied = new Set(applySettingsEnv(settings));
 	// Models and prices the settings file declares, before anything resolves one.
 	applyCatalogSettings(settings);
 	markStartup("catalog settings applied");
@@ -2537,10 +2544,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				recoveredShells: observeRecoveredShells(recoveredShells),
 				refreshBackgroundShells: publishShells,
 				settings,
+				// The names startup took from `settings.env` rather than from the
+				// shell. `/config` needs the split to say which key the process is
+				// actually using, and which one it may replace.
+				settingsEnvApplied,
 				// `/model` re-asks on every opening; the setting that turned the
-				// startup refresh off is the same one that turns this off, and
-				// its absence is what a hand-built context shows as "no asking".
-				refreshCatalog: settings.modelDiscovery === false ? undefined : () => refreshModelCatalog(),
+				// startup refresh off is the same one that turns this off. The
+				// check sits inside the closure rather than around it so that
+				// `/config` toggling discovery takes effect on the next opening
+				// instead of the next launch. Its absence is what a hand-built
+				// context shows as "no asking".
+				refreshCatalog: () => (settings.modelDiscovery === false ? Promise.resolve(undefined) : refreshModelCatalog()),
 				cwd,
 				repoMap,
 				// `/map-refresh` has already dropped the cache and re-read the tree;
@@ -3367,6 +3381,15 @@ interface AppCommandContext {
 	 */
 	loadedSettings: LoadedSettings;
 	/**
+	 * The env names startup applied from `settings.env`, because the shell did
+	 * not already hold them.
+	 *
+	 * `/config` uses the split to tell a key this app can replace from one the
+	 * shell owns: the two are the same line in `process.env`, and saying "saved"
+	 * about a shell export would be wrong in the way that matters.
+	 */
+	settingsEnvApplied?: ReadonlySet<string>;
+	/**
 	 * Ask the providers what they serve, as `/model`'s picker opens.
 	 *
 	 * Supplied by `runInteractive`, which owns the discovery setting: absent
@@ -3798,6 +3821,7 @@ export function appCommandTable(): Array<[string, string]> {
 		],
 		["/cache", "Show prompt-cache hit rate, its ceiling, and any prefix rewinds"],
 		["/checkpoint", "Show the tool ledger: the last call, files touched, tasks, and context use"],
+		["/config", "Set up providers, API keys, custom endpoints, and model discovery"],
 		["/context", "Show what the context window is made of, and what is left"],
 		["/cost", "Show token usage and cost for this conversation, then for this project"],
 		["/doctor", "Check the environment, settings, and provider setup"],
@@ -5220,6 +5244,50 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			} catch (error) {
 				pushInfo(ctx.handle, `Restore failed: ${error instanceof Error ? error.message : error}`);
 			}
+			return true;
+		}
+		case "/config": {
+			const handle = ctx.handle;
+			if (!handle) {
+				pushInfo(
+					ctx.handle,
+					"/config needs an interactive session. Edit ~/.labunbun/settings.json, or run /yoshi to import another CLI's setup.",
+				);
+				return true;
+			}
+			const home = ctx.home ?? homedir();
+			void (async () => {
+				try {
+					const current = ctx.getSession()?.model;
+					await runApiConfig({
+						dialog: handle,
+						settings: ctx.settings,
+						home,
+						appliedEnv: ctx.settingsEnvApplied,
+						report: (line) => pushInfo(handle, line),
+						// Sign-in and the model picker are commands that already exist;
+						// re-dispatching them keeps their behaviour in one place.
+						runCommand: (line) => handleAppCommand(line, ctx),
+						modelRef: current ? refOf(current) : undefined,
+						// Any row of a provider names its wire and URL, and every row
+						// answers the same listing call — asking twice would be the
+						// same request twice.
+						probe: (provider) => {
+							const template = listModels().find((model) => model.provider === provider);
+							return template ? refreshModelCatalog({ models: [template] }) : Promise.resolve(undefined);
+						},
+						openSettings: () => {
+							// Created with `{}` only when an editor resolves, the rule
+							// /memory follows: a typo in $EDITOR must not leave a file
+							// behind.
+							const openEditor = ctx.openEditor ?? openInEditor;
+							return openEditor(userSettingsFilePath(home), { fileHeader: "{}" });
+						},
+					});
+				} catch (error) {
+					pushInfo(handle, `The settings screen stopped: ${error instanceof Error ? error.message : error}`);
+				}
+			})();
 			return true;
 		}
 		case "/context": {
