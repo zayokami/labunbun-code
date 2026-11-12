@@ -22,6 +22,7 @@ import { spawn } from "node:child_process";
 import type { CompactionTrigger, LoopHooks, TaskCalibration } from "@labunbun/agent";
 import type { SpawnConfiner } from "@labunbun/tools";
 import { z } from "zod";
+import type { PathRuleInjector } from "./rule-paths.ts";
 
 export const HOOK_EVENTS = [
 	"PreToolUse",
@@ -266,8 +267,13 @@ export function sessionHookDeps(options: {
 	 * context that was just prepended to them.
 	 */
 	calibration?: TaskCalibration;
+	/**
+	 * Rules scoped by a `paths:` frontmatter, attached to the result of the first
+	 * Read/Edit/Write they match. Absent for a host that keeps no such rules.
+	 */
+	pathRules?: PathRuleInjector;
 }): LoopHooks {
-	const { runtime, context, cwd, calibration } = options;
+	const { runtime, context, cwd, calibration, pathRules } = options;
 	return {
 		// Hook context is composed into the user message as it is created, so the
 		// stored transcript is what every later request replays. Attaching it to the
@@ -287,14 +293,15 @@ export function sessionHookDeps(options: {
 			if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
 			return undefined;
 		},
-		afterToolCall: async (toolName, input) => {
-			if (!runtime.has("PostToolUse")) return undefined;
+		afterToolCall: async (toolName, input, result) => {
+			const withRules = pathRules?.apply(toolName, input, result);
+			if (!runtime.has("PostToolUse")) return withRules;
 			const outcome = await runtime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
 			// Advisory: the call already ran, so a block has nothing to stop.
 			for (const message of advisoryHookFailures("PostToolUse", outcome)) {
 				console.error(`Warning: ${message}`);
 			}
-			return undefined;
+			return withRules;
 		},
 	};
 }

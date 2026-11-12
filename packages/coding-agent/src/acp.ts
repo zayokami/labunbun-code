@@ -97,7 +97,7 @@ import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { errorRemedy } from "./error-remedy.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
-import { loadMemoryFiles } from "./memory.ts";
+import { loadMemoryFiles, loadPathRules } from "./memory.ts";
 import { writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import {
@@ -116,6 +116,7 @@ import {
 	repoMapWatchFailureNotice,
 	watchRepoMapPromptSection,
 } from "./repomap-wiring.ts";
+import { createPathRuleInjector } from "./rule-paths.ts";
 import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
@@ -1210,6 +1211,9 @@ class AcpAgent {
 
 		const memory = loadMemoryFiles(cwd, home);
 		for (const warning of memory.warnings) process.stderr.write(`Memory: ${warning}\n`);
+		// Rules scoped by a `paths:` frontmatter load when a matching file is
+		// read or edited, not at startup; the same seam the REPL and `-p` use.
+		const pathRules = createPathRuleInjector({ cwd, home, rules: loadPathRules(cwd, home) });
 		const { skills: loadedSkills, notes: skillNotes } = loadSkillsWithNotes(cwd, home, { bundled: true });
 		// The bundled `workflow` skill teaches the Workflow tool, and this host has
 		// no subagent fleet to run one with. Offering the document would promise a
@@ -1295,6 +1299,9 @@ class AcpAgent {
 				// A summary replaces what the model was shown above the boundary, so
 				// the read evidence is no longer this conversation's to edit from.
 				readState.clear();
+				// Any path rule went with the replaced result; the next matching read
+				// attaches it again.
+				pathRules.reset();
 				for (const warning of compactionWarnings(phase.verification)) process.stderr.write(`${warning}\n`);
 				saveTasks(taskStore, store);
 				// The observer event, after everything the pass had to put back is in
@@ -1386,7 +1393,13 @@ class AcpAgent {
 				// unresolved "ask" becomes a question with four answers instead of a
 				// silent denial.
 				canUseTool: (toolName, input, ctx) => this.#canUseTool(sessionId, permissions, toolName, input, ctx),
-				hooks: sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd, calibration: taskCalibration }),
+				hooks: sessionHookDeps({
+					runtime: hooksRuntime,
+					context: hookContext,
+					cwd,
+					calibration: taskCalibration,
+					pathRules,
+				}),
 			},
 		});
 		// From here the confiner's getters answer with this session's axes,

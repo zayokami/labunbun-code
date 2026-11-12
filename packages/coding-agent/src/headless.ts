@@ -71,7 +71,7 @@ import { type CostState, CostTracker, costStateFromMessages } from "./cost-track
 import { errorRemedy } from "./error-remedy.ts";
 import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
-import { loadMemoryFiles, withheldProjectMemoryFiles } from "./memory.ts";
+import { loadMemoryFiles, loadPathRules, withheldProjectMemoryFiles } from "./memory.ts";
 import { writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import {
@@ -86,6 +86,7 @@ import { supportsOutputSchema } from "./output-schema.ts";
 import { loadOutputStylesWithNotes, resolveOutputStyle, withheldProjectOutputStyles } from "./output-styles.ts";
 import { enclosingRepositoryRoot, withheldDefinitionNotice } from "./project-trust.ts";
 import { createRepoMapService, repoMapPromptSection } from "./repomap-wiring.ts";
+import { createPathRuleInjector } from "./rule-paths.ts";
 import {
 	damagedSessionNotice,
 	findSession,
@@ -635,6 +636,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// the line is the only way a scripted run can learn its instructions are
 	// missing rather than absent.
 	for (const warning of memory.warnings) console.error(`Memory: ${warning}`);
+	// Rules scoped by `paths:` are not in the memory content; they attach to the
+	// first Read/Edit/Write of a matching file. A scripted run opens the same
+	// files a person would, so it gets them through the same seam.
+	const pathRules = createPathRuleInjector({ cwd, home, rules: loadPathRules(cwd, home) });
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home, { bundled: true });
 	// Built once and shared by the session prompt and every subagent's context
 	// block, so both are matching the same discovery snapshot.
@@ -927,6 +932,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// A summary replaces what the model was shown above the boundary, so
 			// the read evidence is no longer this conversation's to edit from.
 			readState.clear();
+			// The same replacement takes any path rule with it; the next matching
+			// read attaches the rule to its result again.
+			pathRules.reset();
 			for (const warning of compactionWarnings(phase.verification)) console.error(warning);
 			saveTasks(taskStore, store);
 			// The observer event, after everything the pass had to put back is in
@@ -970,6 +978,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		context: hookContext,
 		cwd,
 		calibration: taskCalibration,
+		pathRules,
 	});
 
 	const outputStyles = loadOutputStylesWithNotes(cwd, home);

@@ -24,6 +24,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [Model roles](model-roles.md): the five seats of `settings.roles` — how each resolves fail-soft, the fallback chains, and the budget rule that refuses a request past its ceiling.
 - [Out-of-box experience](oobe-design.md): what a brand-new user meets on a machine with no settings file and no credential — the call path from an empty home, what OpenAI's Codex CLI does in the same position, and the first-launch flow this app builds.
 - [Output limits](output-limits.md): the bounds on tool output per result and per round, and the capture of a stream that has not finished.
+- [Path-scoped rules](path-rules.md): rules that load with a matching file instead of at startup — the `paths:` frontmatter, the glob match, the attachment, and what is left out.
 - [Plan mode](plan-mode.md): the permission mode and the interactive cycle — entry and approval, the review dialog, the plan and task snapshots, the board reminders, and the seats each host runs.
 - [Prompt guidance](prompt-guidance.md): which parts of Anthropic's prompting docs the base prompt adopts, where each clause lands, and which suggestions were left out on purpose.
 - [Repository map](repomap.md): the read-only outline of a checkout — the tree-sitter grammars and tags, PageRank ranking, the token budget, the shared cache, the parser workers, and the tool, prompt section and commands built on it.

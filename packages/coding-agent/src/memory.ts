@@ -9,6 +9,12 @@
  *      .labunbun/rules/*.md
  *   3. `@path` includes expanded recursively with cycle guarding
  *
+ * A rules file with a `paths:` frontmatter is not loaded here. Its body
+ * applies only to files its globs match, so it is left out of the startup
+ * content and read by `loadPathRules` instead; the session attaches it to the
+ * first Read/Edit/Write of a matching path (`rule-paths.ts`). An unscoped
+ * rules file keeps loading at startup exactly as before.
+ *
  * The 40k character budget is spent in priority order rather than render
  * order: the user tier first and in its own order, then project files from
  * cwd outward. An oversized guide in an ancestor therefore cannot evict the
@@ -44,6 +50,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { caseInsensitivePaths, isMissingPathError } from "@labunbun/tools";
 import { isProjectTierTrusted } from "./project-trust.ts";
+import { type PathRule, parseRulePaths } from "./rule-paths.ts";
 
 /** The user's own memory file, `<home>/.labunbun/MEMORY.md`. */
 export function userMemoryPath(home: string): string {
@@ -263,7 +270,7 @@ export function expandIncludes(
 }
 
 /** Read every `*.md` in a rules directory, sorted, skipping an unreadable dir. */
-function collectRules(rulesDir: string, warnings?: string[]): Array<{ path: string; content: string }> {
+function collectRuleFiles(rulesDir: string, warnings?: string[]): Array<{ path: string; content: string }> {
 	const out: Array<{ path: string; content: string }> = [];
 	const note = (message: string): void => {
 		warnings?.push(message);
@@ -290,6 +297,15 @@ function collectRules(rulesDir: string, warnings?: string[]): Array<{ path: stri
 		}
 	}
 	return out;
+}
+
+/**
+ * The startup rules in one directory: every file except those scoped by a
+ * `paths:` frontmatter, which the session attaches when a matching file is
+ * opened instead (`loadPathRules`, `rule-paths.ts`).
+ */
+function collectRules(rulesDir: string, warnings?: string[]): Array<{ path: string; content: string }> {
+	return collectRuleFiles(rulesDir, warnings).filter((file) => parseRulePaths(file.content).patterns.length === 0);
 }
 
 /**
@@ -540,6 +556,41 @@ export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult
 		omittedFiles: omittedRender,
 		warnings,
 	};
+}
+
+/**
+ * The rules whose `paths:` frontmatter scopes them to matching files.
+ *
+ * Read from the same directories as the startup rules — the user's own, then
+ * the project walk root → cwd behind the same trust gate — but they are not
+ * part of the memory content: a rule scoped to `src/api/**` costs nothing
+ * until the session opens a file there, and then arrives attached to that
+ * tool result (`rule-paths.ts`). Files with no `paths:` frontmatter are not
+ * here; `loadMemoryFiles` carries them as before.
+ */
+export function loadPathRules(cwd: string, home: string = homedir()): PathRule[] {
+	const rules: PathRule[] = [];
+	const collect = (file: { path: string; content: string }): void => {
+		const scoped = parseRulePaths(file.content);
+		if (scoped.patterns.length === 0) return;
+		rules.push({ file: file.path, patterns: scoped.patterns, body: scoped.body.trim() });
+	};
+
+	for (const file of collectRuleFiles(userRulesDir(home))) collect(file);
+	if (isProjectTierTrusted(cwd, "memory", home)) {
+		for (const dir of levelsFromCwd(cwd)) {
+			for (const file of collectRuleFiles(join(dir, ".labunbun", "rules"))) collect(file);
+		}
+	}
+
+	// The user tier is read first and the walk may revisit it when cwd sits
+	// under the home directory; one rule file is one rule.
+	const seen = new Set<string>();
+	return rules.filter((rule) => {
+		if (seen.has(rule.file)) return false;
+		seen.add(rule.file);
+		return true;
+	});
 }
 
 /**

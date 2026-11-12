@@ -250,6 +250,7 @@ import { createMcpToolRefreshHandler } from "./mcp-tool-refresh.ts";
 import {
 	appendMemoryNoteAt,
 	loadMemoryFiles,
+	loadPathRules,
 	userMemoryPath,
 	userRulesDir,
 	withheldProjectMemoryFiles,
@@ -288,6 +289,7 @@ import {
 	repoMapWatchFailureNotice,
 	watchRepoMapPromptSection,
 } from "./repomap-wiring.ts";
+import { createPathRuleInjector } from "./rule-paths.ts";
 import { createPreviewRequester } from "./session-preview.ts";
 import {
 	damagedSessionNotice,
@@ -935,6 +937,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	let memoryText = memory.content;
 	markStartup("memory loaded");
 
+	// Rules with a `paths:` frontmatter are not in `memoryText`: they attach to
+	// the first Read/Edit/Write of a matching file, and again after a compaction
+	// has replaced the result that carried them.
+	const pathRules = createPathRuleInjector({ cwd, home, rules: loadPathRules(cwd, home) });
+
 	// ---- model fallback chain ----
 	// Tracked, so `/cache` can report what the provider actually did with each
 	// request. The tracker sees every request the app makes — the loop, the
@@ -1010,6 +1017,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// the boundary is appended before the manager announces the end, which
 			// is the same ordering that makes the task list re-save necessary.
 			if (phase.kind === "preparing") planAtPassStart = readPlanSnapshot(store);
+			// A finished pass replaced the transcript that carried any path rules;
+			// the next matching read attaches them again.
+			if (phase.kind === "done") pathRules.reset();
 			// The store directly, the way `pushInfo` does: one word and one clock
 			// with no behaviour of their own, and a handle method for them would be
 			// a second name for a `set`. The clock is stamped when the pass first
@@ -1848,11 +1858,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// unreadable by now hashes to null, the absence of a fingerprint,
 				// which is not a claim about the file.
 				ledger.noteAfterMutation(toolName, input, result.isError);
-				if (!hooksRuntime.has("PostToolUse")) return undefined;
+				// A path rule attaches to the result of the first Read/Edit/Write it
+				// matches, so it is in the transcript from that call onward.
+				const withRules = pathRules.apply(toolName, input, result);
+				if (!hooksRuntime.has("PostToolUse")) return withRules;
 				const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
 				// Advisory: the call already ran, so a block has nothing to stop.
 				reportHookErrors(handle, advisoryHookFailures("PostToolUse", outcome));
-				return undefined;
+				return withRules;
 			},
 		},
 	};
