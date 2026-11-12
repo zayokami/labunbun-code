@@ -136,3 +136,21 @@ describe("what counts as a prompt command", () => {
 		expect(expandPromptCommand(commands, "/s rest")).toBe("EXPANDED");
 	});
 });
+
+/**
+ * `/init` writes a file every later session loads, and the documented failure
+ * is a long file that restates what the model can already read from the repo.
+ * The prompt is the only control over what lands in it.
+ */
+describe("the /init prompt", () => {
+	test("asks for checks and non-obvious rules, and caps what the file becomes", () => {
+		const init = builtInCommands().find((command) => command.name === "init");
+		if (init?.type !== "prompt") throw new Error("/init is not a prompt command");
+		const body = init.getPrompt("");
+		expect(body).toContain("how to run one test file");
+		expect(body).toContain("cannot be learned by reading the repo");
+		expect(body).toContain("concrete, checkable instruction");
+		expect(body).toContain("Do not describe the architecture or file layout");
+		expect(body).toContain("well under 200 lines");
+	});
+});

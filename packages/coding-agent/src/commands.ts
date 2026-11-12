@@ -315,10 +315,12 @@ export function builtInCommands(): Command[] {
 			type: "prompt",
 			getPrompt: () =>
 				`Analyze this codebase and create a LABUNBUN.md file at the project root:\n` +
-				`1. If LABUNBUN.md already exists, suggest improvements based on what you learned.\n` +
-				`2. Otherwise create it with: build/lint/test commands (especially for running a single test),\n` +
-				`   architecture overview, and any conventions an agent must follow.\n` +
-				`Be concise — future agent sessions will read this file first.`,
+				`1. If LABUNBUN.md already exists, suggest only the lines worth removing or correcting; do not rewrite it wholesale.\n` +
+				`2. Otherwise create it with the commands an agent needs to check its own work — build, typecheck, lint, test,\n` +
+				`   and how to run one test file — plus only the conventions and gotchas that cannot be learned by reading the repo.\n` +
+				`Write each convention as a concrete, checkable instruction, not a vague preference.\n` +
+				`Do not describe the architecture or file layout; later sessions read the code directly.\n` +
+				`Keep it short: every line is loaded into every session, so aim for well under 200 lines.`,
 		},
 		{
 			name: "hal",
