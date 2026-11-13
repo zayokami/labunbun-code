@@ -1258,6 +1258,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				approvedProjectMcpServers.has(name),
 		),
 	);
+	// The repository's shape, when it fits the prompt. Computed before the MCP
+	// connects below start, not after them: a server's spawn — and the package
+	// manager some configs launch it through — floods the event loop, and this
+	// walk is a chain of awaited directory reads that queues behind it (measured
+	// on this checkout: 200ms alone, 2.8s beside a cold `npx` server). The
+	// section is part of the live system prompt and is replaced by
+	// `/map-refresh`, so a refresh has to rebuild the prompt rather than only
+	// the screen. A large checkout gets no section — the RepoMap tool answers
+	// there instead, with a budget the model can raise.
+	let repoMapText = await repoMapPromptSection(repoMap);
 	// Started, not awaited: a connect spawns server processes and waits on
 	// their handshakes, and a slow one held the whole window for its startup
 	// (measured: five seconds). The session mounts on the local tools; the
@@ -1616,12 +1626,6 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// is reassigned by `/agents approve`: the block is a snapshot, and an adopted
 	// project skill has to reach both readers without a restart.
 	let skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
-	// The repository's shape, when it fits the prompt. Computed at startup and
-	// replaced by `/map-refresh`: the section is part of the live system prompt,
-	// so a refresh has to rebuild the prompt rather than only the screen. A
-	// large checkout gets no section — the RepoMap tool answers there instead,
-	// with a budget the model can raise.
-	let repoMapText = await repoMapPromptSection(repoMap);
 	/**
 	 * The system prompt for a given memory text. Built once at startup, then
 	 * rebuilt by the `#` shortcut after it re-reads the memory files: the note
