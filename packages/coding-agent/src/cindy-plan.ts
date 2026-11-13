@@ -10,6 +10,7 @@ import type { CindyProvider, CindyProviderRuntime, RawCindy } from "./cindy-read
 import {
 	ASSUMED_MAX_OUTPUT_TOKENS,
 	mergeProviderSpecs,
+	providerBaseUrl,
 	summarizeNames,
 	tildePath,
 	urlCredentialProblem,
@@ -306,7 +307,9 @@ function planCindyProvider(
 		contextWindow: model.contextWindow ?? CINDY_ASSUMED_CONTEXT_WINDOW,
 		maxOutputTokens: model.maxOutput ?? ASSUMED_MAX_OUTPUT_TOKENS,
 	}));
-	const spec = { id: provider.id, baseUrl: runtime.baseUrl, apiKeyEnv, api, models };
+	// Cindy's own transport strips an inherited "/v1" before the Anthropic SDK
+	// appends "/v1/messages"; copying the raw endpoint would produce "/v1/v1".
+	const spec = { id: provider.id, baseUrl: providerBaseUrl(api, runtime.baseUrl), apiKeyEnv, api, models };
 	if (!OpenAICompatibleProviderSchema.safeParse(spec).success) {
 		items.push({
 			source: SOURCE,

@@ -445,6 +445,35 @@ describe("cindy: providers", () => {
 		});
 	});
 
+	test("an anthropic endpoint keeps no trailing /v1, which the target's SDK would double", () => {
+		const fixture = cindyFixture({
+			providers: [
+				{
+					id: "claude-proxy",
+					name: "Claude Proxy",
+					runtimes: {
+						"claude-code": {
+							baseUrl: "https://api.proxy.test/v1",
+							wireProtocol: "anthropic-messages",
+							models: [{ id: "claude-x", name: "Claude X" }],
+						},
+					},
+					auth: { method: "apiKey" },
+				},
+			],
+		});
+		const plan = runMigration({ home: fixture.home, cwd: fixture.home, from: "cindy", existing: {} }).plan;
+		const write = plan.writes.find((entry) => entry.kind === "settings");
+		const settings = JSON.parse(write?.content ?? "{}") as {
+			providers: { openaiCompatible: Array<{ id: string; baseUrl: string; api: string }> };
+		};
+		expect(settings.providers.openaiCompatible[0]).toMatchObject({
+			id: "claude-proxy",
+			baseUrl: "https://api.proxy.test",
+			api: "anthropic-messages",
+		});
+	});
+
 	test("an OAuth provider is skipped, because the target authenticates with an environment variable", () => {
 		const fixture = cindyFixture({
 			providers: [
