@@ -1131,15 +1131,17 @@ const BUILT_IN_MODELS: Model[] = [
 	// GEMINI_API_KEY or GOOGLE_API_KEY and gives GOOGLE_API_KEY precedence when
 	// both are set — the order the rows below declare. 4 Carbon is the strongest
 	// reasoning Gemini 4 — its page names complex software engineering, scientific
-	// reasoning and cyber defense — and 4 Argon its efficient frontier sibling;
-	// both cards state thinking at low/medium/high and carry the promotional rates
-	// in force today, every priced channel of which doubles on 2026-12-01. Both
-	// meter implicit caching only, so the write channel is a structural zero; the
-	// output cap is the 65,536-token synchronous segment, since the longer decode
-	// belongs to the background API this row does not speak. 3.8 Flash is the
-	// current Flash and 3.1 Pro the only published Pro-tier Gemini 3; the Flash
-	// row carries the price in force today, which its page says roughly doubles
-	// on 2027-01-01.
+	// reasoning and cyber defense — 4 Argon its efficient frontier sibling, and 4
+	// Hydrogen the fast execution model beside them. Carbon and Argon state
+	// thinking at low/medium/high, Hydrogen adds xhigh, and all three carry the
+	// rates in force today; every priced channel of Carbon's and Argon's promo
+	// doubles on 2026-12-01, while Hydrogen's rate card states no such date. All
+	// three meter implicit caching only, so the write channel is a structural
+	// zero; the output cap is the 65,536-token synchronous segment, since the
+	// longer decode belongs to the background API these rows do not speak. 3.8
+	// Flash is the Flash Hydrogen succeeds and 3.1 Pro the only published
+	// Pro-tier Gemini 3; the Flash row carries the price in force today, which
+	// its page says roughly doubles on 2027-01-01.
 	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GOOGLE_API_KEY", "gemini-4-carbon", "Gemini 4 Carbon", {
 		contextWindow: 1_048_576,
 		maxOutputTokens: 65_536,
@@ -1153,6 +1155,13 @@ const BUILT_IN_MODELS: Model[] = [
 		reasoning: true,
 		apiKeyEnvFallbacks: ["GEMINI_API_KEY"],
 		pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+	}),
+	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GOOGLE_API_KEY", "gemini-4-hydrogen", "Gemini 4 Hydrogen", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 65_536,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["GEMINI_API_KEY"],
+		pricing: { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 },
 	}),
 	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GOOGLE_API_KEY", "gemini-3.8-flash", "Gemini 3.8 Flash", {
 		contextWindow: 1_048_576,

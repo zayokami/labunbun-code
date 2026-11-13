@@ -141,6 +141,7 @@ const BUILT_IN_REFS = [
 	"chatgpt/gpt-5.5",
 	"google/gemini-4-carbon",
 	"google/gemini-4-argon",
+	"google/gemini-4-hydrogen",
 	"google/gemini-3.8-flash",
 	"google/gemini-3.1-pro-preview",
 	"gemini/gemini-3.1-pro-preview",
@@ -903,9 +904,12 @@ describe("the built-in catalog", () => {
 			["chatgpt/gpt-5.6-terra", 0, 0, 0, 0],
 			["chatgpt/gpt-5.6-luna", 0, 0, 0, 0],
 			["chatgpt/gpt-5.5", 0, 0, 0, 0],
-			// Carbon and Argon share a rate card; every priced channel doubles on 2026-12-01.
+			// Carbon and Argon share a rate card; every priced channel doubles on
+			// 2026-12-01. Hydrogen's card is flat and cheaper, with the vendor's
+			// published 0.075 cached read.
 			["google/gemini-4-carbon", 2, 10, 0.1, 0],
 			["google/gemini-4-argon", 2, 10, 0.1, 0],
+			["google/gemini-4-hydrogen", 1.5, 7.5, 0.075, 0],
 			["google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0],
 			["google/gemini-3.1-pro-preview", 2, 12, 0.2, 0],
 			// The Gemini subscription's twelve, at the same structural zero the
@@ -1332,6 +1336,7 @@ describe("the built-in catalog", () => {
 			["chatgpt/gpt-5.5", 272_000, 272_000],
 			["google/gemini-4-carbon", 1_048_576, 65_536],
 			["google/gemini-4-argon", 1_048_576, 65_536],
+			["google/gemini-4-hydrogen", 1_048_576, 65_536],
 			["google/gemini-3.8-flash", 1_048_576, 65_536],
 			["google/gemini-3.1-pro-preview", 1_048_576, 65_536],
 			// The Gemini subscription states a window per row and no output cap

@@ -176,7 +176,7 @@ describe("resolveApiKey", () => {
 		// when both are set, GOOGLE_API_KEY takes precedence — so that is the
 		// order the rows declare, and a machine carrying only the other name
 		// still works through the fallback.
-		for (const reference of ["google/gemini-4-carbon", "google/gemini-4-argon"]) {
+		for (const reference of ["google/gemini-4-carbon", "google/gemini-4-argon", "google/gemini-4-hydrogen"]) {
 			const model = resolveModel(reference);
 			if (!model) throw new Error(`expected ${reference} to resolve`);
 			expect(apiKeyEnvNames(model)).toEqual(["GOOGLE_API_KEY", "GEMINI_API_KEY"]);
