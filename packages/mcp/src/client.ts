@@ -1118,7 +1118,7 @@ export function loadApprovedMcpServers(cwd: string, home: string = homedir()): S
  */
 // Long-form design notes: docs/dev/crash-consistency.md
 function writeJsonAtomic(path: string, data: Record<string, unknown>): void {
-	const tmp = `${path}.tmp`;
+	const tmp = `${path}.${process.pid}.tmp`;
 	try {
 		writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 		renameSync(tmp, path);
