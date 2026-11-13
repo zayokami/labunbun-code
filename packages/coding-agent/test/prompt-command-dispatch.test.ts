@@ -116,6 +116,37 @@ describe("a prompt command typed into the REPL", () => {
 
 		expect(await lastRequest(h.faux)).toContain("Explain the parser");
 	});
+
+	test("typed during a run, the expansion joins that run instead of starting a second", async () => {
+		// The first step waits, so the dispatch below lands while it is streaming.
+		const h = harness([{ text: "first", delayMs: 50 }, { text: "second" }]);
+		const session = h.ctx.getSession();
+		if (!session) throw new Error("the harness has no session");
+
+		const running = session.prompt("start");
+		// Wait for the request to be on the wire: the entry drain runs before the
+		// first turn, and a line queued ahead of it would be delivered before the
+		// prompt text -- the wrong moment for this test's claim.
+		const deadline = Date.now() + 2_000;
+		while (h.faux.receivedContexts.length === 0) {
+			if (Date.now() > deadline) throw new Error("the first request never started");
+			await new Promise((resolve) => setTimeout(resolve, 1));
+		}
+		expect(session.isRunning).toBe(true);
+		expect(handleCommandDispatch("/skill-echo later", h.ctx)).toBe(true);
+
+		// A second `prompt()` here would have thrown and taken the process down.
+		// Awaiting the first run covers the follow-up too: the queue is drained
+		// inside the same loop, before the run ends.
+		await running;
+
+		expect(h.faux.receivedContexts).toHaveLength(2);
+		const followUp = JSON.stringify(h.faux.receivedContexts[1]?.messages);
+		expect(followUp).toContain("SKILL-BODY-MARKER");
+		expect(followUp).toContain("later");
+		// The typed line stays in the transcript, as it does for an idle dispatch.
+		expect(h.transcript()).toContainEqual({ kind: "user", text: "/skill-echo later" });
+	});
 });
 
 describe("what counts as a prompt command", () => {

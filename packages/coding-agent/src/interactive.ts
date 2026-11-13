@@ -3750,7 +3750,20 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			// Expanded through the shared helper rather than `command.getPrompt`
 			// directly: a `-p` run sends the same expansion for the same typed line,
 			// and two call sites for one meaning is how they drift.
-			void session.prompt(expandPromptCommand(ctx.commands, text) ?? text);
+			const expanded = expandPromptCommand(ctx.commands, text) ?? text;
+			// A second `prompt()` on a live session is the one throw AgentSession
+			// has, and this is a fire-and-forget site: the rejection would take the
+			// process down mid-run, with subagents, shells and MCP children still up.
+			// A typed line during a run is queued the same way ordinary text is
+			// (REPL `sendMidRun`), so the expansion joins the run instead of starting
+			// a second one.
+			if (session.isRunning) {
+				session.followUp(expanded);
+			} else {
+				void session.prompt(expanded).catch((error) => {
+					pushInfo(ctx.handle, `Could not send ${rawName}: ${error instanceof Error ? error.message : String(error)}`);
+				});
+			}
 			return true;
 		}
 		// The command's own run, around the call and nothing else: what Esc
