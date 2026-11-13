@@ -1370,6 +1370,9 @@ class AcpAgent {
 			deps: {
 				streamFn,
 				thinkingLevel: () => taskCalibration.level(settings.thinkingLevel),
+				// The user's own opt-in, never the editor's: a served search is billed
+				// per call, so an ACP host inherits the same switch as the REPL.
+				webTools: () => settings.deepseekWebTools === true,
 				checkCompaction: compactionWiring.checkCompaction,
 				// The spending ceiling, asked before every request: the model
 				// about to answer names the seat (a model no seat owns is never

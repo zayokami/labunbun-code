@@ -223,6 +223,13 @@ export interface TaskToolContext {
 	 * the parent.
 	 */
 	thinkingLevel?: () => ThinkingLevel | undefined;
+	/**
+	 * Whether a subagent may use the provider's own web tools. Inherited from
+	 * the parent like `thinkingLevel`, and read at the call for the same reason:
+	 * a research subagent is where a search is most useful, and the setting the
+	 * user turned on belongs to the session that spawned it.
+	 */
+	webTools?: () => boolean | undefined;
 	/** Resolved fresh per call so session-scoped allow rules added mid-conversation apply to new subagents. */
 	getPermissionRules?: () => PermissionRule[];
 	/**
@@ -738,6 +745,9 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 				// which is the same call-time shape the axes above travel by. A
 				// caller that named a level owns it for this run only.
 				thinkingLevel: run?.thinkingLevel ? () => run.thinkingLevel : ctx.thinkingLevel,
+				// The parent's opt-in, read per request; a subagent is the caller
+				// most likely to need the web, and it is still the same user's switch.
+				webTools: ctx.webTools,
 				checkCompaction: subagentWiring.checkCompaction,
 				// Subagents inherit the parent's rules; an "ask" goes up to the
 				// session's own queue when the host wired the funnel, labeled with

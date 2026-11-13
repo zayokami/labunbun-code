@@ -596,6 +596,9 @@ export class AgentSession {
 					// answer differently after a mid-session change, and the next call is
 					// meant to see the new answer.
 					thinkingLevel: this.#deps.thinkingLevel?.(),
+					// The provider's own web tools, when the host's setting turns them
+					// on. Read per request for the same reason as the level above.
+					webTools: this.#deps.webTools?.(),
 					// The wrapper awaits this before it sleeps, so the announcement lands
 					// ahead of the wait it describes. Subscribers get it as an event like
 					// anything else the loop reports; nothing in the loop reacts to it.

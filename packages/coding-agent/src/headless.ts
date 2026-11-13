@@ -1032,6 +1032,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// same seam in both modes. The task calibration answers only when the
 			// settings key is unset, so a script that pins a level still gets it.
 			thinkingLevel: () => taskCalibration.level(settings.thinkingLevel),
+			// Constant in a `-p` run, and off unless the user's own file turns it on:
+			// a served search is billed per call, and a script inherits the setting
+			// the same way it inherits the thinking level.
+			webTools: () => settings.deepseekWebTools === true,
 			checkCompaction: compactionWiring.checkCompaction,
 			// The spending ceiling, asked before every request of this run's own
 			// loop. The model about to answer names the seat (a model no seat

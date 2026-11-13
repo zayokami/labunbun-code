@@ -332,6 +332,16 @@ export interface StreamOptions {
 	 */
 	outputSchema?: Record<string, unknown>;
 	/**
+	 * Let the provider run its own server-side web tools during this request —
+	 * DeepSeek's `deepseek_web_search` and `deepseek_read_url`.
+	 *
+	 * Only the adapter whose wire has such tools acts on it, and only for a
+	 * model that serves them; every other request goes out as it always did.
+	 * Opt-in on the host's side because a served search is billed per call on
+	 * top of tokens: a setting a user turns on, not a default they discover.
+	 */
+	webTools?: boolean;
+	/**
 	 * Called once per retry, just before the wrapper sleeps.
 	 *
 	 * A ladder that backs off to thirty seconds a step runs for minutes, and

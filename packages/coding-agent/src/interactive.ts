@@ -1426,6 +1426,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
 		network: () => sessionRef?.network ?? effectiveNetwork,
 		thinkingLevel: () => thinkingLevel,
+		// The same user-owned switch as the session's own requests: a subagent is
+		// an implementation detail of a tool call, not a place to decide anew.
+		webTools: () => settings.deepseekWebTools === true,
 		// The session's YOLO posture, read at every evaluation: a worker spawned
 		// while it was on and answering after `/yolo off` must follow the root.
 		yolo: () => sessionRef?.yolo ?? false,
@@ -1705,6 +1708,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// guess, and `taskScaleThinkingLevel` leaves the model's own default alone
 		// for an ordinary request and for every question.
 		thinkingLevel: () => taskCalibration.level(thinkingLevel),
+		// The provider's own web tools, when the user's setting turns them on. Read
+		// per request like the level above: a setting edited mid-session reaches
+		// the next call. The adapters ignore it on a wire that serves no such tool.
+		webTools: () => settings.deepseekWebTools === true,
 		// Read through the holder rather than a captured id: /resume swaps the
 		// session, and the spills belong to whichever one is live.
 		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId: sessionIdHolder.current, home }),

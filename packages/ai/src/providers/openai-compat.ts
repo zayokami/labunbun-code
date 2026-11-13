@@ -41,6 +41,23 @@ export interface OpenAIRawChunk {
 				type?: string | null;
 				function?: { name?: string | null; arguments?: string | null };
 			}>;
+			/**
+			 * The provider's own tools, run server-side. DeepSeek streams the
+			 * whole batch in one delta: each entry names the calls it made and
+			 * the sources it read, so the answer's citations have a list to
+			 * point at. Function calls and these are separate channels — the
+			 * `tool_calls` above is the client's, this one never asks us to run
+			 * anything.
+			 */
+			server_tool_calls?: Array<{
+				calls?: Array<{
+					type?: string | null;
+					/** `search`, `deep_search`, `read_link`, … */
+					kind?: string | null;
+					status?: string | null;
+					sources?: Array<{ url?: string | null; title?: string | null }> | null;
+				}> | null;
+			}> | null;
 		};
 		finish_reason?: string | null;
 	}>;
@@ -73,7 +90,11 @@ export interface OpenAIRequestParams {
 	stream_options?: { include_usage: boolean };
 	max_tokens?: number;
 	max_completion_tokens?: number;
-	tools?: Array<{ type: "function"; function: { name: string; description: string; parameters: unknown } }>;
+	/** Function tools, plus the provider's own server-side tools where it serves them. */
+	tools?: Array<
+		| { type: "function"; function: { name: string; description: string; parameters: unknown } }
+		| { type: "deepseek_web_search" | "deepseek_read_url" }
+	>;
 	tool_choice?: "auto";
 	reasoning_effort?: "low" | "medium" | "high" | "none";
 	temperature?: number;
@@ -143,6 +164,14 @@ export function buildOpenAIRequest(
 			},
 		}));
 		params.tool_choice = "auto";
+	}
+
+	// DeepSeek's own web tools, when the host's setting turns them on: the model
+	// searches and reads pages server-side and answers with the sources attached,
+	// so the turn needs no local function call. Only the deepseek wire serves
+	// them; another provider handed these tool types would refuse the request.
+	if (options?.webTools === true && model.provider === "deepseek") {
+		params.tools = [...(params.tools ?? []), { type: "deepseek_web_search" }, { type: "deepseek_read_url" }];
 	}
 
 	// Reasoning effort for providers that support it (OpenAI o-series, etc.).
@@ -254,6 +283,17 @@ interface OpenToolCallState {
 	synthetic: boolean;
 }
 
+/** How many served sources the closing block lists; the rest would be a wall of URLs. */
+const SERVER_SOURCE_LIMIT = 20;
+
+/** The closing `Sources:` block for a turn whose web tools ran server-side. */
+export function renderServerToolSources(sources: ReadonlyArray<{ title: string; url: string }>): string {
+	const shown = sources.slice(0, SERVER_SOURCE_LIMIT);
+	const lines = shown.map((source, i) => `${i + 1}. ${source.title || source.url}\n   ${source.url}`);
+	const rest = sources.length - shown.length;
+	return `\n\nSources:\n${lines.join("\n")}${rest > 0 ? `\n(${rest} more not shown)` : ""}`;
+}
+
 export async function* mapOpenAIStream(
 	rawChunks: AsyncIterable<OpenAIRawChunk>,
 	provider: string,
@@ -271,6 +311,8 @@ export async function* mapOpenAIStream(
 	/** The explanation a declining model streams instead of an answer. */
 	let refusalText = "";
 	let sawContent = false;
+	/** What the provider's own web tools read, in serving order. */
+	const serverSources: Array<{ title: string; url: string }> = [];
 
 	for await (const chunk of rawChunks) {
 		if (!sawContent) {
@@ -304,6 +346,25 @@ export async function* mapOpenAIStream(
 		if (!choice) continue;
 
 		const delta = choice.delta;
+		// The provider's own tools ran on its side; all that reaches this stream
+		// is what they read. Collected in serving order and deduplicated by URL:
+		// the answer's inline citations already carry the links, and this list is
+		// the one a reader can resolve them against when a citation is only a
+		// name. An entry without a URL names nothing to open.
+		if (delta?.server_tool_calls) {
+			for (const entry of delta.server_tool_calls) {
+				for (const call of entry.calls ?? []) {
+					for (const source of call.sources ?? []) {
+						if (typeof source?.url !== "string" || !source.url) continue;
+						if (serverSources.some((seen) => seen.url === source.url)) continue;
+						serverSources.push({
+							title: typeof source.title === "string" ? source.title : "",
+							url: source.url,
+						});
+					}
+				}
+			}
+		}
 		// One trace under two spellings: DeepSeek and friends send
 		// `reasoning_content`, Ollama and OpenRouter send `reasoning`. Reading one
 		// alone dropped the other vendor's whole trace in silence. The empty
@@ -452,6 +513,17 @@ export async function* mapOpenAIStream(
 	// Opened in content order, so they close in the order the message reads back.
 	for (const state of calls) {
 		yield builder.toolCallEnd(state.index);
+	}
+
+	// What the provider's web tools read, appended as the turn's own closing
+	// block. A separate text block rather than a rewrite of the answer: the text
+	// has already streamed, and this is the list its citations resolve against —
+	// including on the next turn, when the model reads its own message back.
+	if (serverSources.length > 0) {
+		const index = nextContentIndex++;
+		yield builder.textStart(index);
+		yield builder.textDelta(index, renderServerToolSources(serverSources));
+		yield builder.textEnd(index);
 	}
 
 	yield builder.done(stop);

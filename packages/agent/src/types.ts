@@ -490,6 +490,17 @@ export interface AgentDeps {
 	 */
 	thinkingLevel?: () => ThinkingLevel | undefined;
 	/**
+	 * Whether this request may use the provider's own server-side web tools,
+	 * read per request like `thinkingLevel`, so a change made mid-session lands
+	 * on the next call rather than the next session.
+	 *
+	 * The host owns the switch because it is the layer that knows the setting
+	 * and what a served search costs; the adapters know which wires have the
+	 * tools. Absent means off, which is the behaviour every host had before the
+	 * seam existed.
+	 */
+	webTools?: () => boolean | undefined;
+	/**
 	 * Where a tool result too large for the context is kept in full, supplied by
 	 * the app layer because the agent has no filesystem of its own. Returns the
 	 * path to show the model, or null if it could not be written.

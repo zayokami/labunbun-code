@@ -6,7 +6,13 @@ import { clearCustomModels, clearPricingOverrides, resolveModel, THINKING_LEVELS
 import { formatTokens, getTokenUnit } from "@labunbun/tui/format";
 import { CostTracker, formatCostState } from "../src/cost-tracker.ts";
 import { appendHistory, loadHistory } from "../src/history.ts";
-import { applyCatalogSettings, mergeSettings, type RawSettingsInput, SettingsSchema } from "../src/settings.ts";
+import {
+	applyCatalogSettings,
+	mergeSettings,
+	PROJECT_TIER_KEY_POLICY,
+	type RawSettingsInput,
+	SettingsSchema,
+} from "../src/settings.ts";
 
 describe("mergeSettings", () => {
 	test("objects merge recursively, arrays and scalars replace", () => {
@@ -100,6 +106,15 @@ describe("SettingsSchema", () => {
 				providers: { openaiCompatible: [{ id: "x", baseUrl: "not-a-url", apiKeyEnv: "K", models: [] }] },
 			}).success,
 		).toBe(false);
+	});
+
+	test("deepseekWebTools is user-owned, off by default, and a boolean", () => {
+		expect(SettingsSchema.parse({}).deepseekWebTools).toBeUndefined();
+		expect(SettingsSchema.parse({ deepseekWebTools: true }).deepseekWebTools).toBe(true);
+		expect(SettingsSchema.safeParse({ deepseekWebTools: "yes" }).success).toBe(false);
+		// A served search is billed per call on top of tokens: a repository does
+		// not get to turn that on for the user's conversations.
+		expect(PROJECT_TIER_KEY_POLICY.deepseekWebTools).toBe("denied");
 	});
 
 	test("the cache policy's knobs are enumerated, not free-form", () => {

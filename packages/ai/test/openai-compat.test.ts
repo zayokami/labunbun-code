@@ -50,6 +50,23 @@ describe("buildOpenAIRequest", () => {
 		});
 	});
 
+	test("the server web tools ride beside the function tools, only when asked", () => {
+		const tools = [{ name: "read", description: "d", parameters: { type: "object" as const, properties: {} } }];
+		const asked = buildOpenAIRequest(MODEL, ctx({ tools }), { webTools: true });
+		expect(asked.tools).toEqual([
+			{
+				type: "function",
+				function: { name: "read", description: "d", parameters: { type: "object", properties: {} } },
+			},
+			{ type: "deepseek_web_search" },
+			{ type: "deepseek_read_url" },
+		]);
+		// Off is the default, and a wire that serves no such tool keeps its own
+		// tool list: the flag is the host's, the capability is the adapter's.
+		expect(buildOpenAIRequest(MODEL, ctx({ tools })).tools).toHaveLength(1);
+		expect(buildOpenAIRequest({ ...MODEL, provider: "kimi" }, ctx(), { webTools: true }).tools).toBeUndefined();
+	});
+
 	test("an output schema becomes a strict response_format", () => {
 		const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] };
 		expect(buildOpenAIRequest(MODEL, ctx(), { outputSchema: schema }).response_format).toEqual({
@@ -257,6 +274,61 @@ describe("mapOpenAIStream", () => {
 		const done = events.at(-1) as any;
 		expect(done.message.stopReason).toBe("stop");
 		expect(done.message.usage).toMatchObject({ input: 7, output: 2 });
+	});
+
+	test("server tool sources close the answer, deduplicated and in serving order", async () => {
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { role: "assistant", content: null, reasoning_content: "" } }] },
+					{ choices: [{ delta: { content: null, reasoning_content: "Need a search." } }] },
+					{
+						choices: [
+							{
+								delta: {
+									content: "",
+									server_tool_calls: [
+										{
+											calls: [
+												{
+													type: "deepseek_web_search",
+													kind: "deep_search",
+													status: "completed",
+													sources: [
+														{ url: "https://example.com/a", title: "A" },
+														{ url: "https://example.com/b", title: "" },
+														{ url: "https://example.com/a", title: "A again" },
+													],
+												},
+											],
+										},
+									],
+								},
+							},
+						],
+					},
+					{ choices: [{ delta: { content: "The answer [A](https://example.com/a)." } }] },
+					{ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5 } },
+				]),
+				"deepseek",
+				"deepseek-flash",
+			),
+		);
+
+		const done = events.at(-1) as any;
+		expect(done.type).toBe("done");
+		const text = done.message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text)
+			.join("");
+		expect(text).toContain("The answer");
+		expect(text).toContain("Sources:");
+		expect(text).toContain("1. A\n   https://example.com/a");
+		expect(text).toContain("2. https://example.com/b");
+		// The duplicate URL appears once in the list, and the entry that repeated
+		// it brings no second line with it.
+		expect(text.match(/ {3}https:\/\/example\.com\/a/g)).toHaveLength(1);
+		expect(text).not.toContain("A again");
 	});
 
 	test("cached prompt tokens are not also counted as input", async () => {

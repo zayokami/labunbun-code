@@ -131,6 +131,8 @@ The value `enabled` is the default. It starts no proxy. It restricts nothing. A 
 
 Only the user tier can set `networkAccess` and `networkDomains`. A repository must not set them. A repository that turns the network off makes `bun install` fail for every user who clones it.
 
+**Provider web tools.** A DeepSeek model can use DeepSeek's own server-side tools for a turn. Set `deepseekWebTools: true` in the user settings file. The model then sends `deepseek_web_search` and `deepseek_read_url` with its request, searches and reads pages on the provider's side, and answers with the links it read in a `Sources:` block at the end. No local tool call is involved, so the tools answer on any wire that reaches DeepSeek. The setting is off by default, and only the user tier can set it: a served search is billed per call on top of tokens. A provider that serves no such tools ignores the setting.
+
 **Web tools.** WebFetch and WebSearch work without a key. Two environment switches move one tool at a time to the paid DeepSeek APIs. Set `LBB_WEB_SEARCH=deepseek` for WebSearch, `LBB_WEB_FETCH=deepseek` for WebFetch, or both. Each tool then needs `DEEPSEEK_API_KEY`. Put the key in the shell environment or in `settings.json` under `env`. Each API costs ¥5 per 1000 successful requests. A request that fails or finds nothing is free. Each API allows 5 requests per second per account. A failed request is one attempt: the tool reports the error and does not retry or fall back. Unset the switch to return to the free path. The network axis covers both backends. Each tool checks the DeepSeek host before any request. The fetch backend checks the target URL against the session domain table too.
 
 Use `/permissions` to see which of the three confinements you have. Use `/doctor` to see the full report.
@@ -774,7 +776,7 @@ The tool reads the settings files in this order. A later file has a higher prior
 
 A project file is controlled by its repository. The tool does not read these keys from a project file:
 
-`model`, `fallbackModels`, `roles`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `compaction`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `language`, `outputStyle`, `permissions.allow`, `permissions.additionalDirectories`.
+`model`, `fallbackModels`, `roles`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `compaction`, `modelDiscovery`, `deepseekWebTools`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `language`, `outputStyle`, `permissions.allow`, `permissions.additionalDirectories`.
 
 A repository must not choose its own model. A repository must not choose its own confinement. A repository must not approve its own tool calls. A repository must not turn the network off.
 
@@ -805,6 +807,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `trimOldToolResults` | A boolean. The value `true` is the default. | User |
 | `compaction` | An object with the keys `enabled`, `model`, `reserveTokens`, and `thresholdPercent` | User |
 | `modelDiscovery` | A boolean. The value `true` is the default. | User |
+| `deepseekWebTools` | A boolean. The value `false` is the default. A DeepSeek model then searches and reads links with DeepSeek's own server-side tools. | User |
 | `backgroundShellNotifications` | A boolean. The value `true` is the default. | User |
 | `env` | An object of environment variables | User |
 | `providers` | An object of providers you define | User |

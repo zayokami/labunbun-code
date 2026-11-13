@@ -273,6 +273,17 @@ export const SettingsSchema = z.object({
 	 * or metered machine should not have to firewall a startup chat.
 	 */
 	modelDiscovery: z.boolean().optional(),
+	/**
+	 * Let a DeepSeek model search and read links with DeepSeek's own server-side
+	 * tools (`deepseek_web_search`, `deepseek_read_url`): the turn can answer
+	 * from the web with its sources attached, without a local WebSearch call.
+	 *
+	 * Off by default, and denied to a repository, because a served search is
+	 * billed per call on top of tokens — this is a switch the user turns on for
+	 * their own conversations, not one a checkout enables for them. A provider
+	 * that serves no such tools ignores it.
+	 */
+	deepseekWebTools: z.boolean().optional(),
 	// Long-form design notes: docs/dev/migration-framework.md
 	/**
 	 * Wake the session when a background shell finishes on its own, and when
@@ -538,6 +549,10 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.
 	modelDiscovery: "denied",
+	// The same cost class as `modelDiscovery`, with a per-call bill of its own: a
+	// served web search is charged on top of tokens, and a repository that could
+	// turn the tools on would be spending on its own checkout's behalf.
+	deepseekWebTools: "denied",
 	// The same class as `modelDiscovery`: whether a shell event that wakes the
 	// session — a completion, or a stall at a prompt — spends a turn and sends
 	// part of the log to the provider is the user's decision, and a repository
