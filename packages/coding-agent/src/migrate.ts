@@ -1,7 +1,7 @@
 // Migration hub: raw per-source reads become a plan, and the plan becomes writes.
 // Long-form design notes: docs/dev/migration-framework.md
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseRuleText } from "@labunbun/agent";
@@ -1249,16 +1249,30 @@ export interface AppliedResult {
 /**
  * Perform the plan's writes. Only reached when the caller passed `--apply`;
  * every decision was already made during planning.
+ *
+ * Each file goes through a sibling temp and a rename, the way the session
+ * store and the beetle ledger do. A migration that dies mid-write -- Ctrl+C,
+ * a full disk, a killed process -- leaves the previous file exactly as it
+ * was, instead of a half-written settings.json that no reader can parse. The
+ * temp name carries the pid so two migrates in parallel do not overwrite each
+ * other's in-progress bytes; neither does the rename, but a shared temp does.
  */
 export function applyMigration(plan: MigrationPlan): AppliedResult {
 	const written: string[] = [];
 	const failed: Array<{ path: string; error: string }> = [];
 	for (const write of plan.writes) {
+		const tmp = `${write.path}.${process.pid}.tmp`;
 		try {
 			mkdirSync(join(write.path, ".."), { recursive: true });
-			writeFileSync(write.path, write.content, "utf8");
+			writeFileSync(tmp, write.content, "utf8");
+			renameSync(tmp, write.path);
 			written.push(write.path);
 		} catch (error) {
+			try {
+				unlinkSync(tmp);
+			} catch {
+				// No temp file to remove (the write failed before it existed).
+			}
 			failed.push({ path: write.path, error: error instanceof Error ? error.message : String(error) });
 		}
 	}

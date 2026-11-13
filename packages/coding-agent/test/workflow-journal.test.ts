@@ -66,7 +66,7 @@ describe("WorkflowJournal.create", () => {
 		expect(JSON.parse(readFileSync(join(journal.dir, "args.json"), "utf8"))).toEqual({ target: "diff" });
 		expect(journal.args).toEqual({ target: "diff" });
 		// The meta is written by replacement; the temp half must not survive it.
-		expect(existsSync(join(journal.dir, "run.json.tmp"))).toBe(false);
+		expect(existsSync(join(journal.dir, `run.json.${process.pid}.tmp`))).toBe(false);
 	});
 
 	test("no args means no args file", () => {

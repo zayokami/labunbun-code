@@ -343,7 +343,7 @@ export function createGeminiCredentialStore(options: GeminiAuthOptions = {}): Ge
 
 	function writeFile(credential: GeminiOAuthCredential): void {
 		mkdirSync(dirname(filePath), { recursive: true });
-		const tmp = `${filePath}.tmp`;
+		const tmp = `${filePath}.${process.pid}.tmp`;
 		writeFileSync(tmp, `${JSON.stringify(credential, null, 2)}\n`, { mode: 0o600 });
 		try {
 			// Windows has no file modes and this is a no-op there. On POSIX it also

@@ -98,7 +98,7 @@ function writeUserSettings(path: string, home: string, data: Record<string, unkn
 	// are renamed over the target, so a process that dies mid-write leaves the
 	// old file whole — the settings every later read-merge-write and the next
 	// startup depend on — instead of a truncated one they would all refuse.
-	const tmp = `${path}.tmp`;
+	const tmp = `${path}.${process.pid}.tmp`;
 	try {
 		writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: existingMode(path) });
 		renameSync(tmp, path);

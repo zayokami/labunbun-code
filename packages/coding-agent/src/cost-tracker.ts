@@ -226,7 +226,7 @@ export function saveCostState(path: string, state: CostState): void {
 	} catch {
 		// No file yet — the default mode applies.
 	}
-	const tmp = `${path}.tmp`;
+	const tmp = `${path}.${process.pid}.tmp`;
 	try {
 		writeFileSync(tmp, JSON.stringify(state, null, 2), { encoding: "utf8", mode });
 		renameSync(tmp, path);

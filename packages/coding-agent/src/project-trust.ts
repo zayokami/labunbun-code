@@ -189,7 +189,7 @@ export function isProjectTierTrusted(cwd: string, kind: DefinitionKind, home: st
  */
 // Long-form design notes: docs/dev/crash-consistency.md
 function writeLedgerAtomic(path: string, data: Record<string, unknown>): void {
-	const tmp = `${path}.tmp`;
+	const tmp = `${path}.${process.pid}.tmp`;
 	try {
 		writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 		renameSync(tmp, path);

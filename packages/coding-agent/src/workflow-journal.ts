@@ -318,7 +318,7 @@ export class WorkflowJournal {
 
 function writeMeta(dir: string, meta: WorkflowRunMeta): void {
 	const path = join(dir, "run.json");
-	const tmp = `${path}.tmp`;
+	const tmp = `${path}.${process.pid}.tmp`;
 	writeFileSync(tmp, JSON.stringify(meta, null, 2), "utf8");
 	renameSync(tmp, path);
 }

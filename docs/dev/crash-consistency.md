@@ -6,7 +6,7 @@ The question behind the split is what a torn file costs. A file that is read bac
 
 ## Files that are replaced
 
-Each of these writes its bytes to `<path>.tmp` and renames that file over the target, removing the temp file when the write or the rename fails, so an interrupted write leaves the previous complete file rather than a truncated one.
+Each of these writes its bytes to a sibling temp file and renames that file over the target, removing the temp file when the write or the rename fails, so an interrupted write leaves the previous complete file rather than a truncated one.
 
 | File | Writer | What one torn write would cost |
 | --- | --- | --- |
@@ -16,10 +16,11 @@ Each of these writes its bytes to `<path>.tmp` and renames that file over the ta
 | `<home>/.labunbun/projects/<slug>/mcp-approved.json` | `writeJsonAtomic` (`packages/mcp/src/client.ts:880`) | every project server the user ever approved is asked about again (`loadApprovedMcpServers`, `packages/mcp/src/client.ts:856`) |
 | `<home>/.labunbun/projects/<slug>/trusted-definitions.json` | `writeLedgerAtomic` (`packages/coding-agent/src/project-trust.ts:159`) | both tiers of project definitions are withheld again (`loadTrustedDefinitionKinds`, `packages/coding-agent/src/project-trust.ts:53`) |
 | `<session>.jsonl.title.json` | `writeSessionTitle` (`packages/coding-agent/src/session-title.ts:76`) | the title. The transcript is untouched, the session still resumes, and the picker shows the row as untitled |
+| every file a `labunbun migrate --apply` writes | `applyMigration` (`packages/coding-agent/src/migrate.ts:1253`) | that one target keeps its previous contents; the migration reports the write as failed and the other targets are still written |
 
 Two details of the shape:
 
-- The temp name is `<path>.tmp`, next to the file it replaces, so the rename stays inside one filesystem.
+- The temp name is `<path>.<pid>.tmp`, next to the file it replaces, so the rename stays inside one filesystem and two processes writing the same target never share one temp file.
 - The credential stores re-assert `0o600` on the temp file (`packages/coding-agent/src/chatgpt-auth.ts:90`), and the two stores that had a mode worth keeping re-apply it (`packages/coding-agent/src/user-settings.ts:92`, `packages/coding-agent/src/cost-tracker.ts:220`). The two ledgers added with this note (`packages/mcp/src/client.ts:880`, `packages/coding-agent/src/project-trust.ts:159`) do not copy a mode, which matches what they did before: nothing ever tightened it, and the file lands with the default mode of the process either way.
 - The title sidecar uses `<path>.<pid>.<timestamp>.tmp` (`packages/coding-agent/src/session-title.ts:85`). Two processes can rename a title in the same moment without sharing one temp file. A torn, missing, or damaged sidecar costs the title only: the session still loads, and the picker shows the row as untitled. The sidecar is a label, not a record.
 
