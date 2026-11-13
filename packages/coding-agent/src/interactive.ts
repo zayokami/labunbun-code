@@ -2783,10 +2783,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// the user types: what is missing, and the ways to fix it. The store probe
 	// runs only when the environment cannot already answer, so the keychain is
 	// never on the startup path of a machine with a key — and a test's signIns
-	// seam skips it entirely.
+	// seam skips it entirely. The two subscription wires are probed by name:
+	// neither reads an environment variable, so `missingApiKey` cannot be the
+	// question for them — asking only about the ChatGPT wire called a signed-in
+	// Gemini machine keyless and warned about a prompt that would have worked.
 	const startupSignIns =
 		options.signIns ??
-		(missingApiKey(startupModel) || startupModel.api === "chatgpt-responses"
+		(missingApiKey(startupModel) ||
+		startupModel.api === "chatgpt-responses" ||
+		startupModel.api === "gemini-code-assist"
 			? await detectSubscriptionSignIns({ home })
 			: NO_SIGN_INS);
 	const startupNotice = missingCredentialNotice(startupModel, startupSignIns);
