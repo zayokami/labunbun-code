@@ -21,6 +21,7 @@ import { caseInsensitivePaths } from "@labunbun/tools";
 import { listAlmaHistory, readAlmaConversation } from "./alma-session.ts";
 import { antigravityDataDirs, antigravityTreeHasContent } from "./antigravity-home.ts";
 import { listAntigravityConversations, readAntigravityConversation } from "./antigravity-session.ts";
+import { listCindyHistory, readCindyHistory } from "./cindy-session.ts";
 import { listCodewhaleSessions, readCodewhaleSession } from "./codewhale-session.ts";
 import { codexRoot } from "./codex-home.ts";
 import { commandCodeHistoryPath, commandCodeRoot } from "./command-code-home.ts";
@@ -2490,6 +2491,24 @@ export function readPromptHistory(
 				"recall list, and the prompts you sent come across with their sessions",
 		};
 	}
+	// Cindy's prompts are the user turns inside its session database, and the
+	// importer reads that database as transcripts — the prompt's directory and
+	// moment of typing arrive with its session. Cindy's separate appearance and
+	// input preferences live in the renderer's localStorage, which is not a file
+	// a migration can read, so nothing here is a second prompt list to import.
+	if (source === "cindy") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"Cindy keeps no separate prompt-history file — its prompts are the user turns inside the sessions this importer " +
+				"reads as transcripts, each with the directory and the moment it was typed recorded — so nothing was added to " +
+				"the up-arrow recall list, and the prompts you sent come across with their sessions",
+		};
+	}
 	return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
 }
 
@@ -3018,6 +3037,10 @@ export function listHistory(
 	options: { cwd: string; scope: HistoryScope },
 ): HistoryListing {
 	if (options.scope === "none") return { candidates: [], notes: [] };
+	// Cindy's listing needs its own database resolution, so it does not join the
+	// home-relative chain below; the selection and scope still apply through
+	// `narrowCandidates`, exactly as they do for every other source.
+	if (source === "cindy") return narrowCandidates(listCindyHistory(home), options);
 	const listed =
 		source === "claude-code"
 			? listClaudeCodeHistory(home)
@@ -3253,6 +3276,18 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 				// counted as a session that was empty. "Nothing to import" is a claim
 				// about the user's conversation, and this reader is in no position to
 				// make it when the reason it holds nothing is a file it could not open.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "cindy") {
+				const read = readCindyHistory(candidate);
+				// Same rule as its neighbours: a conversation the database would not
+				// yield — a locked file, a schema older than this reader, a session
+				// whose every row was bookkeeping — is reported by why rather than
+				// counted as a session that was empty.
 				if (read.entries.length === 0) {
 					if (read.notes.length > 0) notes.push(...read.notes);
 					else failed += 1;

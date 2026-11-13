@@ -154,9 +154,10 @@ function itemsFor(plan: ReturnType<typeof planOf>, needle: string) {
 test("it is appended, so every id before it keeps its place", () => {
 	// Appended, never slotted in: the order is what `detectSources` reports, and
 	// reordering would silently change which of two sources providing the same
-	// file wins.
+	// file wins. Later sources are appended after it, so its place is "after alma
+	// and before whatever came next", not "last".
 	expect(MIGRATION_SOURCE_IDS).toContain("command-code");
-	expect(MIGRATION_SOURCE_IDS[MIGRATION_SOURCE_IDS.length - 1]).toBe("command-code");
+	expect(MIGRATION_SOURCE_IDS.indexOf("command-code")).toBe(MIGRATION_SOURCE_IDS.indexOf("alma") + 1);
 	expect(MIGRATION_SOURCE_LABELS["command-code"]).toBe("Command Code");
 	expect(SOURCE_ROOTS["command-code"]).toBe(COMMAND_CODE_DEFAULT_DIR);
 	expect(MIGRATION_SOURCE_IDS.indexOf("alma")).toBeLessThan(MIGRATION_SOURCE_IDS.indexOf("command-code"));

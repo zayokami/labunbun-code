@@ -13,6 +13,9 @@ import { readAlma } from "./alma-read.ts";
 import { planAntigravity } from "./antigravity-plan.ts";
 import type { RawAntigravity } from "./antigravity-read.ts";
 import { readAntigravity } from "./antigravity-read.ts";
+import { planCindy } from "./cindy-plan.ts";
+import type { RawCindy } from "./cindy-read.ts";
+import { readCindy } from "./cindy-read.ts";
 import { planClaudeCode } from "./claude-plan.ts";
 import type { RawClaudeCode } from "./claude-read.ts";
 import { readClaudeCode } from "./claude-read.ts";
@@ -133,6 +136,7 @@ export interface RawSources {
 	openclaw: RawOpenClaw;
 	alma: RawAlma;
 	commandCode: RawCommandCode;
+	cindy: RawCindy;
 }
 
 // Long-form design notes: docs/dev/migration-framework.md
@@ -175,6 +179,11 @@ export function readSources(home: string, cwd: string): RawSources {
 		// checkout's `.mcp.json`) belong to one checkout and are named in the report
 		// rather than read.
 		commandCode: readCommandCode(home),
+		// Cindy keeps its configuration in an Electron `userData` database, and on
+		// Windows that root is `%APPDATA%` — passed in for the same reason Alma's is:
+		// a developer with a live install should get their own tree, and every test
+		// passes an explicit one.
+		cindy: readCindy(home, process.env),
 	};
 }
 
@@ -974,6 +983,25 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
+	// Long-form design notes: docs/dev/migration-framework.md
+	if (only.includes("cindy") && raw.cindy.present) {
+		if (wants("settings") || wants("assets")) {
+			planCindy(
+				raw.cindy,
+				raw.home,
+				items,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				settingsPatch,
+				existing,
+				force,
+			);
+		}
+	}
+
 	if (options.historyScope === "none" && wants("history")) {
 		items.push({
 			source: only[0] ?? "claude-code",
@@ -1519,6 +1547,12 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	// unlike the neighbours above, the deep question here costs nothing a shallow
 	// one would not already have paid.
 	if (source === "command-code") return raw.commandCode.present;
+
+	// Cindy's conversations live in the same owner database that carries its
+	// configuration, and the reader has already counted the listable sessions.
+	// Asking the deep question keeps an installed-but-never-used Cindy from
+	// paying for a walk whose answer is known: there are no rows to open.
+	if (source === "cindy") return raw.cindy.sessions.listable > 0;
 
 	return raw.agents.present;
 }

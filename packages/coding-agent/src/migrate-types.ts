@@ -7,6 +7,7 @@ import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
 import { almaConfigDir, almaDetectionRoots } from "./alma-home.ts";
 import { antigravityConfigDir, antigravityDataDirs } from "./antigravity-home.ts";
+import { CINDY_DEFAULT_DIR, cindyDetectionRoots, cindyFirstUserDataDir } from "./cindy-home.ts";
 import { CODEWHALE_DEFAULT_DIR, codewhaleDefaultRoots, resolveCodewhaleHome } from "./codewhale-home.ts";
 import { codexRoot } from "./codex-home.ts";
 import { COMMAND_CODE_DEFAULT_DIR } from "./command-code-home.ts";
@@ -48,7 +49,8 @@ export type MigrationSourceId =
 	| "mimocode-code"
 	| "openclaw"
 	| "alma"
-	| "command-code";
+	| "command-code"
+	| "cindy";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -76,6 +78,7 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"openclaw",
 	"alma",
 	"command-code",
+	"cindy",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -100,6 +103,7 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	openclaw: "OpenClaw",
 	alma: "Alma",
 	"command-code": "Command Code",
+	cindy: "Cindy",
 };
 
 // Long-form design notes: docs/dev/migration-framework.md
@@ -170,6 +174,13 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	// `sourceRoot` and `detectionRoots`, and the only reason the table carries a
 	// constant instead of a literal is that the bundle spells the name once.
 	"command-code": COMMAND_CODE_DEFAULT_DIR,
+	// `~/.cindy`, and this entry is a label rather than the tree a migration
+	// reads: Cindy's configuration is a SQLite database under an Electron
+	// `userData` root (`%APPDATA%`, Application Support, or the XDG config base),
+	// and `~/.cindy` is only the home-relative directory beside it. `sourceRoot`
+	// resolves the tree; `detectionRoots` checks all four userData names plus the
+	// two home-relative spellings.
+	cindy: CINDY_DEFAULT_DIR,
 };
 
 // Long-form design notes: docs/dev/migration-framework.md
@@ -213,6 +224,11 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// only to say so, in the one place a reader looks for the reason a source did
 	// not fall through.
 	if (id === "alma") return almaConfigDir(home);
+	// Cindy's tree is an Electron `userData` directory, not the home-relative
+	// spelling the table carries. `cindyFirstUserDataDir` returns the first of
+	// the four install names that holds something, and the fallthrough label is
+	// used only when none does — the same state detection reports as absent.
+	if (id === "cindy") return cindyFirstUserDataDir(home, process.env) ?? join(home, CINDY_DEFAULT_DIR);
 	// Antigravity needs no branch, and the fallthrough being correct is itself the
 	// interesting part: `~/.gemini` is a plain home-relative join, so this source is
 	// the first whose *tree* is unambiguous while its *detection* is not. What it
@@ -269,6 +285,8 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 	if (id === "openclaw") return openclawStateRoots(home, process.env);
 	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "alma") return almaDetectionRoots(home, process.env);
+	// Long-form design notes: docs/dev/migration-framework.md
+	if (id === "cindy") return cindyDetectionRoots(home, process.env);
 	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "mimocode-code") {
 		const roots = mimocodeRoots(home, process.env);

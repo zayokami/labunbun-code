@@ -60,6 +60,7 @@ export const MIGRATION_SOURCE_IDS = [
 	"openclaw",
 	"alma",
 	"command-code",
+	"cindy",
 ] as const;
 export type MigrationSourceId = (typeof MIGRATION_SOURCE_IDS)[number];
 
