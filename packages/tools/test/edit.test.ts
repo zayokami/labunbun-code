@@ -756,10 +756,21 @@ describe("explainMiss", () => {
 		// differing from whatever follows the block.
 		const content = "one\ntwo\nthree\nfour\n";
 		const diagnostic = explainMiss(content, "one\nTWO\nthree");
-		expect(diagnostic.anchor?.line).toBe(0);
+		expect(diagnostic.anchor?.line).toBe(1);
 		expect(diagnostic.differences).toEqual([{ line: 2, expected: "TWO", actual: "two" }]);
 		expect(diagnostic.suggestion).toBeNull();
 		expect(diagnostic.declined).toBe("not-indentation-only");
+	});
+
+	test("the closest region and its differences are numbered from one", () => {
+		// The report is read next to Read's own output, which numbers from one.
+		// A region on the file's second line has to say 2, and the difference one
+		// line further down has to say 3 — an off-by-one here points the model at
+		// the line above the one it has to fix.
+		const content = "alpha\nbeta\ngamma\n";
+		const diagnostic = explainMiss(content, "beta\nGAMMA");
+		expect(diagnostic.anchor).toEqual({ text: "beta", line: 2, how: "first-line" });
+		expect(diagnostic.differences).toEqual([{ line: 3, expected: "GAMMA", actual: "gamma" }]);
 	});
 
 	test("an indentation drift gets the file's own text back", () => {

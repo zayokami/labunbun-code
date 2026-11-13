@@ -562,7 +562,7 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 	// comparison *and* for display, so a difference that is only the line ending
 	// does not render as two identical-looking strings.
 	const window = fileLines
-		.slice(anchor.line, anchor.line + oldLines.length)
+		.slice(anchor.line - 1, anchor.line - 1 + oldLines.length)
 		.map((l) => (crlf ? l.replace(/\r$/, "") : l));
 
 	const differences: LineDifference[] = [];
@@ -579,7 +579,7 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 		if (actual === undefined) {
 			complete = false;
 			recoverable = false;
-			differences.push({ line: anchor.line + i + 1, expected, actual: "<end of file>" });
+			differences.push({ line: anchor.line + i, expected, actual: "<end of file>" });
 			break;
 		}
 		// **The line-ending check has to come BEFORE the equality check.** Both sides
@@ -589,7 +589,7 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 		// after the `continue`, so it was dead, and a CRLF file drew the same
 		// "the lines are byte-identical, but the block is not contiguous" answer
 		// as a genuinely wrong block.
-		const rawActual = fileLines[anchor.line + i] ?? "";
+		const rawActual = fileLines[anchor.line - 1 + i] ?? "";
 		const crOnlyHere = rawActual === `${expected}\r`;
 		if (crOnlyHere) {
 			crOnly = true;
@@ -602,7 +602,7 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 		if (actual === expected) continue;
 		anyDiffers = true;
 		if (differences.length < MAX_REPORTED_DIFFERENCES) {
-			differences.push({ line: anchor.line + i + 1, expected, actual });
+			differences.push({ line: anchor.line + i, expected, actual });
 		}
 		const sameIgnoringIndent = stripIndent(expected) === stripIndent(actual);
 		if (!sameIgnoringIndent) {
@@ -715,7 +715,7 @@ function locateAnchor(content: string, oldLines: string[]): MissAnchor | null {
 		// line is indented differently from the file is the commonest case there is.
 		for (const text of candidate === candidate.trimStart() ? [candidate] : [candidate, candidate.trimStart()]) {
 			const at = uniqueIndexOfLine(fileLines, text);
-			if (at !== -1) return { text, line: at, how };
+			if (at !== -1) return { text, line: at + 1, how };
 		}
 	}
 
@@ -735,7 +735,7 @@ function locateAnchor(content: string, oldLines: string[]): MissAnchor | null {
 			best = { text: anchor, line: f, score };
 		}
 	}
-	if (best) return { text: best.text, line: best.line, how: "common-prefix" };
+	if (best) return { text: best.text, line: best.line + 1, how: "common-prefix" };
 	return null;
 }
 
