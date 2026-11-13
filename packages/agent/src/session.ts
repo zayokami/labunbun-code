@@ -1169,8 +1169,29 @@ export class AgentSession {
 				earlySettled.add(block.id);
 			}
 		}
-		for (const result of capRoundResults(real, this.#deps.spillOutput)) this.#admitMessage(result);
+		for (const result of capRoundResults(real, this.#deps.spillOutput)) this.#admitSettlement(result);
 		this.#synthesizeOrphanResults(assistant);
+	}
+
+	/**
+	 * Admission on the failure path.
+	 *
+	 * The run has already failed; a store that refuses this write too must not
+	 * throw out of the `catch` that is settling the turn. A throw from inside a
+	 * catch is not caught by that same catch, so it would reject `prompt()` and
+	 * take a fire-and-forget host down exactly when it is reporting the original
+	 * failure — the outcome docs/dev/error-handling.md says cannot happen.
+	 */
+	#admitSettlement(message: AgentMessage): boolean {
+		try {
+			this.#admitMessage(message);
+			return true;
+		} catch (error) {
+			console.error(
+				`AgentSession: could not record a settled tool result: ${error instanceof Error ? error.message : error}`,
+			);
+			return false;
+		}
 	}
 
 	/**
@@ -1190,10 +1211,9 @@ export class AgentSession {
 				// keeps the interface from painting it as a red error.
 				interrupted: true,
 			};
-			this.#admitMessage(orphan);
 			// Recorded as it is written, so a second block carrying the same id —
 			// one call, repeated — is not answered with a second orphan.
-			existing.add(block.id);
+			if (this.#admitSettlement(orphan)) existing.add(block.id);
 		}
 	}
 }

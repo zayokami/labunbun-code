@@ -15,7 +15,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentMessage, FAUX_MODEL, fauxProvider, type StreamFn } from "@labunbun/ai";
-import { type AgentEvent, AgentSession, type SessionEntry, SessionStore } from "../src/index.ts";
+import { z } from "zod";
+import {
+	type AgentEvent,
+	AgentSession,
+	type AnyTool,
+	buildTool,
+	type SessionEntry,
+	SessionStore,
+} from "../src/index.ts";
 import { runHarness } from "./harness.ts";
 
 const roots: string[] = [];
@@ -38,6 +46,21 @@ class RefusingStore extends SessionStore {
 		throw new Error("ENOSPC: no space left on device");
 	}
 }
+
+/** The same disk, but it accepts everything except a tool result. */
+class RefusingToolResults extends SessionStore {
+	override appendMessage(message: AgentMessage): SessionEntry {
+		if (message.role === "toolResult") throw new Error("ENOSPC: no space left on device");
+		return super.appendMessage(message);
+	}
+}
+
+const probe: AnyTool = buildTool({
+	name: "probe",
+	description: "local test probe",
+	inputSchema: z.object({}),
+	call: async () => ({ content: [] }),
+});
 
 function ends(events: AgentEvent[]): Array<Extract<AgentEvent, { type: "agent_end" }>> {
 	return events.filter((event): event is Extract<AgentEvent, { type: "agent_end" }> => event.type === "agent_end");
@@ -91,6 +114,30 @@ describe("a prompt whose admission fails", () => {
 		expect(ends(events)[0]?.errorMessage).toBe("hook exploded");
 		expect(session.messages).toEqual([]);
 		expect(session.isRunning).toBe(false);
+	});
+
+	test("a store that refuses a settled tool result ends the run without throwing", async () => {
+		// The refusal lands in the loop's normal admission first, which fails the
+		// turn; the settlement in the catch then hits the same disk. That second
+		// admission used to throw out of the catch -- an unhandled rejection at
+		// every fire-and-forget host -- instead of being reported and dropped.
+		const seed = SessionStore.startNew(tmpDir("lbb-admit-cwd-"), tmpDir("lbb-admit-home-"));
+		const store = new RefusingToolResults(seed.path);
+		const logged: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+		try {
+			const { session, reason } = await runHarness(
+				[{ toolCalls: [{ name: "probe", arguments: {} }] }, { text: "done" }],
+				{ tools: [probe], store },
+			);
+
+			expect(reason).toBe("error");
+			expect(session.isRunning).toBe(false);
+			expect(logged.some((line) => line.includes("could not record a settled tool result"))).toBe(true);
+		} finally {
+			console.error = original;
+		}
 	});
 });
 
