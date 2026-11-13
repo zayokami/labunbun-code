@@ -90,6 +90,46 @@ describe("Read tool", () => {
 		expect((page2.content[0] as any).text).toContain("    11\tline 11");
 	});
 
+	test("a trailing newline ends the last line instead of numbering an empty one", async () => {
+		// Almost every file ends in a newline. Counting the empty string `split`
+		// leaves behind shows a phantom fourth line on a three-line file.
+		const dir = tempDir();
+		const file = join(dir, "three.txt");
+		writeFileSync(file, "alpha\nbeta\ngamma\n");
+		const text = (await call(createReadTool(dir, defaultOperations()), { file_path: file })).content[0].text as string;
+		expect(text).toContain("     3\tgamma");
+		expect(text).not.toContain("     4\t");
+		expect(text).not.toContain("Showing lines");
+	});
+
+	test("a full window of 2000 lines is a full read, not a partial view", async () => {
+		// The extra empty element made a 2000-line file look 2001 lines long: the
+		// read recorded a partial view, and Write then refused a file the model
+		// had in fact read whole.
+		const dir = tempDir();
+		const file = join(dir, "window.txt");
+		writeFileSync(file, `${Array.from({ length: 2000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`);
+		const state = new ReadFileState();
+		const tool = createReadTool(dir, defaultOperations(), [], state);
+		const text = (await call(tool, { file_path: file })).content[0].text as string;
+		expect(text).toContain("  2000\tline 2000");
+		expect(text).not.toContain("Showing lines");
+		const entry = state.getState(resolveCanonical(file, dir));
+		expect(entry?.fullRead).toBe(true);
+		expect(entry?.partialView).toBe(false);
+	});
+
+	test("one line past the window still pages and keeps the partial record", async () => {
+		const dir = tempDir();
+		const file = join(dir, "over.txt");
+		writeFileSync(file, `${Array.from({ length: 2001 }, (_, i) => `line ${i + 1}`).join("\n")}\n`);
+		const state = new ReadFileState();
+		const tool = createReadTool(dir, defaultOperations(), [], state);
+		const text = (await call(tool, { file_path: file })).content[0].text as string;
+		expect(text).toContain("[Showing lines 1-2000 of 2001. Use offset=2001 for the next page.]");
+		expect(state.getState(resolveCanonical(file, dir))?.partialView).toBe(true);
+	});
+
 	test("missing file is an error result", async () => {
 		const tool = createReadTool(tempDir(), defaultOperations());
 		const result = await call(tool, { file_path: join(tmpdir(), "definitely-missing-xyz.txt") });

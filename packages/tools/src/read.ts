@@ -80,7 +80,14 @@ export function createReadTool(
 				};
 			}
 
+			// A trailing newline terminates the last line; it does not start an
+			// empty one. Counting the empty string `split` leaves behind would show
+			// a phantom numbered line on almost every file, and — at exactly the
+			// 2000-line window — report the file as longer than it is, record the
+			// read as a partial view, and leave Write refusing a full read that was
+			// in fact full. An empty file still renders as one empty line.
 			const allLines = text.split("\n");
+			if (allLines.length > 1 && allLines.at(-1) === "") allLines.pop();
 			const start = (input.offset ?? 1) - 1;
 			const end = Math.min(start + (input.limit ?? MAX_LINES), allLines.length);
 
@@ -121,8 +128,15 @@ export function createReadTool(
 			try {
 				mtime = (await ops.stat(path)).mtimeMs;
 			} catch {}
+			// A full read with nothing cut records the file's own text, trailing
+			// newline included: the edit gate compares this string to the file on
+			// disk, and a re-joined view would differ by exactly that byte.
+			const recorded =
+				input.offset === undefined && input.limit === undefined && !cutUnasked && !cutLine && !cutByResultLimit
+					? text
+					: shownLines.join("\n");
 			readState.record(path, {
-				content: shownLines.join("\n"),
+				content: recorded,
 				offset: input.offset,
 				limit: input.limit,
 				// Stated on every call: only Read knows whether this call asked for
