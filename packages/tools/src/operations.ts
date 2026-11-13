@@ -9,6 +9,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:os";
 import type { SandboxPolicy } from "@labunbun/agent";
 import { createStreamCapture, nextSpillPath } from "./output-capture.ts";
 import { killProcessTree } from "./process-tree.ts";
@@ -73,6 +74,17 @@ const CAPTURE_TAIL_CHARS = 30_000;
 
 /** How long a killed POSIX child gets to honour `SIGTERM` before the tree kill escalates to `SIGKILL`. */
 const KILL_ESCALATE_MS = 250;
+
+/**
+ * The exit code a shell would report for a child a signal ended: 128 plus the
+ * signal number. Node reports `code: null` in that case, and zero said the
+ * command succeeded. A null signal as well — a `close` whose child never
+ * reported either — has no number to add, so it reports the ordinary failure 1.
+ */
+export function signalExitCode(signal: NodeJS.Signals | null): number {
+	if (signal === null) return 1;
+	return 128 + (constants.signals[signal] ?? 0);
+}
 
 export interface ExecResult {
 	stdout: string;
@@ -1198,15 +1210,19 @@ export class ChildProcessExecOperations implements ExecOperations {
 			// see EXIT_DRAIN_GRACE_MS for the measured shapes. `exit` is the
 			// process ending, which always arrives; `close` is the normal, prompt
 			// path and cancels the grace; whichever comes first settles the call.
-			const end = (code: number | null) => finish(killed ? 124 : (code ?? 0));
+			// A null code is the child being ended by a signal, not a success: a
+			// shell reports 128 + the signal number there, and `code ?? 0` told the
+			// model a segfaulted or SIGTERMed command had exited cleanly.
+			const end = (code: number | null, signal: NodeJS.Signals | null) =>
+				finish(killed ? 124 : (code ?? signalExitCode(signal)));
 			let exitGrace: ReturnType<typeof setTimeout> | null = null;
-			child.on("exit", (code) => {
+			child.on("exit", (code, signal) => {
 				if (settled) return;
-				exitGrace = setTimeout(() => end(code), EXIT_DRAIN_GRACE_MS);
+				exitGrace = setTimeout(() => end(code, signal), EXIT_DRAIN_GRACE_MS);
 			});
-			child.on("close", (code) => {
+			child.on("close", (code, signal) => {
 				if (exitGrace) clearTimeout(exitGrace);
-				end(code);
+				end(code, signal);
 			});
 		});
 	}
