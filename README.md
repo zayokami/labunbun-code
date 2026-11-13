@@ -678,6 +678,7 @@ Use these commands in the terminal.
 | `/mcp [approve <name>\|prompts <server>\|prompt <server> <name>\|resources <server>\|resource <server> <uri>]` | List the MCP servers, approve one, or read a prompt or a resource. |
 | `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
 | `/memory [rules\|project]` | Open your memory files in your editor. Without an editor, print their paths. |
+| `/config` | Set up providers, API keys, custom endpoints, and model discovery. |
 | `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |
 | `/tokens [k\|mtok]` | Show or change the unit of the token counts. The value `mtok` writes counts of one million and above as `849.9 MTok`. Without an argument, the command toggles the unit. |
 | `/theme [name\|auto]` | Show the themes, or change the theme. |
@@ -716,7 +717,7 @@ Use a pipe with no `-p` to read the prompt from stdin: `cat task.md | labunbun`.
 
 `--output-last-message` writes the final answer to the named file. The tool writes a temporary file and renames it, so a reader never sees a partial answer. The run writes nothing when it produced no assistant text. It warns on stderr in that case. A write that fails makes the run exit with code 1.
 
-The JSON result carries `error_kind` and `error_remedy` when the run ended on a classified failure. It carries `incomplete: true` when the reported text is the partial answer of a failed or interrupted turn.
+The JSON result carries `error_kind` and `error_remedy` when the run ended on a classified failure. It carries `error_message` when the run ended on a failure, whether or not the failure was classified: the text is the same sentence the interactive mode shows under the error. It carries `incomplete: true` when the reported text is the partial answer of a failed or interrupted turn.
 
 A headless run that opens a stored session (`--resume <id>` or `-c`) prints the recovery line to stderr when the ledger holds one. It also warns about the subagent runs that a previous process left unfinished. The answer stays the only thing on stdout.
 

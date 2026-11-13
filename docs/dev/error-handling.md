@@ -160,7 +160,7 @@ A single-select question gets a free-text row. A multi-select one does not: "tag
 | Settings, memory, skills, styles, MCP approval | Startup notice in the transcript | stderr | stderr |
 | Retry | Status line and one transcript line | stderr | none |
 | Fallback | Transcript info line | stderr | stderr |
-| Error remedy | Under the error line | stderr, `error_kind`/`error_remedy`, `incomplete` | Appended to the error message |
+| Error remedy | Under the error line | stderr, `error_kind`/`error_remedy`/`error_message`, `incomplete` | Appended to the error message |
 | Partial answer | `(response ended early; output is partial)` | `incomplete` in both JSON formats | No field; partial content is delivered |
 | Interrupted queue | Count and previews | Count only | `cancelled` stop reason |
 | Interrupted tool result | Warning color and `(interrupted; output is partial)` | Skipped by the last-error search | An error result, as the wire requires |

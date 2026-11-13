@@ -8,7 +8,7 @@
  */
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentEvent, NetworkSandboxPolicy, PermissionMode, SandboxMode } from "@labunbun/agent";
+import type { AgentEndReason, AgentEvent, NetworkSandboxPolicy, PermissionMode, SandboxMode } from "@labunbun/agent";
 import {
 	AgentSession,
 	collectReadOnlyToolNames,
@@ -198,6 +198,8 @@ interface JsonResult {
 	error_kind?: AssistantMessage["errorKind"];
 	/** What to do about {@link error_kind}, in the app's own commands. */
 	error_remedy?: string;
+	/** What the run last said went wrong, in text mode's own words. */
+	error_message?: string;
 	/** Whether the reported `result` is the partial text of an interrupted turn. */
 	incomplete: boolean;
 	cost_usd: number;
@@ -1266,12 +1268,33 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		}
 	}
 
-	// A typed line that names a prompt-command is expanded before it is sent, the
-	// same way the REPL expands it — `-p "/skill-x args"` is how a script reaches
-	// a skill. Anything else (a local or app-level command, or a prompt that just
-	// happens to start with a slash) is sent as typed; the hook above saw the
-	// typed text either way.
-	const reason = await session.prompt(expandPromptCommand(commands, options.prompt) ?? options.prompt);
+	// A scripted run is still a terminal process, and Ctrl+C has to mean what it
+	// means in the REPL: abort the turn, settle its tools, exit 130. Without a
+	// handler the default SIGINT kill skips both the pairing and the
+	// "Interrupted." line, and a resumed session inherits a dangling tool call.
+	// The second press exits at once — the same two-press shape the REPL has,
+	// for a run whose abort never comes back.
+	let sigints = 0;
+	const onSigint = (): void => {
+		sigints += 1;
+		if (sigints === 1) {
+			session.abort();
+			return;
+		}
+		process.exit(130);
+	};
+	process.on("SIGINT", onSigint);
+	let reason: AgentEndReason;
+	try {
+		// A typed line that names a prompt-command is expanded before it is sent,
+		// the same way the REPL expands it — `-p "/skill-x args"` is how a script
+		// reaches a skill. Anything else (a local or app-level command, or a prompt
+		// that just happens to start with a slash) is sent as typed; the hook above
+		// saw the typed text either way.
+		reason = await session.prompt(expandPromptCommand(commands, options.prompt) ?? options.prompt);
+	} finally {
+		process.off("SIGINT", onSigint);
+	}
 	const finalMessage = finalAssistant(session.messages);
 	const finalText = finalMessage ? assistantText(finalMessage) : "";
 	const finalIncomplete = finalMessage?.incomplete === true;
@@ -1304,6 +1327,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		}
 	}
 
+	// One read for all three formats, with text mode's own fallback: the loop's
+	// reason first, the transcript's last error second. A script that reads only
+	// stdout otherwise learns that the run failed and why it was classified, but
+	// never what the provider actually said.
+	const finalErrorMessage = endErrorMessage ?? findLastError(session.messages);
 	if (format === "json") {
 		const result: JsonResult = {
 			type: "result",
@@ -1320,6 +1348,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// something the run did not record.
 			...(endErrorKind === undefined ? {} : { error_kind: endErrorKind }),
 			...(endErrorRemedy === undefined ? {} : { error_remedy: endErrorRemedy }),
+			// Absent rather than null, for the same reason as the two above.
+			...(finalErrorMessage === undefined ? {} : { error_message: finalErrorMessage }),
 			// Whether `result` is the partial text a failure or an abort left
 			// behind. A caller writing this to a file needs to know before it is
 			// mistaken for a finished answer.
@@ -1353,6 +1383,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			session_id: store?.sessionId ?? null,
 			error_kind: endErrorKind,
 			error_remedy: endErrorRemedy,
+			error_message: finalErrorMessage,
 			incomplete: finalIncomplete,
 		});
 	} else {
@@ -1361,7 +1392,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		if (reason !== "completed") {
 			// The loop's reason first, the transcript's last error second: only the
 			// first one can say what to do about a request that was never sent.
-			const errorMessage = endErrorMessage ?? findLastError(session.messages);
+			const errorMessage = finalErrorMessage;
 			console.error(`[session ended: ${reason}${errorMessage ? ` — ${errorMessage}` : ""}]`);
 			// The next step, under the reason it addresses. Only for endings that
 			// carried one: a completed run has nothing to remedy.

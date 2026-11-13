@@ -184,6 +184,42 @@ describe("--output-last-message", () => {
 	});
 });
 
+describe("the error a failed run reports", () => {
+	test("a failure's words reach the JSON result, classified or not", async () => {
+		// No error_kind here: an unclassified failure still has to say what the
+		// provider said, or a script learns only that something went wrong.
+		const harness = makeHarness();
+		const faux = fauxProvider([{ stopReason: "error", errorMessage: "socket hang up" }]);
+
+		const result = await run(harness, { streamFn: faux.streamFn });
+		expect(result.code).toBe(1);
+		const parsed = JSON.parse(result.stdout);
+		expect(parsed.error_kind).toBeUndefined();
+		expect(parsed.error_message).toBe("socket hang up");
+	});
+
+	test("stream-json's result line carries it too", async () => {
+		const harness = makeHarness();
+		const faux = fauxProvider([{ stopReason: "error", errorMessage: "socket hang up" }]);
+
+		const result = await run(harness, { streamFn: faux.streamFn, outputFormat: "stream-json" });
+		expect(result.code).toBe(1);
+		const lines = result.stdout.trim().split("\n");
+		// The result event is the last line of the stream.
+		const final = JSON.parse(lines[lines.length - 1] ?? "{}");
+		expect(final.error_message).toBe("socket hang up");
+	});
+
+	test("a completed run omits the field rather than nulling it", async () => {
+		const harness = makeHarness();
+		const faux = fauxProvider([{ text: "fine" }]);
+
+		const result = await run(harness, { streamFn: faux.streamFn });
+		expect(result.code).toBe(0);
+		expect(JSON.parse(result.stdout)).not.toHaveProperty("error_message");
+	});
+});
+
 describe("text output across turns", () => {
 	test("a later turn's answer is not sliced by the length of an earlier turn's text", async () => {
 		const harness = makeHarness();
