@@ -329,6 +329,10 @@ describe("mapOpenAIStream", () => {
 		// it brings no second line with it.
 		expect(text.match(/ {3}https:\/\/example\.com\/a/g)).toHaveLength(1);
 		expect(text).not.toContain("A again");
+		// An untitled source names the link once. Printing it a second time as an
+		// indented line is how every real source row (url only) would read.
+		expect(text.match(/https:\/\/example\.com\/b/g)).toHaveLength(1);
+		expect(text).not.toContain("https://example.com/b\n   https://example.com/b");
 	});
 
 	test("cached prompt tokens are not also counted as input", async () => {

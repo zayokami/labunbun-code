@@ -289,7 +289,13 @@ const SERVER_SOURCE_LIMIT = 20;
 /** The closing `Sources:` block for a turn whose web tools ran server-side. */
 export function renderServerToolSources(sources: ReadonlyArray<{ title: string; url: string }>): string {
 	const shown = sources.slice(0, SERVER_SOURCE_LIMIT);
-	const lines = shown.map((source, i) => `${i + 1}. ${source.title || source.url}\n   ${source.url}`);
+	const lines = shown.map((source, i) => {
+		const title = source.title.trim();
+		// An untitled source (the common chat-completions shape) or one titled with
+		// its own URL would otherwise print the same link on two lines.
+		if (title === "" || title === source.url) return `${i + 1}. ${source.url}`;
+		return `${i + 1}. ${title}\n   ${source.url}`;
+	});
 	const rest = sources.length - shown.length;
 	return `\n\nSources:\n${lines.join("\n")}${rest > 0 ? `\n(${rest} more not shown)` : ""}`;
 }
