@@ -35,6 +35,13 @@ const DEFAULTS = {
 	overloadedMaxAttempts: 3,
 };
 
+/**
+ * Attempts for a status-less failure the package cannot classify: the original
+ * try plus one. Anything that names a retryable status, or reports itself as a
+ * network failure, keeps the full ladder — this cap is only for the residue.
+ */
+const UNKNOWN_MAX_ATTEMPTS = 2;
+
 /** Extract an HTTP status code from an SDK/HTTP-ish error, or null. */
 export function statusCodeOf(error: unknown): number | null {
 	if (error === null || typeof error !== "object") return null;
@@ -285,9 +292,19 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// may not share the closed handshake or the full disk.
 				const retryable =
 					!isPermanentFailure(error) &&
-					(isNetworkError(error) || (status !== null && isRetryableStatus(status)) || status === null); // unknown errors before first byte: give one more shot below
+					(isNetworkError(error) || (status !== null && isRetryableStatus(status)) || status === null); // unknown errors before first byte: the cap below gives one more shot
 
-				const attemptCap = overloaded ? Math.min(overloadedMaxAttempts, maxAttempts) : maxAttempts;
+				// A failure with no status and no network mark is unknown: one
+				// transient hiccup or a bug in the adapter. One retry is enough to
+				// tell those apart; the full ten-attempt ladder spent two minutes of
+				// silence on a condition it could never repair. Network failures keep
+				// the ladder — their retryability is known even without a status.
+				const unknown = status === null && !isNetworkError(error);
+				const attemptCap = overloaded
+					? Math.min(overloadedMaxAttempts, maxAttempts)
+					: unknown
+						? Math.min(UNKNOWN_MAX_ATTEMPTS, maxAttempts)
+						: maxAttempts;
 				const attemptsUsed = overloaded ? overloadedAttempts + 1 : attempt;
 
 				// Overflow is terminal on the first try, including the status-less case

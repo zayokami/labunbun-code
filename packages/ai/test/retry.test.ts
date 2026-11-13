@@ -301,6 +301,20 @@ describe("permanent failures", () => {
 		expect(events.at(-1)?.type).toBe("error");
 	});
 
+	test("a status-less unknown failure gets one retry, not the whole ladder", async () => {
+		// No status and no network code is the residue: either a transient hiccup
+		// or an adapter bug. One retry tells them apart; ten attempts spent two
+		// minutes of silence on something a retry could never repair.
+		// A plain Error with no network wording: a `TypeError` would read as a
+		// network failure to the classifier and keep the full ladder by design.
+		const { fn, calls } = failingStreamFn(99, new Error("adapter mishandled the response"));
+		const wrapped = withRetry(fn, { baseDelayMs: 1, maxAttempts: 10, sleep: async () => {} });
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(calls()).toBe(2);
+		expect((events.at(-1) as any).message.errorMessage).toContain("2 attempt(s)");
+	});
+
 	test("a 503 still climbs the ladder", async () => {
 		const { fn, calls } = failingStreamFn(99, Object.assign(new Error("down"), { status: 503 }));
 		const wrapped = withRetry(fn, { baseDelayMs: 1, maxAttempts: 3, sleep: async () => {} });
