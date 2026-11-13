@@ -216,17 +216,23 @@ export const WIZARD_PROVIDER_CHOICES: readonly string[] = WIZARD_PROVIDER_ROWS.m
  * sign-in's row: the detection block has just said it is there, and sending the
  * user through the browser again would contradict the sentence above the
  * question. Without one, a Claude config on disk means the Claude sign-in, a
- * key variable already in the environment means the API-key row, and a bare
+ * key variable the *anthropic row* reads means the API-key row, and a bare
  * machine gets row `1` because a sign-in needs nothing typed.
+ *
+ * The variable has to be one row 3 actually consumes. Its flow writes the
+ * Anthropic model and looks only for `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`;
+ * defaulting here on a `GOOGLE_API_KEY` or `DEEPSEEK_API_KEY` sent that user to
+ * a prompt that then wrote no key for the model it chose — a session whose
+ * first request was guaranteed to fail.
  */
 export function wizardProviderDefault(found: {
 	claudeConfigured: boolean;
-	envKeysPresent: boolean;
+	anthropicKeyPresent: boolean;
 	signIns?: SubscriptionSignIns;
 }): WizardProviderRow {
 	if (found.signIns?.claude) return "1";
 	if (found.signIns?.chatgpt) return "2";
-	if (!found.claudeConfigured && found.envKeysPresent) return "3";
+	if (!found.claudeConfigured && found.anthropicKeyPresent) return "3";
 	return "1";
 }
 
@@ -300,7 +306,7 @@ export async function askChoice(
 async function readMasked(prompt: string): Promise<string> {
 	// Raw-mode single-line reader echoing asterisks. Restores the terminal on
 	// every exit path — a leaked raw mode would leave the REPL deaf to keys.
-	return new Promise((resolve) => {
+	return new Promise((resolve, reject) => {
 		const { stdin, stdout } = process;
 		if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
 			// No TTY: visible readline fallback (shouldRunWizard gates this in practice).
@@ -323,10 +329,13 @@ async function readMasked(prompt: string): Promise<string> {
 				stdout.write("\n");
 				resolve(buffer);
 			} else if (key === "\x03") {
-				// Ctrl+C: treat as "no key pasted".
+				// Ctrl+C cancels the setup rather than answering the secret prompt
+				// with "". An empty key here used to mean "carry on", so the user
+				// who pressed the key to stop watched the wizard keep asking —
+				// and got a settings file naming a model it had no key for.
 				cleanup();
 				stdout.write("\n");
-				resolve("");
+				reject(new Error("setup cancelled at the API key prompt"));
 			} else if (key === "\x7f" || key === "\b") {
 				buffer = buffer.slice(0, -1);
 				stdout.write("\b \b");
@@ -534,7 +543,9 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			WIZARD_PROVIDER_CHOICES,
 			wizardProviderDefault({
 				claudeConfigured: sources.includes("claude-code"),
-				envKeysPresent: envKeys.length > 0,
+				// The same probe row 3 runs below, asked once: an environment key for
+				// some other provider is not a default for the Anthropic row.
+				anthropicKeyPresent: detectedAnthropicEnv().length > 0,
 				signIns,
 			}),
 			WIZARD_PROVIDER_CHOICES.join("/"),
@@ -589,7 +600,11 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			if (detected.length > 0) {
 				console.log(`  Detected ${detected.join(" or ")} in the environment — no key needed here.`);
 			} else {
-				const pasted = await withTerminal(() => readMasked("API key (Enter if ANTHROPIC_API_KEY is already set): "));
+				// None of the row's variables is set, so Enter here means "skip":
+				// the old wording promised a fallback that this branch had already
+				// ruled out, and a user who pressed Enter on that promise wrote a
+				// settings file with no key for the model it named.
+				const pasted = await withTerminal(() => readMasked("API key (Enter to skip; export it yourself later): "));
 				apiKey = pasted.trim() === "" ? null : pasted.trim();
 			}
 		} else {

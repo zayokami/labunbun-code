@@ -255,25 +255,25 @@ describe("the payment question", () => {
 
 describe("wizardProviderDefault", () => {
 	test("the default row is the one that is already true for this machine", () => {
-		expect(wizardProviderDefault({ claudeConfigured: true, envKeysPresent: false })).toBe("1");
-		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: true })).toBe("3");
+		expect(wizardProviderDefault({ claudeConfigured: true, anthropicKeyPresent: false })).toBe("1");
+		expect(wizardProviderDefault({ claudeConfigured: false, anthropicKeyPresent: true })).toBe("3");
 		// A bare machine gets the sign-in row: it needs nothing typed.
-		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: false })).toBe("1");
+		expect(wizardProviderDefault({ claudeConfigured: false, anthropicKeyPresent: false })).toBe("1");
 		// A Claude config outranks a stray key variable.
-		expect(wizardProviderDefault({ claudeConfigured: true, envKeysPresent: true })).toBe("1");
+		expect(wizardProviderDefault({ claudeConfigured: true, anthropicKeyPresent: true })).toBe("1");
 	});
 
 	test("a subscription already signed in is the default, not a second sign-in", () => {
 		const claude = { ...NO_SIGN_INS, claude: true };
 		const chatgpt = { ...NO_SIGN_INS, chatgpt: true };
 		// The detection block names the sign-in; the row must agree with it.
-		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: false, signIns: claude })).toBe("1");
-		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: true, signIns: chatgpt })).toBe("2");
+		expect(wizardProviderDefault({ claudeConfigured: false, anthropicKeyPresent: false, signIns: claude })).toBe("1");
+		expect(wizardProviderDefault({ claudeConfigured: false, anthropicKeyPresent: true, signIns: chatgpt })).toBe("2");
 		// Claude's sign-in outranks ChatGPT's when both are on disk.
 		expect(
 			wizardProviderDefault({
 				claudeConfigured: false,
-				envKeysPresent: false,
+				anthropicKeyPresent: false,
 				signIns: { ...NO_SIGN_INS, claude: true, chatgpt: true },
 			}),
 		).toBe("1");

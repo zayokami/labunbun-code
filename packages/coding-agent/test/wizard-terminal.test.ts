@@ -162,7 +162,7 @@ describe("the wizard on a terminal", () => {
 		const term = fakeTerminal();
 		const run = startWizard(term);
 		await term.answer("How do you want to use labunbun?", "3");
-		await term.answer("API key (Enter if", KEY);
+		await term.answer("API key (Enter to skip", KEY);
 		await term.answer("Theme (", "auto");
 		await term.answer("Editing model (", "none");
 		await declineImportOffer(term, run);
@@ -180,7 +180,7 @@ describe("the wizard on a terminal", () => {
 		const term = fakeTerminal();
 		const run = startWizard(term);
 		await term.answer("How do you want to use labunbun?", "3");
-		await term.answer("API key (Enter if", KEY);
+		await term.answer("API key (Enter to skip", KEY);
 		await term.waitFor("Theme (");
 		expect(term.screen()).not.toContain(KEY);
 		term.type("dark");
