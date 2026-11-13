@@ -42,7 +42,14 @@ describe("AgentSession.aside", () => {
 		const asideContext = faux.receivedContexts[1];
 		expect(asideContext?.tools).toEqual([]);
 		expect(asideContext?.messages.length).toBe(before.length + 1);
-		expect(asideContext?.messages.at(-1)).toEqual(userMessage("what did that mean?"));
+		// The question as the model sees it. The timestamp is the clock tick the
+		// session stamped on its own copy, so asserting it would compare the test's
+		// `Date.now()` to a call a millisecond earlier — a race, not a claim.
+		const asked = asideContext?.messages.at(-1);
+		expect({ role: asked?.role, content: asked?.content }).toEqual({
+			role: "user",
+			content: userMessage("what did that mean?").content,
+		});
 
 		// The live history is what it was: the next prompt sends no trace of it.
 		expect(asideSession.messages).toEqual(before);
