@@ -2031,6 +2031,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 									handle,
 									`Stop hook asked to continue but the per-session resume limit (${MAX_STOP_HOOK_RESUMES}) is reached.`,
 								);
+							} else if (target.isRunning) {
+								// A prompt landed while the hook was running: the user
+								// already owns the next run. Queuing the finished run's
+								// continuation into it would steer work they just began
+								// with a reason that was about the run before it.
+								pushInfo(handle, "Stop hook asked to continue, but a new run is already in progress; not resuming.");
 							} else {
 								stopHookResumes++;
 								const reason = outcome.reason ?? "Stop hook requested that work continue.";
