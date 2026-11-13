@@ -26,6 +26,8 @@
 export interface ExitWork {
 	/** A turn is in flight; the model request behind it ends with the process. */
 	turnRunning: boolean;
+	/** A cancellable command owns the work while the session is idle (`/compact`, `/login`). */
+	command: boolean;
 	/** Live subagents, waiting ones included: their sidechains live only in memory. */
 	subagents: number;
 	/** Background shells still running -- this run's and recovered ones alike. */
@@ -59,6 +61,7 @@ const counted = (n: number, one: string, many: string): string => `${n} ${n === 
 export function exitConfirmation(work: ExitWork): ExitQuestion | null {
 	const active: string[] = [];
 	if (work.turnRunning) active.push("a run is in flight");
+	if (work.command) active.push("a command is running");
 	if (work.subagents > 0) active.push(counted(work.subagents, "subagent", "subagents"));
 	if (work.shells > 0) active.push(counted(work.shells, "background shell", "background shells"));
 	if (active.length === 0) return null;
@@ -71,6 +74,11 @@ export function exitConfirmation(work: ExitWork): ExitQuestion | null {
 		fates.push("Exiting stops the run where it is.");
 	} else if (work.subagents > 0) {
 		fates.push(`Exiting terminates ${named}.`);
+	}
+	if (work.command) {
+		// A command's abort controller dies with the process, and half a
+		// compaction or half a sign-in is not something it can resume.
+		fates.push("Exiting stops the command where it is.");
 	}
 	if (work.shells > 0) {
 		fates.push(

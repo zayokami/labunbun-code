@@ -10,8 +10,8 @@
 import { describe, expect, test } from "bun:test";
 import { createExitGuard, EXIT_ANSWER, type ExitQuestion, type ExitWork, exitConfirmation } from "../src/exit-guard.ts";
 
-const NOTHING: ExitWork = { turnRunning: false, subagents: 0, shells: 0 };
-const ONE_SHELL: ExitWork = { turnRunning: false, subagents: 0, shells: 1 };
+const NOTHING: ExitWork = { turnRunning: false, command: false, subagents: 0, shells: 0 };
+const ONE_SHELL: ExitWork = { turnRunning: false, command: false, subagents: 0, shells: 1 };
 
 describe("exitConfirmation", () => {
 	test("nothing running means nothing to say", () => {
@@ -19,20 +19,34 @@ describe("exitConfirmation", () => {
 	});
 
 	test("a run names itself and its fate", () => {
-		const question = exitConfirmation({ turnRunning: true, subagents: 0, shells: 0 });
+		const question = exitConfirmation({ turnRunning: true, command: false, subagents: 0, shells: 0 });
 		expect(question?.question).toBe("Still active: a run is in flight. Exiting stops the run where it is.");
 		// Nothing survives this exit, so no follow-up command is named.
 		expect(question?.question).not.toContain("/ps");
 	});
 
+	test("a command names itself and its fate", () => {
+		// A command runs with the session idle, so the pair is the state that
+		// actually occurs -- turnRunning false, command true.
+		const question = exitConfirmation({ turnRunning: false, command: true, subagents: 0, shells: 0 });
+		expect(question?.question).toBe("Still active: a command is running. Exiting stops the command where it is.");
+	});
+
+	test("a command and its run are both named before either fate", () => {
+		expect(exitConfirmation({ turnRunning: true, command: true, subagents: 0, shells: 0 })?.question).toBe(
+			"Still active: a run is in flight, a command is running. " +
+				"Exiting stops the run where it is. Exiting stops the command where it is.",
+		);
+	});
+
 	test("a run and its subagents: one sentence, both fates, the number intact", () => {
-		expect(exitConfirmation({ turnRunning: true, subagents: 2, shells: 0 })?.question).toBe(
+		expect(exitConfirmation({ turnRunning: true, command: false, subagents: 2, shells: 0 })?.question).toBe(
 			"Still active: a run is in flight, 2 subagents. Exiting stops the run and terminates the subagents.",
 		);
 	});
 
 	test("one subagent is said in the singular, in the count and the fate both", () => {
-		expect(exitConfirmation({ turnRunning: false, subagents: 1, shells: 0 })?.question).toBe(
+		expect(exitConfirmation({ turnRunning: false, command: false, subagents: 1, shells: 0 })?.question).toBe(
 			"Still active: 1 subagent. Exiting terminates the subagent.",
 		);
 	});
@@ -48,21 +62,22 @@ describe("exitConfirmation", () => {
 	});
 
 	test("several shells agree in number through every clause", () => {
-		expect(exitConfirmation({ turnRunning: false, subagents: 0, shells: 3 })?.question).toBe(
+		expect(exitConfirmation({ turnRunning: false, command: false, subagents: 0, shells: 3 })?.question).toBe(
 			"Still active: 3 background shells. The shells keep running; /ps lists them and /stop ends one.",
 		);
 	});
 
 	test("everything at once: every count, both fates, in the order the work dies", () => {
-		expect(exitConfirmation({ turnRunning: true, subagents: 2, shells: 1 })?.question).toBe(
-			"Still active: a run is in flight, 2 subagents, 1 background shell. " +
+		expect(exitConfirmation({ turnRunning: true, command: true, subagents: 2, shells: 1 })?.question).toBe(
+			"Still active: a run is in flight, a command is running, 2 subagents, 1 background shell. " +
 				"Exiting stops the run and terminates the subagents. " +
+				"Exiting stops the command where it is. " +
 				"The shell keeps running; /ps lists it and /stop ends it.",
 		);
 	});
 
 	test("the safe answer leads; the guard's exit label is the second row", () => {
-		const options = exitConfirmation({ turnRunning: false, subagents: 1, shells: 0 })?.options;
+		const options = exitConfirmation({ turnRunning: false, command: false, subagents: 1, shells: 0 })?.options;
 		expect(options?.map((option) => option.label)).toEqual(["Stay", EXIT_ANSWER]);
 		// The label is a contract with the guard below and the dialog above;
 		// spelled here so a rewording on either side has to face the other.

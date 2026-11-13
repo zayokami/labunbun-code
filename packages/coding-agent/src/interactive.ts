@@ -917,6 +917,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	function cancelCommand(): boolean {
 		if (!commandAbort?.cancellable) return false;
+		// Already cancelled: the slot remains occupied until the command notices
+		// and calls done(), and absorbing every press until then would mean a
+		// second Ctrl+C could never reach the idle-exit path. A first press
+		// stops the work; the presses after it belong to whatever comes next.
+		if (commandAbort.controller.signal.aborted) return false;
 		commandAbort.controller.abort();
 		return true;
 	}
@@ -2700,6 +2705,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		onExitRequest: createExitGuard({
 			work: () => ({
 				turnRunning: sessionRef?.isRunning === true,
+				command: commandAbort !== null,
 				subagents: subagentRegistry.list().filter((entry) => entry.state === "live").length,
 				shells:
 					backgroundShells.list().filter((shell) => shell.status === "running").length +
