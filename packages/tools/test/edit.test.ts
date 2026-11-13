@@ -544,6 +544,46 @@ describe("line endings", () => {
 		expect(readFileSync(file, "utf8")).toBe("function f() {\r\n  return 2;\r\n}\r\n");
 	});
 
+	test("a deletion eats the break the file actually has, not the majority one", async () => {
+		// A mixed-ending file: one CRLF line among LF neighbours. The deletion must
+		// consume the "\r\n" that follows its match; deciding by the file's
+		// majority ending eats nothing here (the next byte is "\r", not "\n") and
+		// leaves a blank line where the deletion should have closed up.
+		const dir = tempDir();
+		const file = write(dir, "mixed-delete.ts", "a\nb\r\nc\nd\ne\n");
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(edit, { file_path: file, old_string: "b", new_string: "" });
+
+		expect(result.isError).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe("a\nc\nd\ne\n");
+	});
+
+	test("replace_all on a mixed file eats each occurrence's own break", async () => {
+		const dir = tempDir();
+		const file = write(dir, "mixed-all.ts", "a\r\nb\nb\r\nc\n");
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(edit, { file_path: file, old_string: "b", new_string: "", replace_all: true });
+
+		expect(result.isError).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe("a\r\nc\n");
+	});
+
+	test("a deletion in a CRLF file eats the CRLF", async () => {
+		const dir = tempDir();
+		const file = write(dir, "crlf-delete.ts", "one\r\ntwo\r\nthree\r\n");
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(edit, { file_path: file, old_string: "two", new_string: "" });
+
+		expect(result.isError).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe("one\r\nthree\r\n");
+	});
+
 	test("the helpers agree with what the file does", () => {
 		expect(detectLineEnding("a\r\nb\r\nc\r\n")).toBe("crlf");
 		expect(detectLineEnding("a\nb\nc\n")).toBe("lf");

@@ -206,8 +206,12 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 				const region = content.slice(index, index + input.old_string.length);
 				let end = index + region.length;
 				if (eatTrailingBreak) {
-					const breakText = eol === "crlf" ? "\r\n" : "\n";
-					if (content.startsWith(breakText, end)) end += breakText.length;
+					// The break that actually follows this match, not the file's
+					// majority style: a mixed-ending file can put a lone `\n` after a
+					// line whose neighbours are CRLF, and eating the wrong break
+					// leaves a blank line where the deletion should have closed up.
+					if (content.startsWith("\r\n", end)) end += 2;
+					else if (content.startsWith("\n", end)) end += 1;
 				}
 				parts.push(content.slice(cursor, index), newString);
 				cursor = end;
