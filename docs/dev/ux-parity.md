@@ -139,6 +139,20 @@ The first screen was three things stacked: the greeting, the startup notices, an
 
 The rule this wave adds: a startup fact is folded when it describes the machine and asks nothing before the first prompt; it keeps a row when it is the reason the next prompt will fail or need an approval.
 
+## The resize repaint wave (2026-11-13)
+
+On Windows Terminal, maximizing and then restoring the window left the interface drawn twice: the old frame's head — the greeting, the key list — stayed on screen and the new frame was printed beneath it. The host reflows its whole buffer on a width change, so the rows ink believes it wrote are not the rows that are there; its erase counts logical lines and stops above them. Ink handles only the direction it can see (a width decrease, erased by the old count), and neither count survives a reflow.
+
+| Area | What the user sees | Code |
+| --- | --- | --- |
+| Taking the screen back | Once the size settles, the viewport is erased in place with ED 0 from home and the frame is repainted. `2J` would push the viewport into Windows Terminal's scrollback; `3J` would delete the scrollback. | `packages/tui/src/components/REPL.tsx` (`ERASE_VIEWPORT`) |
+| A bounded reprint | Only the rows that were on the erased screen come back — the pane's last screenful — so the transcript above it is not copied into the scrollback a second time. The bound is the split pane's own walk, tail-first and bounded by the terminal's rows. | `packages/tui/src/components/SplitWorkspace.tsx` (`firstVisibleEntry`), `MessageList.tsx` (`paintFrom`) |
+| One per drag | A maximize-restore drag is a stream of resize events; the repaint runs once, 120 ms after the last width change, on the layout the user stopped at. | `packages/tui/src/components/REPL.tsx` (`RESIZE_SETTLE_MS`) |
+| What is not ours | A height-only change re-lays the frame out without re-wrapping the buffer, and ink's erase still matches. Nothing is erased or reprinted. | the effect's `windowColumns` dependency |
+| The bounded start is per-repaint | A deliberate wipe (Ctrl+L, a theme commit) writes `paintFrom: 0` with its `paint`, so the transcript comes back whole instead of one screenful of it. | `packages/tui/src/ui-state.ts` (`paintFrom`), `app.tsx` (`applyTheme`) |
+
+The rule this wave adds: a repaint whose screen was emptied by an external wipe reprints what the wipe took away, and no more — the scrollback above belongs to the terminal.
+
 ## Deliberately not built
 
 | Feature | Why not |
@@ -162,3 +176,4 @@ The rule this wave adds: a startup fact is folded when it describes the machine 
 - `packages/tui/test/components.test.tsx`: the answer's dot and two-column gutter, in the sealed row and in the streaming preview. `packages/tui/test/shortcuts.test.ts` and `packages/tui/test/prompt-input.test.tsx`: the mid-turn legend names steer or queue and never `Enter send`. `packages/coding-agent/test/credential-presence.test.ts` and `packages/coding-agent/test/chatgpt-commands.test.ts`: the post-sign-in notice appears exactly when the sign-in's wire is not the session's model.
 - `packages/tui/test/split-workspace.test.tsx`: the split's clamps, the line model's exact row count and width, streaming only at the tail, the window's entry names, and the drawn frame at 100 columns and at the minimum size — both panes, no overflow, no merged rows. `packages/tui/test/watch-panel.test.tsx`: `Ctrl+T` splits at 100×24, keeps the band at 80 columns, `PgUp`/`PgDn` page back and forward, Escape closes, an overlay stands the panes down and returns them, and a queue that would make them unreadable yields the split until it drains.
 - `packages/tui/test/welcome-banner.test.tsx`: the folded summary names each subject once, counts past the cap, draws under the greeting, and leaves with it. `packages/coding-agent/test/doctor.test.ts` holds the folded sentences in the report, and `packages/coding-agent/test/continue.test.ts` holds the catalog refresh in the startup summary rather than the transcript.
+- `packages/tui/test/repl-resize.test.tsx`: a width change erases the viewport and reprints exactly the screenful it took away, a drag repaints once, a height-only change repaints nothing, and Ctrl+L after a resize prints the whole transcript again. `packages/tui/test/theme-repaint.test.tsx` holds the theme commit's reset of the bounded start.

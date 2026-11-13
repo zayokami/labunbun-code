@@ -368,6 +368,18 @@ export interface UiState {
 	 * Only the identity of the value matters, which is why nothing resets it.
 	 */
 	paint: number;
+	/**
+	 * Where the repaint `paint` asked for starts, as an index into `entries`.
+	 *
+	 * Zero is the deliberate wipe — Ctrl+L, a theme commit — which empties the
+	 * screen and so reprints the whole transcript. A resize repaint is a
+	 * different shape: the terminal has reflowed the scrollback above the
+	 * frame, and only the screenful the pane was showing has to come back.
+	 * Printing past that would copy the transcript into the history a second
+	 * time. Every writer of `paint` writes this in the same store update, so
+	 * the two can never describe different repaints.
+	 */
+	paintFrom: number;
 }
 
 export interface PermissionDialogState {
@@ -543,6 +555,7 @@ export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiSt
 		vim,
 		emacs,
 		paint: 0,
+		paintFrom: 0,
 	};
 }
 

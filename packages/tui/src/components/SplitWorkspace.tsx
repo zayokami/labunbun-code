@@ -600,6 +600,30 @@ export function buildConversation(options: ConversationOptions): ConversationVie
 	return composeConversation(blocks, stream, Math.max(1, Math.floor(options.rows)), end);
 }
 
+/**
+ * The first entry a screen `rows` tall would show, at `width`.
+ *
+ * A resize repaint erases the screen the sealed rows were printed on and has to
+ * print them back — but only what was on it. The terminal reflowed everything
+ * above into its scrollback; reprinting the whole transcript would copy it into
+ * the history a second time. The walk is the transcript pane's own
+ * ({@link buildEntryBlocks}), so the repaint starts where a pane of this size
+ * would.
+ *
+ * The streaming answer and the rest of the live frame are not counted: they are
+ * redrawn under the reprint, not sealed into it.
+ */
+export function firstVisibleEntry(
+	entries: UiEntry[],
+	theme: Theme,
+	width: number,
+	rows: number,
+	liveOutputs?: Record<string, string>,
+): number {
+	const { blocks, end } = buildEntryBlocks({ entries, theme, width, rows, offset: 0, liveOutputs });
+	return blocks[0]?.index ?? end;
+}
+
 export function SplitWorkspace({
 	entries,
 	liveOutputs,

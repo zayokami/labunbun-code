@@ -275,6 +275,19 @@ describe("the screen is taken back before the reprint", () => {
 		expect(store.get().theme).toBe(DARK_THEME);
 	});
 
+	// A resize repaint prints one screenful above the frame; a theme change wipes
+	// the whole screen, so the reprint that follows must be the whole transcript
+	// again rather than that resize's bounded start.
+	test("committing a theme clears a resize's bounded start", () => {
+		const store = storeWith(errorThenAnswers);
+		store.set((s) => ({ ...s, paintFrom: 12 }));
+		const { stream } = fakeStdout();
+
+		applyTheme(store, LOUD, stream);
+
+		expect(store.get().paintFrom).toBe(0);
+	});
+
 	test("output that is not a terminal has no screen to take back", () => {
 		const store = storeWith(errorThenAnswers);
 		const { stream, writes } = fakeStdout(false);

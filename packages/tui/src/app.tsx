@@ -399,7 +399,9 @@ export function applyTheme(
 ): void {
 	if (store.get().theme === theme && store.get().themeCommit === theme) return;
 	if (stream.isTTY && sealCount(store.get().entries) > 0) stream.write(clearScreenSequence());
-	store.set((s) => ({ ...s, theme, themeCommit: theme }));
+	// The wipe takes the whole screen, so the reprint the remount does is the
+	// whole transcript — including any rows a resize repaint had bounded away.
+	store.set((s) => ({ ...s, theme, themeCommit: theme, paintFrom: 0 }));
 }
 
 /**

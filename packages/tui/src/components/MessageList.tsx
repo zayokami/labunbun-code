@@ -655,6 +655,7 @@ export function VirtualMessageList({
 	entries,
 	liveOutputs,
 	paint = 0,
+	paintFrom = 0,
 	paintedTheme,
 }: {
 	entries: UiEntry[];
@@ -666,6 +667,14 @@ export function VirtualMessageList({
 	 * wiped with Ctrl+L needs them printed again without the palette changing.
 	 */
 	paint?: number;
+	/**
+	 * The entry the repaint starts from (see `UiState.paintFrom`). Read only
+	 * with the `paint` it was set with: a resize erases the screenful above the
+	 * frame and prints exactly that screenful back, while everything above it
+	 * stays where the terminal reflowed it. Zero — the default, and what every
+	 * deliberate wipe writes — prints the transcript from the beginning.
+	 */
+	paintFrom?: number;
 	/**
 	 * The palette the sealed rows were last printed with, when that is not the
 	 * one now in effect — a theme preview in the picker. The remount key
@@ -683,18 +692,23 @@ export function VirtualMessageList({
 	const sealed = sealCount(entries);
 	const head = entries.slice(0, sealed);
 	const tail = entries.slice(sealed);
+	// A bounded repaint skips the rows the wipe under it never touched. The
+	// index is into `entries`, and `head` is its prefix, so the slice is the
+	// sealed rows from the first one that has to be printed again.
+	const skipped = Math.min(Math.max(0, paintFrom), head.length);
+	const printed = skipped === 0 ? head : head.slice(skipped);
 	// Only the tail needs previews: a pending tool blocks sealing, so every
 	// running tool is on this side of the boundary by construction.
 	const previews = previewTexts(tail, liveOutputs);
 
 	return (
 		<Box flexDirection="column">
-			<Static key={`${transcriptPaintKey(printedTheme)}:${paint}`} items={head}>
+			<Static key={`${transcriptPaintKey(printedTheme)}:${paint}`} items={printed}>
 				{(entry, i) => (
 					<EntryView
 						key={keyFor(entry)}
 						entry={entry}
-						spaced={entry.kind === "info" ? infoRunEnds(entries, i) : true}
+						spaced={entry.kind === "info" ? infoRunEnds(entries, skipped + i) : true}
 					/>
 				)}
 			</Static>

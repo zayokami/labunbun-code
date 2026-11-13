@@ -30,6 +30,7 @@ import { ShortcutOverlay } from "./ShortcutOverlay.tsx";
 import {
 	buildConversation,
 	displayWidth,
+	firstVisibleEntry,
 	SplitWorkspace,
 	scrollWorkspace,
 	splitBodySize,
@@ -182,6 +183,28 @@ export const CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";
 export function clearScreenSequence(onWindowsConsole = isConPTYHost()): string {
 	return onWindowsConsole ? CLEAR_SCREEN.replace("\x1b[3J", "") : CLEAR_SCREEN;
 }
+
+/**
+ * Erase the screen where it stands: home the cursor, then erase downward.
+ *
+ * The wipe a resize needs. `CLEAR_SCREEN` is the wrong one there: its 2J makes
+ * Windows Terminal push the viewport into the scrollback before clearing it,
+ * and its 3J deletes the scrollback outright, so the reprint that follows
+ * would either copy what it just saved or find nothing left above it. ED 0 from
+ * home replaces the visible screen in place and leaves everything above the
+ * viewport exactly where the terminal reflowed it.
+ */
+export const ERASE_VIEWPORT = "\x1b[1;1H\x1b[J";
+
+/**
+ * How long after the last width change the resize repaint runs.
+ *
+ * A drag is a stream of resize events, and each event reflows the terminal's
+ * buffer under a frame ink no longer matches. Repainting on every one would
+ * reprint a screenful per event; waiting for the size to settle repaints once,
+ * on the layout the user stopped at.
+ */
+export const RESIZE_SETTLE_MS = 120;
 
 /** Double-press window for the idle Ctrl+C exit confirmation. */
 export const CTRL_C_EXIT_WINDOW_MS = 2000;
@@ -406,6 +429,9 @@ export function REPL({
 	// Ctrl+L wipes the screen the sealed transcript was printed onto; this is the
 	// stamp that says so, and it rides along in the list's key.
 	const paint = useStore(store, (s) => s.paint);
+	// Where that repaint starts. Zero for a deliberate wipe; a resize writes the
+	// first entry a screenful would show, so the reprint stops there.
+	const paintFrom = useStore(store, (s) => s.paintFrom);
 	// The palette the sealed rows were printed with. Equal to the context theme
 	// except while the picker is previewing, when the transcript above still
 	// carries this one — and that is what the list's key reads, so reviewing
@@ -557,6 +583,74 @@ export function REPL({
 		[],
 	);
 
+	/**
+	 * A terminal reflow is not a repaint ink can do.
+	 *
+	 * Windows Terminal re-wraps its whole buffer when the width changes, so the
+	 * rows ink drew at the old width are not the rows it thinks it is looking
+	 * at. Its next erase counts the logical lines it last drew and stops above
+	 * them, leaving the head of the old frame — the greeting, the key list — on
+	 * screen while it prints the new frame underneath; on a restored window
+	 * every drag event can leave another copy. Ink only handles the direction it
+	 * can see (a width decrease, with an erase measured in the old lines), and
+	 * neither count survives a reflow.
+	 *
+	 * So take the screen back once the size settles: erase the viewport in place
+	 * and repaint the tail of the transcript, which is the part the erase takes
+	 * off the screen. Everything above the frame was reflowed by the terminal
+	 * and is still in its scrollback; printing it again would copy the transcript
+	 * into the history. A height change is not a reflow — ink's frame is
+	 * re-laid out and erased by a count that still matches — so it is not ours.
+	 */
+	const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const lastColumnsRef = useRef(windowColumns);
+	const windowColumnsRef = useRef(windowColumns);
+	const windowRowsRef = useRef(windowRows);
+	windowColumnsRef.current = windowColumns;
+	windowRowsRef.current = windowRows;
+	const liveOutputsRef = useRef(liveOutputs);
+	liveOutputsRef.current = liveOutputs;
+	// What the transcript list is fed, and whether the split owns the screen.
+	// Both are written later in the render pass (see `liveListEntries`), but the
+	// settle timer runs after it, so it reads the values of the frame it belongs
+	// to. The list can be a frozen snapshot while the split is up, and a repaint
+	// has to slice that array, not the live one.
+	const listEntriesRef = useRef<UiEntry[]>(entries);
+	const splitActiveRef = useRef(false);
+	useEffect(() => {
+		const previous = lastColumnsRef.current;
+		lastColumnsRef.current = windowColumns;
+		if (previous === windowColumns || !isTTYStream(stdout)) return;
+		if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+		resizeTimerRef.current = setTimeout(() => {
+			resizeTimerRef.current = null;
+			if (!isTTYStream(stdout)) return;
+			// Through ink's writer: it takes its own frame down first and brings
+			// it back after the clear, so the repaint below starts from a frame
+			// ink knows is gone rather than skipping as unchanged.
+			writeStdout(ERASE_VIEWPORT);
+			const state = store.get();
+			const columns = windowColumnsRef.current;
+			const rows = windowRowsRef.current;
+			const list = listEntriesRef.current;
+			// A split owns the screen: the panes are part of the frame, which the
+			// store update redraws, and the transcript behind them is a frozen
+			// snapshot whose screenful is not what was erased. Reprinting it would
+			// push history between the scrollback and the panes.
+			const from =
+				splitActiveRef.current || columns === undefined || rows === undefined
+					? list.length
+					: firstVisibleEntry(list, state.theme, columns, rows, liveOutputsRef.current);
+			store.set((s) => ({ ...s, paint: s.paint + 1, paintFrom: from }));
+		}, RESIZE_SETTLE_MS);
+		return () => {
+			if (resizeTimerRef.current) {
+				clearTimeout(resizeTimerRef.current);
+				resizeTimerRef.current = null;
+			}
+		};
+	}, [windowColumns, stdout, store, writeStdout]);
+
 	// Desktop notifications, on the two edges where the user is likely to be
 	// looking at another window: a run ending, and a dialog opening. Coalescing
 	// keeps a completion from burying the approval request that preceded it.
@@ -666,20 +760,52 @@ export function REPL({
 	 * this run's own `agent_end`, which is the event that means the session is
 	 * free again. If it was already free (an abort a moment earlier), there is
 	 * nothing to wait for.
+	 *
+	 * One pending send per session, and the second Esc joins it. Two listeners on
+	 * the same `agent_end` would both fire: the first `prompt()` starts a run, the
+	 * second one throws "already running" — at a fire-and-forget call site with no
+	 * process-wide handler, that rejection takes the app down with work still
+	 * running.
 	 */
+	const pendingInterruptSendRef = useRef<{ text: string } | null>(null);
 	const interruptAndSend = useCallback(
 		(text: string) => {
 			const session = getSession();
 			store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user" as const, text, steered: true }] }));
-			session.abort();
-			if (!session.isRunning) {
-				void session.prompt(text);
+			const reportFailedSend = (error: unknown): void => {
+				store.set((s) => ({
+					...s,
+					entries: [
+						...s.entries,
+						{
+							kind: "info" as const,
+							text: `Could not send that message: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+				}));
+			};
+			const pending = pendingInterruptSendRef.current;
+			if (pending) {
+				// Both lines were typed before the run let go; they were separate
+				// submissions, and one prompt carrying both is still both of them.
+				pending.text = `${pending.text}\n${text}`;
 				return;
 			}
+			session.abort();
+			if (!session.isRunning) {
+				void session.prompt(text).catch(reportFailedSend);
+				return;
+			}
+			const send = { text };
+			pendingInterruptSendRef.current = send;
 			const unsubscribe = session.on((event) => {
 				if (event.type !== "agent_end") return;
 				unsubscribe();
-				void session.prompt(text);
+				pendingInterruptSendRef.current = null;
+				// Another path may have started a run while this abort unwound. The
+				// message still belongs after that run, not inside it.
+				if (session.isRunning) session.followUp(send.text);
+				else void session.prompt(send.text).catch(reportFailedSend);
 			});
 		},
 		[getSession, store],
@@ -838,6 +964,8 @@ export function REPL({
 	const liveEntriesRef = useRef(entries);
 	if (!splitActive) liveEntriesRef.current = entries;
 	const liveListEntries = splitActive ? liveEntriesRef.current : entries;
+	listEntriesRef.current = liveListEntries;
+	splitActiveRef.current = splitActive;
 
 	useInput((input, key) => {
 		// The key list is dismissed by either key, and while it is up the prompt is
@@ -1004,7 +1132,9 @@ export function REPL({
 			// normally the committed one, but the picker can be previewing one —
 			// so the stamp of what the sealed rows were printed with moves with
 			// the paint. At rest it is already this value and the write is a no-op.
-			store.set((s) => ({ ...s, paint: s.paint + 1, themeCommit: s.theme }));
+			// The wipe emptied the screen, so the reprint under that key is the whole
+			// transcript — a resize's bounded start no longer applies.
+			store.set((s) => ({ ...s, paint: s.paint + 1, paintFrom: 0, themeCommit: s.theme }));
 			return;
 		}
 		// A dialog owns Esc while one is open: there it means "deny this request"
@@ -1031,6 +1161,11 @@ export function REPL({
 				getSession().abort();
 				return;
 			}
+			// The same command that Esc cancels can hold the work while the
+			// session is idle. Without this press reaching it, Ctrl+C had only
+			// two readings -- abort a turn that is not there, or start the exit
+			// countdown while a compaction or a sign-in was still going.
+			if (onCancelCommand?.()) return;
 			// Idle exit asks for a second press: one stray Ctrl+C must not throw
 			// away a half-typed prompt or the session view.
 			const now = Date.now();
@@ -1148,7 +1283,7 @@ export function REPL({
 				// □ is Ctrl+L, character for character — including the reason it goes
 				// through ink's writer rather than `process.stdout`.
 				if (isTTYStream(stdout)) writeStdout(clearScreenSequence());
-				store.set((s) => ({ ...s, paint: s.paint + 1 }));
+				store.set((s) => ({ ...s, paint: s.paint + 1, paintFrom: 0 }));
 				return true;
 			case "cancel":
 			case "interrupt":
@@ -1325,6 +1460,7 @@ export function REPL({
 						entries={liveListEntries}
 						liveOutputs={liveOutputs}
 						paint={paint}
+						paintFrom={paintFrom}
 						paintedTheme={themeCommit}
 					/>
 					{splitActive ? null : <LiveStreamingPreview store={store} />}
