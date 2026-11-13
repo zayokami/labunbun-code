@@ -140,6 +140,10 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 				files = await walkProjectFiles(root, ops, {
 					pattern: input.include ? new Bun.Glob(input.include) : undefined,
 					respectGitignore: true,
+					// Grep reads every file it is given and never promises an order:
+					// the mtime sort would pay one `stat` per match before the first
+					// byte is read, and the result order it buys is discarded.
+					sortByMtime: false,
 					onUnreadableDirectory: () => {
 						skippedDirectories++;
 					},
