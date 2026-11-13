@@ -42,6 +42,18 @@ describe("flags that cannot mean anything are refused, not dropped", () => {
 		}
 		expect(errors.join("\n")).toContain("Invalid --settings");
 	});
+
+	test("--output-format and --max-turns are refused when no one-shot run asked for them", async () => {
+		// Both used to parse and then go unread, so the REPL silently ignored a
+		// cap or a format the user had just named.
+		expect(await main(["--output-format", "json"], { home })).toBe(2);
+		expect(await main(["--max-turns", "3"], { home })).toBe(2);
+	});
+
+	test("a positive --max-turns parses as a number", () => {
+		expect(parseArgs(["--max-turns", "5"])).toMatchObject({ maxTurns: 5 });
+		expect(parseArgs(["--output-format", "stream-json"])).toMatchObject({ outputFormat: "stream-json" });
+	});
 });
 
 describe("headless automation flags", () => {

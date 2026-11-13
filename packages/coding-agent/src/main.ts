@@ -199,9 +199,19 @@ export function parseArgs(argv: string[]): CliArgs {
 			case "--network":
 				args.network = rest[++i] ?? null;
 				break;
-			case "--max-turns":
-				args.maxTurns = Number(rest[++i]) || null;
+			case "--max-turns": {
+				// `Number(x) || null` turned every typo into "unbounded", which is
+				// the one value a user naming a cap cannot have meant. A missing
+				// value is the same error, not the default.
+				const raw = rest[++i];
+				const value = raw === undefined ? Number.NaN : Number(raw);
+				if (!Number.isInteger(value) || value < 1) {
+					console.error(`Invalid --max-turns value: ${raw ?? "(missing)"} (expected a positive integer)`);
+					process.exit(2);
+				}
+				args.maxTurns = value;
 				break;
+			}
 			case "--no-session":
 				args.noSession = true;
 				break;
@@ -617,6 +627,16 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	}
 	if (args.outputLastMessage !== null) {
 		console.error("--output-last-message works in headless mode only; a one-shot run has one final answer");
+		return 2;
+	}
+	// These two were parsed and then never read on this path: the REPL renders
+	// its own way and a user watching it is the one stopping the run.
+	if (args.outputFormat !== null) {
+		console.error("--output-format works in headless mode only; the REPL has its own rendering");
+		return 2;
+	}
+	if (args.maxTurns !== null) {
+		console.error("--max-turns works in headless mode only; an interactive run ends when you stop it");
 		return 2;
 	}
 
