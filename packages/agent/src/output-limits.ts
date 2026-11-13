@@ -50,8 +50,17 @@ export function hasSpillHeader(text: string): boolean {
 }
 
 // Long-form design notes: docs/dev/output-limits.md
-/** The notice a cut leaves at the point where it cut, carrying how many characters are not shown. */
-const CUT_MARKER = /\n\.\.\. \[truncated (\d+) chars of output\](?:\n|$)/;
+/**
+ * The notice a cut leaves at the point where it cut, carrying how many
+ * characters are not shown.
+ *
+ * The leading break is optional at the very start because a cut with an empty
+ * head has nothing to put before the notice: `... [truncated N chars]` opens
+ * the text. Requiring the `\n` there made that result invisible to this same
+ * pattern on a second pass, so its `omitted` count was lost and the next cut
+ * reported the notice itself as missing output.
+ */
+const CUT_MARKER = /(?:^|\n)\.\.\. \[truncated (\d+) chars of output\](?:\n|$)/;
 
 // Long-form design notes: docs/dev/output-limits.md
 /** Write that notice — one line, no newlines of its own. */

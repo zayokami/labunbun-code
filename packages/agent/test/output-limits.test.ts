@@ -236,6 +236,23 @@ describe("cutText", () => {
 		const text = cutText("f".repeat(500), 0);
 		expect(text).toBe("... [truncated 500 chars of output]");
 	});
+
+	test("a headless notice is read back on a second cut instead of being counted as output", () => {
+		// The zero-budget result opens with the notice: there is no line break in
+		// front of it for the pattern to anchor on. If the same pattern cannot see
+		// that shape again, the second cut reports the notice's own characters as
+		// missing output and the count no longer describes the original text.
+		const once = cutText("f".repeat(500), 0);
+		expect(omittedOf(once)).toBe(500);
+		expect(cutText(once, 0)).toBe(once);
+	});
+
+	test("a headless notice under a spill pointer survives a second cut", () => {
+		const { writer } = keeper();
+		const once = cutText("g".repeat(500), 0, writer, request);
+		expect(once).toBe("[full output: 500 chars → /spill/Bash-call_1.txt]\n... [truncated 500 chars of output]");
+		expect(cutText(once, 0, writer, request)).toBe(once);
+	});
 });
 
 describe("cutContent", () => {
