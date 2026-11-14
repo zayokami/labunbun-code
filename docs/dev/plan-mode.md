@@ -156,7 +156,7 @@ The ACP host's task board is part of the same tool set assembly as the other two
 
 `settings.roles.plan` names the model the planning cycle runs on (`packages/coding-agent/src/model-roles.ts:9`). The `PlanModelSwap` contract is read at the call: `planModel()` returns the resolved seat or `undefined`, and `undefined` means the session keeps its model (`plan-mode.ts:101-118`).
 
-- **Model-driven entry swaps.** If the seat resolves and differs from the session model, `enterPlanMode` sets it and calls `onModelSwapped` (`plan-mode.ts:198-202`). The host rebuilds everything that binds to a model — the compaction wiring, the threshold, and the status row (`interactive.ts:1382-1399`).
+- **Model-driven entry swaps.** If the seat resolves and differs from the session model, `enterPlanMode` sets it and calls `onModelSwapped` (`plan-mode.ts:198-202`). The host rebuilds everything that binds to a model — the compaction wiring, the threshold, the status row, and the system prompt, because its full-or-lean body and `# Model guidance` are chosen from the model (`interactive.ts:1579-1592`).
 - **Approval restores, with a guard.** The previous model is restored only when the seat is what is in effect: a `/model` switch made mid-plan is the user's own choice and outranks the restore (`plan-mode.ts:271-285`).
 - **No persistence.** Entering and leaving plan mode is a cycle, not a model choice, so nothing is written to the user's settings (`plan-mode.ts:109-111`).
 - **The user door does not swap.** `/mode plan` typed at the prompt sets the mode without starting a planning task, and it keeps the session's model; the seat is for the cycle the tools drive (`plan-mode.ts:111-113`; `interactive.ts:4465-4493`).
@@ -168,6 +168,7 @@ The ACP host's task board is part of the same tool set assembly as the other two
 - `packages/coding-agent/test/plan-snapshot.test.ts` covers the snapshot shape, the checked read, the de-duplication, and the injection cap (`plan-snapshot.test.ts:182-189`).
 - `packages/coding-agent/test/task-nudges.test.ts` pins the thresholds and the completion ceiling (`task-nudges.test.ts:94-227`).
 - `packages/coding-agent/test/plan-model-routing.test.ts` holds the plan seat's swap and restore.
+- `packages/coding-agent/test/interactive-roles.test.ts` runs the REPL and asserts that entering plan mode moves `# Model guidance` to the plan seat's model, not merely the requests it receives.
 - `packages/coding-agent/test/plan-mode-allowlist.test.ts` holds the plan gate against each tool's own `isReadOnly`, so the denial list and the declarations cannot drift (`plan-mode-allowlist.test.ts:1-20`).
 
 ## Known traps

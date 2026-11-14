@@ -94,6 +94,70 @@ async function startup(home: string, cwd: string, options: { modelRef?: string; 
 	};
 }
 
+/**
+ * One prompt whose first turn enters plan mode, so the plan seat swaps in
+ * between two requests. Returns the system prompt each request carried, which
+ * is where `# Model guidance` lives.
+ *
+ * The swap happens inside a tool call, not at a `/model` command, so it takes
+ * the `onModelSwapped` path rather than `switchModel`. That path already
+ * rebuilt compaction and the status row; this harness is what says whether the
+ * prompt moved with them.
+ */
+async function startupWithPlan(home: string, cwd: string) {
+	const script = `
+		import { mock } from "bun:test";
+		import * as ai from "@labunbun/ai";
+		import { fauxProvider } from "@labunbun/ai";
+		import * as tui from "@labunbun/tui";
+		const requests = [];
+		const faux = fauxProvider([
+			{ toolCalls: [{ name: "EnterPlanMode", arguments: {} }] },
+			{ text: "planned" },
+		]);
+		mock.module("@labunbun/ai", () => ({
+			...ai,
+			resolveApiKey: () => "local-test-key",
+			refreshModelCatalog: async () => null,
+			createDefaultStreamFn: () => (model, context) => {
+				requests.push({ model: \`\${model.provider}/\${model.id}\`, systemPrompt: context.systemPrompt });
+				return faux.streamFn(model, context);
+			}
+		}));
+		mock.module("@labunbun/tui", () => ({
+			...tui,
+			mountRepl: ({ session }) => ({
+				setTasks() {}, setContextInfo() {}, setBackgroundShells() {},
+				store: { set() {} },
+				waitUntilExit: async () => { await session.prompt("plan the change"); }
+			})
+		}));
+		const { runInteractive } = await import("./src/interactive.ts");
+		const exitCode = await runInteractive(${JSON.stringify({ cwd, theme: "dark" })});
+		console.log(JSON.stringify({ exitCode, requests }));
+	`;
+	const proc = Bun.spawn([process.execPath, "--eval", script], {
+		cwd: join(import.meta.dir, ".."),
+		env: { ...process.env, HOME: home, USERPROFILE: home },
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	expect(exitCode, stderr).toBe(0);
+	return {
+		...(JSON.parse(stdout.trim()) as {
+			exitCode: number;
+			requests: Array<{ model: string; systemPrompt: string }>;
+		}),
+		stderr,
+	};
+}
+
 describe("settings.roles at REPL startup", () => {
 	test("roles.main answers when neither --model nor settings.model did", async () => {
 		const { home, cwd } = fixture({
@@ -154,5 +218,30 @@ describe("settings.roles at REPL startup", () => {
 		const result = await startup(home, cwd, { modelRef: "anthropic/claude-haiku-4-5", failFirst: 1 });
 
 		expect(result.requests.map((request) => request.model)).toEqual(["claude-haiku-4-5", "claude-opus-4-6"]);
+	}, 30_000);
+
+	test("the plan seat's swap moves # Model guidance with it", async () => {
+		// Entering plan mode swaps the model inside a tool call, not through
+		// `/model`. The old path rebuilt compaction and the status row but not the
+		// prompt, so the planning turn ran on the plan model with the main model's
+		// guidance section — a section that names the wrong model and tunes tool
+		// and edit shapes for it.
+		const { home, cwd } = fixture({
+			modelDiscovery: false,
+			roles: {
+				main: { model: "anthropic/claude-sonnet-5" },
+				plan: { model: "anthropic/claude-opus-4-6" },
+			},
+		});
+
+		const result = await startupWithPlan(home, cwd);
+
+		expect(result.requests.map((request) => request.model)).toEqual([
+			"anthropic/claude-sonnet-5",
+			"anthropic/claude-opus-4-6",
+		]);
+		expect(result.requests[0]?.systemPrompt).toContain("Current model: `anthropic/claude-sonnet-5`");
+		expect(result.requests[1]?.systemPrompt).toContain("Current model: `anthropic/claude-opus-4-6`");
+		expect(result.requests[1]?.systemPrompt).not.toContain("Current model: `anthropic/claude-sonnet-5`");
 	}, 30_000);
 });

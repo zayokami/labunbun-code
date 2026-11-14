@@ -1582,6 +1582,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					contextWindow: next.contextWindow,
 					maxOutputTokens: next.maxOutputTokens,
 				});
+				// The prompt carries the model's profile — the full or lean body and
+				// `# Model guidance` — so a swap that skips this leaves the plan seat
+				// reading the main model's rules (and the reverse on exit). The
+				// conversation is the same one; only the model that answers changed.
+				sessionRef?.setSystemPrompt(buildPrompt(memoryText, next));
 				handle?.setModelName(`${next.provider}/${next.id}`);
 				if (sessionRef) refreshContextInfo(sessionRef);
 			},
