@@ -465,6 +465,11 @@ describe("the autonomy section", () => {
 			expect(prompt, `${level} lost the how/what split`).toContain("- The user owns the what:");
 			expect(prompt, `${level} lost the evidence rule`).toContain("- Answer before asking.");
 			expect(prompt, `${level} lost the ask rule`).toContain("- Ask once, well.");
+			// One yes is not a standing grant: the failure this guards is the agent
+			// treating an approval for one command as permission for the next.
+			expect(prompt, `${level} lost the approval-scope rule`).toContain(
+				"- An answer covers the action it was asked about",
+			);
 			// A denial is a limit, not a step to route around: this sentence is what
 			// keeps "be autonomous" from reading as "find another tool".
 			expect(prompt, `${level} lost the refusal rule`).toContain(

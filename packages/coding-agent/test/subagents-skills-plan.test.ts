@@ -105,7 +105,14 @@ describe("Task tool (subagents)", () => {
 		const prompt = taskTool.prompt ?? "";
 		expect(prompt).toContain("costs a separate context window");
 		expect(prompt).toContain("Do not delegate a quick lookup or a single-file edit");
-		expect(prompt).toContain("State the goal, the constraints, and what the report must contain");
+		expect(prompt).toContain("State the goal, the constraints, the files or area the worker owns");
+		expect(prompt).toContain("the output format you need, and what evidence counts as done");
+		// Parallel writers share one tree, so a file owned by two workers can lose
+		// one edit without either side seeing it happen.
+		expect(prompt).toContain("give each a disjoint set of files");
+		// The parent owns the result: a worker's report is evidence to check, not
+		// a verdict to forward.
+		expect(prompt).toContain("Treat a report as a claim");
 	});
 
 	test("runs a nested session and returns its final report", async () => {
@@ -397,10 +404,14 @@ describe("Task tool (subagents)", () => {
 				onUpdate: () => {},
 			},
 		);
-		expect(subFaux.receivedContexts[0]?.systemPrompt).toBe("You write terse commit messages.");
+		const systemPrompt = subFaux.receivedContexts[0]?.systemPrompt ?? "";
+		expect(systemPrompt.startsWith("You write terse commit messages.")).toBe(true);
+		// The body is the role; the working contract is the harness's and follows it.
+		expect(systemPrompt).toContain("# Working as a subagent");
+		expect(systemPrompt).toContain("No user is reachable from this context");
 	});
 
-	test("systemPromptFor still overrides the definition body", async () => {
+	test("systemPromptFor overrides the role, and the working contract still applies", async () => {
 		const subFaux = fauxProvider([{ text: "done" }]);
 		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
@@ -420,7 +431,13 @@ describe("Task tool (subagents)", () => {
 				onUpdate: () => {},
 			},
 		);
-		expect(subFaux.receivedContexts[0]?.systemPrompt).toBe("OVERRIDE");
+		const systemPrompt = subFaux.receivedContexts[0]?.systemPrompt ?? "";
+		expect(systemPrompt.startsWith("OVERRIDE")).toBe(true);
+		// A host that supplies the whole role prompt owns the role, not the
+		// harness contract: the worker is still unreachable-user, still bounded by
+		// the permission engine, still required to report evidence.
+		expect(systemPrompt).toContain("# Working as a subagent");
+		expect(systemPrompt).toContain("Permission prompts, sandbox limits and deny rules apply here unchanged");
 	});
 
 	// Both hosts (interactive.ts and headless.ts) build their `systemPromptFor`

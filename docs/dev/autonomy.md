@@ -122,9 +122,14 @@ it into the flag settings object, so all three hosts read one value and none of
 them needs to know the flag exists.
 
 Subagents do not carry the section either. They are spawned without
-`AskUserQuestion`, so they have no decision to ask about; their report back to
-the parent is the escalation path. Their permission mode, sandbox, network, and
-YOLO flag still follow the root session, unchanged by this axis.
+`AskUserQuestion`, so they have no decision to ask about, and their report back
+to the parent is the escalation path. The spawner appends a
+`# Working as a subagent` contract instead: no user is reachable, reversible
+steps are the worker's to decide, assumptions and blockers belong in the
+report, the permission boundary is unchanged, and the report has to name the
+check that was run. A host-supplied `systemPromptFor` replaces the role, not
+that contract. Their permission mode, sandbox, network, and YOLO flag still
+follow the root session, unchanged by this axis.
 
 ## What this is not
 

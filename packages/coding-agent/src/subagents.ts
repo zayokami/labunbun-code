@@ -67,6 +67,36 @@ export function agentSystemPrompt(definition: AgentDefinition): string {
 	);
 }
 
+/**
+ * The rules every worker runs under, whichever definition it was spawned as.
+ *
+ * A subagent gets the definition's body and the shared environment, not the
+ * parent's `# Autonomy` or `# Doing tasks` sections — a deliberate split, since
+ * a worker's output is a report to the parent rather than a conversation with
+ * the user. Without this block, the one thing its context never says is that no
+ * user is reachable: a model with an `AskUserQuestion` habit would either stall
+ * or hand the decision back in prose that nothing reads as a question.
+ *
+ * It also repeats the two claims the parent's prompt makes, because a worker
+ * does not inherit them: the permission boundary is unchanged here, and a
+ * report has to rest on evidence the parent can check. The last line is the
+ * contract that makes the report usable — findings, verification, and decisions
+ * the parent still owes.
+ *
+ * Appended by the spawner rather than folded into a host's prompt composition,
+ * because this is a property of being a subagent and not of any one host: a
+ * custom `systemPromptFor` still gets it.
+ */
+const SUBAGENT_WORKING_RULES = [
+	"",
+	"# Working as a subagent",
+	"- No user is reachable from this context. Decide the reversible steps yourself and state each assumption in your report; if a decision is genuinely the user's, report it to the parent instead of asking.",
+	"- Permission prompts, sandbox limits and deny rules apply here unchanged. A denial is a blocker to report, not a route to try another tool.",
+	"- Stay inside the task and the files it names. Do not widen scope, edit a file another worker owns, or start work the task did not ask for.",
+	"- If you changed code, run a real check and put its result in the report. A report without evidence is a claim, not a result.",
+	"- Close with what you found or changed, how it was checked, and anything the parent must decide.",
+].join("\n");
+
 /** Split a frontmatter `.md` into its key/value header and its markdown body. */
 export function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
 	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
@@ -714,6 +744,10 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		const runCwd = run?.cwd ?? scope.cwd;
 		const systemPrompt = [
 			ctx.systemPromptFor?.(definition, model) ?? agentSystemPrompt(definition),
+			// Every spawn, including one whose caller supplied a whole prompt: the
+			// contract is about being a worker, and a caller that replaces the role
+			// does not make a user reachable.
+			SUBAGENT_WORKING_RULES,
 			run?.systemPromptSuffix,
 			// Appended even when the wire carries the schema natively: the request
 			// field says what the shape must be, and this says that the answer is
@@ -934,7 +968,9 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		prompt:
 			"- A subagent costs a separate context window and its own tokens; delegate to parallelise or to keep context-heavy work out of this conversation, not by default.\n" +
 			"- Do not delegate a quick lookup or a single-file edit; doing it directly is faster and cheaper.\n" +
-			"- Always include a complete, self-contained prompt — subagents don't see this conversation. State the goal, the constraints, and what the report must contain.\n" +
+			"- Always include a complete, self-contained prompt — subagents don't see this conversation. State the goal, the constraints, the files or area the worker owns, the output format you need, and what evidence counts as done.\n" +
+			"- When you send several tasks at once, give each a disjoint set of files. Two writers on one file race, and neither can see the other's edit.\n" +
+			"- Treat a report as a claim: read its diff or rerun its check before you rely on it.\n" +
 			"- Multiple Task calls run concurrently when safe.\n" +
 			"- Every result ends with a [subagent id: …] line — the handle SendMessage and TaskStop take.",
 		isConcurrencySafe: () => true,

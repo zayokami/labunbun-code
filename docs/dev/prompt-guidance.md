@@ -99,6 +99,16 @@ moves the line without moving any permission gate. The permission engine still
 owns what may run; this section only says what to ask about. The long form is
 [autonomy](autonomy.md).
 
+**An approval is not a standing order.** The documented autonomy failure mode is
+the agent reading a yes to one action as permission for every later action of
+the same shape. `# Autonomy` now says an answer covers the action it was asked
+about, not the class, so the next request is decided by the same test rather
+than by the previous answer. Delegation got the same treatment from the other
+end: the Task tool asks for the worker's file ownership and output format up
+front, warns against two writers on one file, and tells the parent to check a
+report before relying on it. A worker is told that no user is reachable and
+that its evidence belongs in the report.
+
 The short prompt for small models and tiny windows keeps the same hard rules in
 compressed form, since it is a separate body and would otherwise drift. It gained
 the regression-test exception, the act-on-a-change line, the red-before-green
