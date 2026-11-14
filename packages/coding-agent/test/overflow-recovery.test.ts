@@ -276,11 +276,13 @@ describe("recovering from a refusal for size", () => {
 			JSON.stringify([
 				// A reply big enough that the next turn's estimate crosses the
 				// compaction threshold (window 200k → threshold 178,808) while staying
-				// under the hard limit once the tool schemas are added (197,000). The
-				// schemas count toward the estimate, so an anchor close to the window
-				// would put the request past the hard limit — and there a failed
-				// summary ends the run instead of being retried to the breaker.
-				{ text: "first answer", usage: { input: 181_000, output: 10 } },
+				// under the hard limit once the system prompt and tool schemas are
+				// added (197,000). Both are counted on top of the anchored transcript,
+				// so the anchor sits just above the threshold rather than close to the
+				// window: an anchor closer to the limit puts the request past it — and
+				// there a failed summary ends the run instead of being retried to the
+				// breaker, which is why this number leaves room for a prompt that grows.
+				{ text: "first answer", usage: { input: 179_500, output: 10 } },
 				failure,
 				{ text: "second answer" },
 				failure,

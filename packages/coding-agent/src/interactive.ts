@@ -11,6 +11,9 @@ import {
 	type ActivityRange,
 	type AgentDeps,
 	AgentSession,
+	AUTONOMY_CHOICES,
+	AUTONOMY_LEVELS,
+	type AutonomyLevel,
 	type CompactionManager,
 	type CompactionTrigger,
 	collectActivity,
@@ -18,11 +21,14 @@ import {
 	compactionThreshold,
 	contextBreakdown,
 	createTaskCalibration,
+	DEFAULT_AUTONOMY_LEVEL,
 	DEFAULT_MODE_CHOICE,
+	describeAutonomyLevel,
 	describeModeChoice,
 	describeNetworkPolicy,
 	estimateContextUsage,
 	evaluatePermissions,
+	findAutonomyChoice,
 	findModeChoice,
 	formatRetryNotice,
 	MODE_CHOICES,
@@ -1630,12 +1636,19 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// project skill has to reach both readers without a restart.
 	let skillsBlock = skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow));
 	/**
+	 * How much of a decision this session owns. Read by `buildPrompt` at every
+	 * rebuild, so `/autonomy` changes the next request without restarting the
+	 * process; the startup value comes from the settings tier that won.
+	 */
+	let autonomyLevel: AutonomyLevel = settings.autonomy ?? DEFAULT_AUTONOMY_LEVEL;
+	/**
 	 * The system prompt for a given memory text. Built once at startup, then
 	 * rebuilt by the `#` shortcut after it re-reads the memory files: the note
 	 * has to be in the next request, not the next process, because the output
-	 * already tells the user it was remembered. `/model` and `/map-refresh`
-	 * rebuild through the same function, with the same options as the startup
-	 * build — so only the section each one changed differs from the last prompt.
+	 * already tells the user it was remembered. `/model`, `/map-refresh` and
+	 * `/autonomy` rebuild through the same function, with the same options as the
+	 * startup build — so only the section each one changed differs from the last
+	 * prompt.
 	 */
 	const buildPrompt = (currentMemory: string, activeModel: Model = sessionRef?.model ?? model) => {
 		// The style files are loaded through the same trust gate as the rest of
@@ -1651,6 +1664,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			isTTY: true,
 			memory: currentMemory,
 			language: settings.language,
+			autonomy: autonomyLevel,
 			outputStyle: resolveOutputStyle(settings.outputStyle, styles.styles)?.content,
 			skills: skillsBlock,
 			model: activeModel,
@@ -2277,6 +2291,34 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		pushInfo(handle, `Thinking level: ${level} — takes effect on the next request${shadowed ? ` (${shadowed})` : ""}`);
 	}
 
+	/**
+	 * Move the session's autonomy level (/autonomy): the prompt's `# Autonomy`
+	 * section changes on the next request, and the choice goes to the user's
+	 * settings file the way `/think` persists its own.
+	 *
+	 * The live session moves even when the write fails. A level is a prompt
+	 * posture, not a permission: keeping the old posture because a file could not
+	 * be saved would make the next turn ask questions the user just told it not
+	 * to. The failure is reported, and only persistence is lost.
+	 */
+	function setAutonomyLevel(level: AutonomyLevel): void {
+		autonomyLevel = level;
+		// Rebuilt here rather than at the next request: the session's prompt is
+		// captured per request, and nothing else would replace this one.
+		sessionRef?.setSystemPrompt(buildPrompt(memoryText));
+		try {
+			writeUserSettingsPatch({ autonomy: level }, home);
+		} catch (error) {
+			pushInfo(
+				handle,
+				`Autonomy: ${level} — takes effect now, but not saved: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		const shadowed = shadowedChoiceNotice(loadedSettings, "autonomy", (path) => shortenHome(path, home));
+		pushInfo(handle, `Autonomy: ${level} — takes effect on the next request${shadowed ? ` (${shadowed})` : ""}`);
+	}
+
 	// ---- the band (/beetle) ----
 	// The band's setTools rewrites go through the latch (see its doc in
 	// beetle-commands.ts): armed where the change happens, registered on the
@@ -2712,6 +2754,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				switchModel,
 				thinkingLevel: () => thinkingLevel,
 				setThinkingLevel,
+				autonomy: () => autonomyLevel,
+				setAutonomy: setAutonomyLevel,
 				beetle: beetleSurface,
 			}),
 		// Every exit request the REPL serves -- /exit, /quit, the idle double
@@ -3537,6 +3581,20 @@ interface AppCommandContext {
 	baseRules: PermissionRule[];
 	sessionRules: PermissionRule[];
 	/**
+	 * How much of a decision the session owns (`settings.autonomy`).
+	 *
+	 * Optional because a context assembled by hand has no prompt builder behind
+	 * it: `/autonomy` has to answer in a test or an embedder rather than throw,
+	 * and a value nothing would read is not worth changing.
+	 */
+	autonomy?(): AutonomyLevel;
+	/**
+	 * Move the autonomy level, rebuild the prompt, and persist the choice.
+	 * Supplied by `runInteractive`; `/autonomy` reports its absence rather than
+	 * pretending the change took.
+	 */
+	setAutonomy?(level: AutonomyLevel): void;
+	/**
 	 * Record the session's policy — the rules and the three axes — in the session
 	 * file. Called by `/mode`, which is the one command that moves the axes.
 	 *
@@ -3890,6 +3948,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/activity", "Show a heatmap of the days you used this, and the streak: /activity [7d|30d|all]"],
 		["/agents", "List agent definitions, and load this project's: /agents [approve]"],
 		["/autocompact", "Show or set automatic compaction: /autocompact [on|off|<percent>]"],
+		["/autonomy", "Show or set how much the agent decides on its own: /autonomy [guided|balanced|autonomous]"],
 		[
 			"/beetle",
 			"Run a four-agent band that works until stopped: /beetle [<task>|status|off|models|say <member> <text>]",
@@ -4590,6 +4649,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			}
 			return true;
 		}
+		case "/autonomy":
+			applyAutonomyCommand(ctx, text);
+			return true;
 		case "/status": {
 			if (!session) return true;
 			const store = ctx.handle?.store;
@@ -4626,6 +4688,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					// the reason a bill is what it is, and the two are read together.
 					["Cache", ctx.cache?.statusLine() ?? "not tracked"],
 					["Thinking", describeThinkingLevel(ctx.thinkingLevel())],
+					// Beside thinking because both tune how the next request is made;
+					// this one says who decides, and is absent only on a host whose
+					// context has no prompt builder to change.
+					...(ctx.autonomy ? ([["Autonomy", describeAutonomyLevel(ctx.autonomy())]] as Array<[string, string]>) : []),
 					["Theme", `${ctx.theme.theme.name} · ${describeEditor(editor)}`],
 					[
 						"MCP",
@@ -5990,6 +6056,55 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		default:
 			return false;
 	}
+}
+
+/**
+ * `/autonomy`: show or move the decision-posture level.
+ *
+ * No argument reports the current level and the three alternatives rather than
+ * opening a picker. Unlike `/mode`'s four pairs, these are three ids a user can
+ * type, and the useful part of the answer is the sentence describing what the
+ * current level means — a picker would hide that behind a keystroke.
+ *
+ * The line is careful to say what the command does not change. `/autonomy` moves
+ * a prompt clause; it never touches the permission engine, the sandbox, or a
+ * deny rule, and a user raising it should not read that as granting access.
+ */
+function applyAutonomyCommand(ctx: AppCommandContext, text: string): void {
+	const arg = text.split(/\s+/)[1]?.toLowerCase();
+	const current = ctx.autonomy?.();
+	if (!arg) {
+		if (!current) {
+			pushInfo(ctx.handle, `Autonomy is not available in this host. Levels: ${AUTONOMY_LEVELS.join("|")}`);
+			return;
+		}
+		const choice = findAutonomyChoice(current);
+		pushInfo(
+			ctx.handle,
+			`Autonomy: ${describeAutonomyLevel(current)} (${current}) — ${choice?.hint ?? ""}\n` +
+				`Levels: ${AUTONOMY_CHOICES.map((entry) => `${entry.id} (${entry.label})`).join(" · ")}`,
+		);
+		return;
+	}
+	const choice = findAutonomyChoice(arg);
+	if (!choice) {
+		pushInfo(
+			ctx.handle,
+			`Usage: /autonomy [${AUTONOMY_LEVELS.join("|")}] — with no argument it shows the current level`,
+		);
+		return;
+	}
+	if (!ctx.setAutonomy) {
+		pushInfo(ctx.handle, "Autonomy cannot be changed in this host.");
+		return;
+	}
+	if (current === choice.id) {
+		// Still said rather than silently accepted: the level is in force, but a
+		// user who typed it may be checking that the command understood.
+		pushInfo(ctx.handle, `Autonomy is already ${choice.label} (${choice.id}).`);
+		return;
+	}
+	ctx.setAutonomy(choice.id);
 }
 
 /**

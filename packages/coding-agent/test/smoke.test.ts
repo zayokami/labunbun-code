@@ -43,6 +43,19 @@ describe("flags that cannot mean anything are refused, not dropped", () => {
 		expect(errors.join("\n")).toContain("Invalid --settings");
 	});
 
+	test("--autonomy parses, and a typo stops the run", async () => {
+		expect(parseArgs(["--autonomy", "guided"])).toMatchObject({ autonomy: "guided" });
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+		try {
+			expect(await main(["--autonomy", "turbo"], { home })).toBe(2);
+		} finally {
+			console.error = original;
+		}
+		expect(errors.join("\n")).toContain("Invalid autonomy level: turbo");
+	});
+
 	test("--output-format and --max-turns are refused when no one-shot run asked for them", async () => {
 		// Both used to parse and then go unread, so the REPL silently ignored a
 		// cap or a format the user had just named.

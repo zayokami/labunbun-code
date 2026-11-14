@@ -93,6 +93,8 @@ The mode choices combine the first two axes.
 
 Press Shift+Tab to go to the next mode.
 
+**Autonomy.** A separate setting decides how often the agent stops to ask. It is not a fourth permission axis: `guided` asks before choosing among approaches, `balanced` asks when the answer changes what you get, and `autonomous` (the default) decides every reversible step and asks only for a hard blocker or a decision that is yours. Set it with `/autonomy`, the `autonomy` setting, or `--autonomy`. It never changes the sandbox, a deny rule, or whether a tool call needs approval.
+
 **Permission rules.** A rule has the form `Bash(git *)` or `Edit(src/**)` or `mcp__server__*`. A dangerous-command classifier is above every mode. The tool asks you before it runs a tool that no rule permits. You can tell the tool not to ask again for the rest of the session.
 
 **Approval diff.** When the tool asks about an `Edit` or a `Write`, the dialog shows the change as a diff. A removed line starts with `-`. An added line starts with `+`. The dialog shows at most 40 lines, and each line is cut at 240 characters. Press Ctrl+A to show the full input. Press Ctrl+A again to return to the diff. Every other tool keeps the one-line preview.
@@ -619,6 +621,7 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 | `--permission-mode <mode>` | Set the permission mode. The values are `ask`, `plan`, `agent`. |
 | `--sandbox <mode>` | Set the sandbox. The values are `read-only`, `workspace-write`, `danger-full-access`. |
 | `--network <policy>` | Set the network access. The values are `restricted`, `enabled`. The flag sets the access only. The domain rules stay in settings. |
+| `--autonomy <level>` | Set how much the agent decides on its own. The values are `guided`, `balanced`, `autonomous`. This does not change any permission, sandbox or deny rule. |
 | `--max-turns <n>` | Stop after this many turns. This option works in headless mode only. |
 | `--no-session` | Do not store the session. This option works in headless mode only. It does not work with `--resume` or `-c`. |
 | `--resume <id>` | Open this session in the terminal. A headless run continues the session with the prompt of the run. |
@@ -652,6 +655,7 @@ Use these commands in the terminal.
 | `/login [claude\|chatgpt\|gemini\|<code#state>]` | Sign in to a subscription. The tool opens a browser. A pasted code completes the Claude or Gemini sign-in. |
 | `/logout [claude\|chatgpt\|gemini]` | Sign out of a subscription. |
 | `/mode [mode]` | Show the permission mode, or change it. |
+| `/autonomy [level]` | Show how much the agent decides on its own, or change it. The values are `guided`, `balanced`, `autonomous`. |
 | `/permissions` | Show the permission mode and the rules. |
 | `/yolo [on\|off]` | Turn off the permission gates for this session. A typed phrase confirms it. |
 | `/plan` | Show the plan recorded in this session: its state, its steps, and the full text. |
@@ -801,6 +805,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `roles` | An object of the five seats `main`, `plan`, `compaction`, `light`, and `local`. Each seat has `provider`, `model`, `fallback`, and `budgetUSD`. | User |
 | `thinkingLevel` | `off`, `minimal`, `low`, `medium`, `high` | User |
 | `permissionMode` | `ask`, `plan`, `agent` | User |
+| `autonomy` | `guided`, `balanced`, `autonomous`. The value `autonomous` is the default. | User |
 | `sandbox` | `read-only`, `workspace-write`, `danger-full-access` | User |
 | `networkAccess` | `enabled`, `restricted` | User |
 | `networkDomains` | An array of strings and objects | User |

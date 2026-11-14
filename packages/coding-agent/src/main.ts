@@ -3,6 +3,8 @@
 // `--help` must not pay for the engine, the TUI or any mode implementation.
 // Everything else is imported inside the branch that needs it.
 import {
+	AUTONOMY_LEVELS,
+	type AutonomyLevel,
 	CLI_NAME,
 	CODING_AGENT_VERSION,
 	DEFAULT_HISTORY_LIMIT,
@@ -18,8 +20,8 @@ import {
 import type { RawSettingsInput } from "./settings.ts";
 
 /**
- * Check `--permission-mode`, `--sandbox` and `--network` against the lists
- * that define them.
+ * Check `--permission-mode`, `--sandbox`, `--network` and `--autonomy` against
+ * the lists that define them.
  *
  * Returns the typed values or a sentence naming the valid ones, so the caller
  * has one thing to do either way. Absent flags come back as `undefined`, which
@@ -31,10 +33,13 @@ export function validateModeFlags(args: {
 	permissionMode: string | null;
 	sandbox: string | null;
 	network: string | null;
+	/** Optional so the callers that predate the flag — and their tests — keep working. */
+	autonomy?: string | null;
 }): {
 	mode?: PermissionMode;
 	sandbox?: SandboxMode;
 	network?: NetworkSandboxPolicy;
+	autonomy?: AutonomyLevel;
 	error?: string;
 } {
 	const validModes = new Set<string>(PERMISSION_MODES);
@@ -49,17 +54,31 @@ export function validateModeFlags(args: {
 	if (args.network && !validNetworks.has(args.network)) {
 		return { error: `Invalid network: ${args.network} (${NETWORK_SANDBOX_POLICIES.join(" | ")})` };
 	}
+	const validAutonomy = new Set<string>(AUTONOMY_LEVELS);
+	if (args.autonomy && !validAutonomy.has(args.autonomy)) {
+		return { error: `Invalid autonomy level: ${args.autonomy} (${AUTONOMY_LEVELS.join(" | ")})` };
+	}
 	// An untyped flag comes back as `undefined` and not as the `null` the
 	// argument parser produced. The two behave the same under `??`, so nothing
 	// downstream was reading the difference — which is exactly why the return
 	// type claiming `undefined` while the value was `null` went unnoticed, and
 	// why a consumer that checked `"mode" in flags` would have been told the
 	// flag was there when nobody typed it.
-	return {
+	const validated: {
+		mode?: PermissionMode;
+		sandbox?: SandboxMode;
+		network?: NetworkSandboxPolicy;
+		autonomy?: AutonomyLevel;
+	} = {
 		mode: args.permissionMode ? (args.permissionMode as PermissionMode) : undefined,
 		sandbox: args.sandbox ? (args.sandbox as SandboxMode) : undefined,
 		network: args.network ? (args.network as NetworkSandboxPolicy) : undefined,
 	};
+	// Added only when typed: the mode-and-sandbox callers compare the whole
+	// object, and an `autonomy: undefined` row would change every one of those
+	// comparisons for a flag they did not pass.
+	if (args.autonomy) validated.autonomy = args.autonomy as AutonomyLevel;
+	return validated;
 }
 
 /**
@@ -95,6 +114,8 @@ interface CliArgs {
 	sandbox: string | null;
 	/** `--network <policy>`: the access half of the network axis. */
 	network: string | null;
+	/** `--autonomy <level>`: how much of a decision the run owns. */
+	autonomy: string | null;
 	maxTurns: number | null;
 	noSession: boolean;
 	resume: string | null;
@@ -136,6 +157,7 @@ export function parseArgs(argv: string[]): CliArgs {
 		permissionMode: null,
 		sandbox: null,
 		network: null,
+		autonomy: null,
 		maxTurns: null,
 		noSession: false,
 		resume: null,
@@ -198,6 +220,9 @@ export function parseArgs(argv: string[]): CliArgs {
 				break;
 			case "--network":
 				args.network = rest[++i] ?? null;
+				break;
+			case "--autonomy":
+				args.autonomy = rest[++i] ?? null;
 				break;
 			case "--max-turns": {
 				// `Number(x) || null` turned every typo into "unbounded", which is
@@ -308,6 +333,9 @@ Options:
       --network <n>            ${NETWORK_SANDBOX_POLICIES.join(" | ")}
                                The other axis: what a run may reach. Sets the
                                access; the domain rules stay in settings.
+      --autonomy <a>           ${AUTONOMY_LEVELS.join(" | ")}
+                               What the agent decides on its own. This does not
+                               change any permission, sandbox or deny rule.
       --max-turns <n>          Cap agent turns in headless mode
       --no-session             Don't persist this session to disk (headless mode only)
       --resume <id>            Resume a saved session
@@ -513,6 +541,15 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	if (flags.error !== undefined) {
 		console.error(flags.error);
 		return 2;
+	}
+	// `--autonomy` is a prompt posture rather than a permission axis, so it
+	// reaches the session through the flag settings tier like `--settings` does.
+	// Applying it here, after the flag is validated, means all three hosts read
+	// one merged value and none of them has to know the flag exists. A value
+	// typed in `--settings` is overlaid by the flag, which is the order the flag
+	// tier promises.
+	if (flags.autonomy) {
+		flagSettings = { ...(flagSettings ?? {}), autonomy: flags.autonomy };
 	}
 
 	// The ACP server: an editor starts this and speaks JSON-RPC over stdio until

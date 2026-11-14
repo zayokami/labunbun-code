@@ -14,6 +14,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+	AUTONOMY_LEVELS as AGENT_AUTONOMY_LEVELS,
 	DEFAULT_MODE_CHOICE as AGENT_DEFAULT_MODE_CHOICE,
 	NETWORK_SANDBOX_POLICIES as AGENT_NETWORK_SANDBOX_POLICIES,
 	PERMISSION_MODES as AGENT_PERMISSION_MODES,
@@ -21,6 +22,7 @@ import {
 	type ModeChoice,
 } from "@labunbun/agent";
 import {
+	AUTONOMY_LEVELS,
 	CLI_NAME,
 	CODING_AGENT_VERSION,
 	DEFAULT_HISTORY_LIMIT,
@@ -47,6 +49,13 @@ describe("the startup constants are the authoritative values", () => {
 
 	test("NETWORK_SANDBOX_POLICIES matches @labunbun/agent", () => {
 		expect([...NETWORK_SANDBOX_POLICIES]).toEqual([...AGENT_NETWORK_SANDBOX_POLICIES]);
+	});
+
+	test("AUTONOMY_LEVELS matches @labunbun/agent, in order", () => {
+		// The CLI validates `--autonomy` against this copy before the engine is
+		// imported, so a level added upstream and not here would be rejected by the
+		// one door that never reads the real list.
+		expect([...AUTONOMY_LEVELS]).toEqual([...AGENT_AUTONOMY_LEVELS]);
 	});
 
 	/**

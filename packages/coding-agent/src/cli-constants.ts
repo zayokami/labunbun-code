@@ -8,10 +8,11 @@
  * modules are imported only once a branch actually needs them.
  *
  * Copies drift, so `cli-constants.test.ts` compares every array and value below
- * against its authoritative export. A mode, sandbox, network policy or migration
- * source added in the real list fails that test until it is added here too —
- * which is the only moment the difference is visible. The values themselves are
- * byte-for-byte the ones the engine ships, help text included.
+ * against its authoritative export. A mode, sandbox, network policy, autonomy
+ * level or migration source added in the real list fails that test until it is
+ * added here too — which is the only moment the difference is visible. The
+ * values themselves are byte-for-byte the ones the engine ships, help text
+ * included.
  */
 
 export const CLI_NAME = "labunbun";
@@ -24,6 +25,10 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 /** `packages/agent/src/types.ts` owns this list. */
 export const SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"] as const;
 export type SandboxMode = (typeof SANDBOX_MODES)[number];
+
+/** `packages/agent/src/autonomy.ts` owns this list. */
+export const AUTONOMY_LEVELS = ["guided", "balanced", "autonomous"] as const;
+export type AutonomyLevel = (typeof AUTONOMY_LEVELS)[number];
 
 /** `packages/agent/src/sandbox-policy.ts` owns this list. */
 export const NETWORK_SANDBOX_POLICIES = ["restricted", "enabled"] as const;

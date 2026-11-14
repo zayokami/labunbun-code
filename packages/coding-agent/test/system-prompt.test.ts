@@ -29,7 +29,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { localDayKey } from "@labunbun/agent";
+import { AUTONOMY_LEVELS, DEFAULT_AUTONOMY_LEVEL, localDayKey } from "@labunbun/agent";
 import type { Model } from "@labunbun/ai";
 import {
 	buildSubagentContext,
@@ -431,5 +431,75 @@ describe("the output-style setting", () => {
 		const prompt = buildSystemPrompt([], { ...BASE, outputStyle: "STYLE-MARKER" });
 		expect(prompt).toContain("Stop when the work asked for is done");
 		expect(prompt).toContain("# Communication");
+	});
+});
+
+/**
+ * `# Autonomy` is the one prompt section whose text changes with a setting.
+ *
+ * The shared half is the safety claim — an autonomy level changes what the model
+ * asks about, never what it may do — and it has to be present at every level,
+ * because the level that is easiest to misread as a permission grant is the
+ * loosest one. The level clauses are tested for presence *and* for the absence
+ * of the other two: a table that emitted every clause would still say the
+ * right thing somewhere and give the model two contradictory instructions.
+ */
+describe("the autonomy section", () => {
+	const CLAUSE: Record<(typeof AUTONOMY_LEVELS)[number], string> = {
+		guided: "describe the approaches you see and ask before building",
+		balanced: "Ask when the answer changes what the user gets",
+		autonomous: "decide anything reversible that the evidence supports",
+	};
+
+	test("defaults to the level the command and the schema start from", () => {
+		const prompt = buildSystemPrompt([], BASE);
+		expect(prompt).toContain("# Autonomy");
+		expect(prompt).toContain(`You are running at the ${DEFAULT_AUTONOMY_LEVEL} autonomy level`);
+	});
+
+	test("the shared half is present at every level, including the boundary claim", () => {
+		for (const level of AUTONOMY_LEVELS) {
+			const prompt = buildSystemPrompt([], { ...BASE, autonomy: level });
+			expect(prompt, `${level} lost the access boundary`).toContain("autonomy never grants access");
+			expect(prompt, `${level} lost the how/what split`).toContain("- You own the how:");
+			expect(prompt, `${level} lost the how/what split`).toContain("- The user owns the what:");
+			expect(prompt, `${level} lost the evidence rule`).toContain("- Answer before asking.");
+			expect(prompt, `${level} lost the ask rule`).toContain("- Ask once, well.");
+			// A denial is a limit, not a step to route around: this sentence is what
+			// keeps "be autonomous" from reading as "find another tool".
+			expect(prompt, `${level} lost the refusal rule`).toContain(
+				"- A refusal or a limit is not a decision to route around",
+			);
+		}
+	});
+
+	test.each([...AUTONOMY_LEVELS])("level %s gets its clause and not the other two", (level) => {
+		const prompt = buildSystemPrompt([], { ...BASE, autonomy: level });
+		expect(prompt).toContain(CLAUSE[level]);
+		for (const other of AUTONOMY_LEVELS) {
+			if (other === level) continue;
+			expect(prompt, `${level} also carried ${other}'s clause`).not.toContain(CLAUSE[other]);
+		}
+	});
+
+	test("sits after # Finishing work and before # Communication, above the boundary", () => {
+		const prompt = buildSystemPrompt([], { ...BASE, autonomy: "guided" });
+		expect(prompt.indexOf("# Doing tasks")).toBeLessThan(prompt.indexOf("# Finishing work"));
+		expect(prompt.indexOf("# Finishing work")).toBeLessThan(prompt.indexOf("# Autonomy"));
+		expect(prompt.indexOf("# Autonomy")).toBeLessThan(prompt.indexOf("# Communication"));
+		// It is a working rule, not this project's shape: it belongs above the
+		// dynamic boundary with the rest of the harness contract.
+		expect(prompt.indexOf("# Autonomy")).toBeLessThan(prompt.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
+	});
+
+	test("the short prompt carries the compressed clause for the selected level", () => {
+		const model = { provider: "ollama", id: "qwen3:7b", contextWindow: 8192 } as unknown as Model;
+		const guided = buildSystemPrompt([], { ...BASE, model, autonomy: "guided" });
+		expect(guided).toContain("Autonomy (guided): ask before choosing among approaches");
+		const autonomous = buildSystemPrompt([], { ...BASE, model, autonomy: "autonomous" });
+		expect(autonomous).toContain("Autonomy (autonomous): decide every reversible step");
+		// No `# Autonomy` heading: the lean body is a different prompt, not a
+		// suffix, and a heading there would be the full section's shape.
+		expect(autonomous).not.toContain("# Autonomy");
 	});
 });

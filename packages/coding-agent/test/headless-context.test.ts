@@ -20,6 +20,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_AUTONOMY_LEVEL } from "@labunbun/agent";
 import { approveProjectDefinitions } from "../src/project-trust.ts";
 
 const roots: string[] = [];
@@ -64,7 +65,10 @@ interface Seen {
  * below is the whole of it: `-p` writes a result object to stdout, and this test
  * is about the requests, not the reporting.
  */
-async function runScene(options: { prompt: string; steps: unknown[] }, f: Fixture): Promise<Seen> {
+async function runScene(
+	options: { prompt: string; steps: unknown[]; flagSettings?: Record<string, unknown> },
+	f: Fixture,
+): Promise<Seen> {
 	const script = `
 		import { fauxProvider } from "@labunbun/ai";
 		import { runHeadless } from "./src/headless.ts";
@@ -80,6 +84,7 @@ async function runScene(options: { prompt: string; steps: unknown[] }, f: Fixtur
 				cwd: ${JSON.stringify(f.cwd)},
 				noSession: true,
 				outputFormat: "json",
+				${options.flagSettings ? `flagSettings: ${JSON.stringify(options.flagSettings)},` : ""}
 				streamFn: faux.streamFn,
 				home: ${JSON.stringify(f.home)},
 			});
@@ -292,5 +297,38 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 		expect(seen.systemPrompts.some((prompt) => prompt.includes("PROJECT-AGENT-BODY"))).toBe(true);
 		expect(seen.messages.at(-1)).toContain("SUBAGENT-REPORT");
 		expect(seen.stderr).not.toContain("not loaded");
+	}, 30_000);
+});
+
+/**
+ * The autonomy level is a prompt posture, so `-p` has to put it in front of the
+ * model like the REPL does. The host reads it from the merged settings, which
+ * means the flag tier can set it and a project file cannot.
+ */
+describe("the autonomy setting in a -p run", () => {
+	test("the flag tier's level reaches the system prompt", async () => {
+		const f = fixture();
+		const seen = await runScene(
+			{ prompt: "hello", steps: [{ text: "done" }], flagSettings: { autonomy: "guided" } },
+			f,
+		);
+
+		expect(seen.code).toBe(0);
+		expect(seen.systemPrompts[0]).toContain("You are running at the guided autonomy level");
+		expect(seen.systemPrompts[0]).toContain("describe the approaches you see and ask before building");
+		// The level is not a permission: the prompt still carries the boundary.
+		expect(seen.systemPrompts[0]).toContain("autonomy never grants access");
+	}, 30_000);
+
+	test("a project file cannot set it, and the default level applies", async () => {
+		const f = fixture();
+		plant(join(f.cwd, ".labunbun", "settings.json"), JSON.stringify({ autonomy: "guided" }));
+
+		const seen = await runScene({ prompt: "hello", steps: [{ text: "done" }] }, f);
+
+		expect(seen.code).toBe(0);
+		expect(seen.stderr).toContain("project:autonomy");
+		expect(seen.systemPrompts[0]).toContain(`You are running at the ${DEFAULT_AUTONOMY_LEVEL} autonomy level`);
+		expect(seen.systemPrompts[0]).not.toContain("You are running at the guided autonomy level");
 	}, 30_000);
 });

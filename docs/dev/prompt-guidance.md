@@ -90,6 +90,15 @@ step (verify the answer against the criteria) is applied to the artifact this
 harness produces: the diff check now also asks whether every part of the request
 is covered.
 
+**Decide the reversible, ask for the rest.** The vendor's autonomy guidance is
+to act when enough information is available and to confirm risky or irreversible
+actions, and it is explicit that persistence must not swallow the confirmation
+step. `# Autonomy` turns that into one decision test — reversibility and blast
+radius — and gives the model a level (`guided`, `balanced`, `autonomous`) that
+moves the line without moving any permission gate. The permission engine still
+owns what may run; this section only says what to ask about. The long form is
+[autonomy](autonomy.md).
+
 The short prompt for small models and tiny windows keeps the same hard rules in
 compressed form, since it is a separate body and would otherwise drift. It gained
 the regression-test exception, the act-on-a-change line, the red-before-green

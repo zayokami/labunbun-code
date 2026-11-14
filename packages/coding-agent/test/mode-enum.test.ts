@@ -26,6 +26,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+	AUTONOMY_LEVELS,
 	cycleModeChoice,
 	describeModeChoice,
 	MODE_CHOICES,
@@ -79,6 +80,24 @@ describe("every value reaches every consumer", () => {
 			mode: undefined,
 			sandbox: undefined,
 			network,
+		});
+	});
+
+	// `--autonomy` is the only flag here that is not a permission axis, but it is
+	// validated against a list for the same reason: a typo must stop the run, not
+	// become a setting the session silently ignores.
+	test.each([...AUTONOMY_LEVELS])("--autonomy %s passes CLI validation", (autonomy) => {
+		expect(validateModeFlags({ permissionMode: null, sandbox: null, network: null, autonomy })).toEqual({
+			mode: undefined,
+			sandbox: undefined,
+			network: undefined,
+			autonomy,
+		});
+	});
+
+	test("--autonomy rejects a value outside the list", () => {
+		expect(validateModeFlags({ permissionMode: null, sandbox: null, network: null, autonomy: "turbo" })).toEqual({
+			error: `Invalid autonomy level: turbo (${AUTONOMY_LEVELS.join(" | ")})`,
 		});
 	});
 

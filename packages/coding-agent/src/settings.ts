@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+	AUTONOMY_LEVELS,
 	NETWORK_DOMAIN_PERMISSIONS,
 	NETWORK_SANDBOX_POLICIES,
 	type NetworkAxis,
@@ -149,6 +150,17 @@ export const SettingsSchema = z.object({
 	/** How hard the model should think, for every request this session makes. */
 	thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 	permissionMode: PermissionModeSchema.optional(),
+	/**
+	 * How much of a decision the agent owns (`autonomy.ts` in @labunbun/agent):
+	 * how often it stops to ask, and which choices it is expected to make on its
+	 * own.
+	 *
+	 * A separate axis from `permissionMode` on purpose. This one changes what the
+	 * model asks about; it never widens what the harness lets it do. A session
+	 * can be fully autonomous about decisions and still be confined by a
+	 * read-only sandbox or a deny rule, and the prompt states that distinction.
+	 */
+	autonomy: z.enum(AUTONOMY_LEVELS).optional(),
 	// Long-form design notes: docs/dev/migration-framework.md
 	/** The other axis: what the process may touch, as opposed to what asks. */
 	sandbox: SandboxModeSchema.optional(),
@@ -565,6 +577,11 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	beetle: "denied",
 	allowManagedPermissionRulesOnly: "denied",
 	disableBypassPermissionsMode: "denied",
+	// How often the agent stops to ask is the user's posture toward this
+	// checkout, not the checkout's. A repository that could raise it would be
+	// quieting the questions its own code provokes; one that could lower it
+	// would be spending the user's judgment on its own work.
+	autonomy: "denied",
 	// A repository choosing the language the user is answered in, or the style
 	// the session speaks in, is deciding how this checkout's assistant talks to
 	// them. The style files themselves may be project-tier (behind the trust
@@ -657,7 +674,15 @@ export function formatIgnoredKeysNotice(ignored: IgnoredSettingsKey[]): string |
 }
 
 /** The settings a command persists for the user, which another tier can override. */
-export type UserChoiceKey = "theme" | "model" | "vimMode" | "emacsMode" | "gamepad" | "thinkingLevel" | "tokenUnit";
+export type UserChoiceKey =
+	| "theme"
+	| "model"
+	| "vimMode"
+	| "emacsMode"
+	| "gamepad"
+	| "thinkingLevel"
+	| "tokenUnit"
+	| "autonomy";
 
 /** Tiers that outrank the user's own file, highest first. */
 const OVERRIDING_TIERS = ["flag", "policy", "local", "project"] as const;

@@ -16,6 +16,17 @@ export {
 	startOfLocalDay,
 	windowStartFor,
 } from "./activity.ts";
+// Decision autonomy: what the agent asks about, as opposed to what it may do
+export {
+	AUTONOMY_CHOICES,
+	AUTONOMY_LEVELS,
+	type AutonomyChoice,
+	type AutonomyLevel,
+	DEFAULT_AUTONOMY_LEVEL,
+	describeAutonomyLevel,
+	findAutonomyChoice,
+	isAutonomyLevel,
+} from "./autonomy.ts";
 // Compaction
 export {
 	COMPACTION_BOUNDARY_LEAD,

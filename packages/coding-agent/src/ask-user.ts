@@ -36,9 +36,11 @@ export function createAskUserQuestionTool(bridge: AskUserBridge): AnyTool {
 	return buildTool({
 		name: "AskUserQuestion",
 		description:
-			"Ask the user structured multiple-choice questions when you need a decision that is " +
-			"theirs to make (approach, trade-offs, requirements). Use sparingly — only when the " +
-			"answer changes what you do next and cannot be resolved from context.",
+			"Ask the user a structured multiple-choice question when a decision is genuinely theirs " +
+			"and cannot be resolved from the repository: an ambiguous requirement, a trade-off in " +
+			"scope, or a choice with materially different cost or risk. This is a last resort, not a " +
+			"check-in: decide reversible implementation details yourself, and never ask for a fact the " +
+			"code, tests, or configuration can answer.",
 		inputSchema: z.object({
 			questions: z
 				.array(
@@ -58,8 +60,9 @@ export function createAskUserQuestionTool(bridge: AskUserBridge): AnyTool {
 				.max(4),
 		}),
 		prompt:
-			"- Prefer AskUserQuestion over guessing when user intent genuinely forks the approach.\n" +
-			"- Put your recommended option first with its rationale in the description.",
+			"- Use this only after inspecting the repository; if the answer is discoverable, find it instead of asking.\n" +
+			"- Do not use it to confirm a reversible step you can undo, or to hand back work the user already asked for.\n" +
+			"- Batch related questions into one call. Put your recommended option first and say in its description what changes if it is chosen.",
 		isReadOnly: () => true,
 		isConcurrencySafe: () => false,
 		call: async (input, toolCtx) => {

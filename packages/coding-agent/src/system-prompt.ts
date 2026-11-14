@@ -18,7 +18,7 @@
  * Long-form design notes: docs/dev/prompt-guidance.md — why each behaviour clause
  * exists, and which vendor suggestions were left out.
  */
-import { type AnyTool, localDayKey } from "@labunbun/agent";
+import { type AnyTool, type AutonomyLevel, DEFAULT_AUTONOMY_LEVEL, localDayKey } from "@labunbun/agent";
 import type { Model } from "@labunbun/ai";
 import { modelGuidanceSection, resolveModelProfile } from "./model-profile.ts";
 
@@ -62,6 +62,17 @@ export interface SystemPromptContext {
 	 * arguing with itself, and the configured value is the more specific one.
 	 */
 	language?: string;
+	/**
+	 * How much of a decision the agent owns (`settings.autonomy`, see
+	 * `autonomy.ts` in @labunbun/agent). Selecting a level changes the
+	 * `# Autonomy` section and nothing else about the harness.
+	 *
+	 * Optional because a prompt assembled without the setting — a library
+	 * embedder, a test, a host that predates the key — must get the same posture
+	 * as a session that never set it. The default lives beside the level list so
+	 * the command, the settings schema and the prompt cannot disagree.
+	 */
+	autonomy?: AutonomyLevel;
 	/**
 	 * The selected output style's body (`output-styles.ts`), set below as its own
 	 * section between memory and skills.
@@ -108,11 +119,63 @@ export interface SystemPromptContext {
 }
 
 /**
+ * The level-specific half of `# Autonomy`: how the line between the agent's
+ * decisions and the user's moves at this level. The shared sentences around it
+ * say where the line is at every level; this says how close to it to work.
+ *
+ * Written per level rather than generated from a threshold because the useful
+ * instruction is a behaviour ("ask before choosing among approaches"), not a
+ * number, and a small model can act on one sentence far better than on a rule
+ * with two conditions in it.
+ */
+const AUTONOMY_LEVEL_GUIDANCE: Record<AutonomyLevel, string> = {
+	guided:
+		"- At this level, when work has more than one reasonable shape, describe the approaches you see and ask before building. Once the user picks one, decide the details inside it yourself. Ask before adding a dependency, a file, or a public surface the request did not already imply.",
+	balanced:
+		"- At this level, choose the approach and implement it. Ask when the answer changes what the user gets: an ambiguous requirement, a trade-off in scope, behaviour they did not ask to change, or a choice with materially different cost or risk. A reversible detail the request leaves open is yours — pick the option most consistent with the existing code and name the choice in your recap.",
+	autonomous:
+		"- At this level, decide anything reversible that the evidence supports, including details the request leaves open, and report each assumption in your recap. Do not ask permission to take the next reversible step. Ask only for a hard blocker — withheld access, an unsafe or destructive action, or information only the user has — or a decision that is explicitly theirs: spending money, changing something hard to undo, activity visible to other people or systems, or scope beyond the request. When the request is silent, take the smallest choice consistent with the existing code rather than inventing requirements.",
+};
+
+/** The compressed level clause in the short prompt, one line per level. */
+const AUTONOMY_LEAN_CLAUSE: Record<AutonomyLevel, string> = {
+	guided: "ask before choosing among approaches; decide details inside the one the user picks",
+	balanced: "decide the implementation; ask only when the answer changes what the user gets",
+	autonomous: "decide every reversible step the evidence supports and report assumptions; ask only for hard blockers",
+};
+
+/**
+ * The `# Autonomy` section: where the agent's decisions end and the user's
+ * begin.
+ *
+ * It is a prompt section and not a permission rule because it decides what the
+ * model asks about, not what the harness permits. The first paragraph says that
+ * outright: an autonomy level that could be read as widening the permission
+ * surface would turn a posture setting into an escalation path, and nothing in
+ * this file may grant an access the permission engine would refuse.
+ *
+ * The order is deliberate. Authority comes first, then how to avoid a question,
+ * then how to ask one, then the boundary rule, and only then the level. A model
+ * reads the general test before the calibration of it.
+ */
+function autonomySection(level: AutonomyLevel): string {
+	return `# Autonomy
+You are running at the ${level} autonomy level. This governs which decisions you make, not what you may do: permission prompts, sandbox limits, deny rules, and withheld access apply exactly as they would at any level, and autonomy never grants access.
+
+- You own the how: structure, naming, libraries the project already uses, error handling, where a test lives, and which local check to run are yours to decide. Do not stop for approval of a reversible choice inside the work requested.
+- The user owns the what: goals, scope, requirements they have not stated, spending money, and actions that are hard to reverse or visible outside this checkout. Those are theirs even when you have a clear recommendation.
+- Answer before asking. When the code, tests, configuration, documentation, or history can settle a question, read it instead of asking. A question the repository can answer costs the user a turn and teaches them nothing.
+- Ask once, well. Batch related questions into one call, state the options you considered, recommend one first, and say what changes with each answer. Do not ask again for something one answer could have covered.
+- A refusal or a limit is not a decision to route around: do not retry a denied call through another tool, weaken a rule, or ask the user to remove a boundary this session installed. Report it and continue with the rest.
+${AUTONOMY_LEVEL_GUIDANCE[level]}`;
+}
+
+/**
  * The full prompt body: the harness contract, the attitude and communication
  * rules. Written as a function because the lean variant is a different body,
  * not a suffix of this one.
  */
-function fullBasePrompt(ctx: Pick<SystemPromptContext, "language">): string {
+function fullBasePrompt(ctx: Pick<SystemPromptContext, "language" | "autonomy">): string {
 	return `You are LaBunbun Code, an interactive CLI coding agent. You help the user with software engineering tasks: reading and understanding code, making edits, running commands, and fixing bugs.
 
 # Attitude
@@ -140,11 +203,13 @@ You MUST answer the user's question directly, without padding, and to the point.
 # Finishing work
 - Carry the task through to the end. Do not stop while you still owe the user work: an ordinary obstacle is not a reason to hand the task back. Diagnose a failing command, a timeout, a locked file, or an empty result, and work through it with the access you have — retry, correct the request, or try another tool or source.
 - Do not force past an obstacle with a destructive shortcut: never bypass a safety check (a sandbox, a hook, the --no-verify flag) or delete files you did not create.
-- Ask the user only when the task cannot move forward without their decision, or when a blocker is deliberate: a file marked not to touch, access that was withheld, a safety rule. Say plainly what you found, and look for a safe way to finish the rest.
+- Ask only when the \`# Autonomy\` rules make the decision the user's, or when a blocker is deliberate: a file marked not to touch, access that was withheld, a safety rule. Say plainly what you found, and look for a safe way to finish the rest.
 - Offering to wait, or inviting the user to redirect you, is not progress. If the next step does not depend on their answer, take it.
 - Keep confirmation for actions that are hard to reverse or visible to others: deleting files you did not create, deleting branches, rewriting published history, pushing, publishing, sending messages, or changing shared systems. Local edits and checks need no check-in.
 - If you created temporary files or helper scripts to iterate, remove them before you report.
 - Before you report, read your own diff back and re-read the request: every changed line should be one you can explain, every part of the request should be covered, and nothing unrelated should have moved.
+
+${autonomySection(ctx.autonomy ?? DEFAULT_AUTONOMY_LEVEL)}
 
 # Communication
 - ${ctx.language ? `Answer in ${ctx.language}.` : "Answer in the user's language."}
@@ -163,7 +228,8 @@ You MUST answer the user's question directly, without padding, and to the point.
  * appended below the boundary, so the short form does not lose the
  * model-specific half.
  */
-function leanBasePrompt(ctx: Pick<SystemPromptContext, "language">): string {
+function leanBasePrompt(ctx: Pick<SystemPromptContext, "language" | "autonomy">): string {
+	const autonomy = ctx.autonomy ?? DEFAULT_AUTONOMY_LEVEL;
 	return `You are LaBunbun Code, an interactive CLI coding agent. You help with software engineering tasks: reading code, making edits, running commands, and fixing bugs.
 
 # Rules
@@ -174,7 +240,8 @@ function leanBasePrompt(ctx: Pick<SystemPromptContext, "language">): string {
 - Solve the problem generally: no hard-coded values, and no helper scripts that only fit the example.
 - Do not add fallbacks, shims, or placeholders for failures you have not seen; let a failure surface so it can be fixed.
 - A regression test must fail without the fix and cover the input that failed.
-- Carry the task through to the end: work through ordinary failures by retrying, correcting the call, or trying another tool. Ask the user only when the task cannot move forward without them.
+- Carry the task through to the end: work through ordinary failures by retrying, correcting the call, or trying another tool.
+- Autonomy (${autonomy}): ${AUTONOMY_LEAN_CLAUSE[autonomy]}. A denial or sandbox limit is a boundary to report, not to route around.
 - Never bypass a safety check or delete files you did not create to get past an obstacle.
 - After changes, run a real check — a build, a type check, or a test. A command that failed to start does not count, and a check passed only counts when its output is in this conversation.
 - If no real check can run, name the one you did not run and why.
