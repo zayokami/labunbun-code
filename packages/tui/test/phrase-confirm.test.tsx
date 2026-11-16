@@ -15,13 +15,13 @@ import { DARK_THEME, ThemeContext } from "../src/theme.ts";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PHRASE = "I only live once";
 
-function setup() {
+function setup(phrase: string = PHRASE) {
 	const answers: boolean[] = [];
 	const view = render(
 		<ThemeContext.Provider value={DARK_THEME}>
 			<PhraseConfirmDialog
 				title="YOLO mode"
-				phrase={PHRASE}
+				phrase={phrase}
 				off={["Dangerous-command classifier", "Ask rules"]}
 				on={["Deny rules", "The sandbox"]}
 				sandbox="workspace-write"
@@ -113,6 +113,42 @@ describe("the phrase confirmation", () => {
 		expect(h.answers).toEqual([true]);
 		h.unmount();
 	});
+
+	/**
+	 * The two newer phrases carry punctuation and an apostrophe, so the same test
+	 * is repeated for them: wrong case and a dropped full stop are both no answer.
+	 * Each phase gets a fresh dialog, which keeps the test well inside its budget
+	 * when the suite runs the whole package in parallel.
+	 */
+	test.each(["The World Is Yours.", "Don't Panic."])(
+		"%s is matched exactly, punctuation and capitalisation included",
+		async (phrase) => {
+			const wrongCase = phrase.toLowerCase();
+			expect(wrongCase).not.toBe(phrase);
+			const lower = setup(phrase);
+			await delay(30);
+			await lower.type(wrongCase);
+			await lower.enter();
+			expect(lower.answers).toEqual([]);
+			expect(lower.frame()).toContain("That is not the phrase");
+			lower.unmount();
+
+			const noStop = phrase.slice(0, -1);
+			const clipped = setup(phrase);
+			await delay(30);
+			await clipped.type(noStop);
+			await clipped.enter();
+			expect(clipped.answers).toEqual([]);
+			clipped.unmount();
+
+			const exact = setup(phrase);
+			await delay(30);
+			await exact.type(phrase);
+			await exact.enter();
+			expect(exact.answers).toEqual([true]);
+			exact.unmount();
+		},
+	);
 
 	test("an empty field is a mismatch, not a confirmation", async () => {
 		const h = setup();

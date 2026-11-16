@@ -6113,13 +6113,24 @@ function applyAutonomyCommand(ctx: AppCommandContext, text: string): void {
 }
 
 /**
- * The sentence that arms YOLO. Exact match after trimming, case included.
+ * The sentences that can arm YOLO. One is chosen at random per dialog, and the
+ * typed answer must match that spelling exactly after trimming, case included.
  *
- * Exported for tests and for anything that needs to display it; it is a warning,
- * not a secret, so it is shown verbatim in the dialog. There is deliberately one
- * spelling of it in the codebase.
+ * Exported for tests and for anything that needs to display them; they are
+ * warnings, not secrets, so they are shown verbatim in the dialog. There is
+ * deliberately one spelling of each in the codebase.
  */
-export const YOLO_CONFIRMATION_PHRASE = "I only live once";
+export const YOLO_CONFIRMATION_PHRASES = ["I only live once", "The World Is Yours.", "Don't Panic."] as const;
+
+/**
+ * Picks the phrase for one confirmation. `random` is injectable so a test can
+ * reach every phrase and clamp the edge value `Math.random` never returns.
+ */
+export function pickYoloConfirmationPhrase(random: () => number = Math.random): string {
+	const last = YOLO_CONFIRMATION_PHRASES.length - 1;
+	const index = Math.min(Math.max(Math.floor(random() * YOLO_CONFIRMATION_PHRASES.length), 0), last);
+	return YOLO_CONFIRMATION_PHRASES[index] ?? YOLO_CONFIRMATION_PHRASES[0];
+}
 
 /**
  * `/yolo`: the interactive door to the session-only override.
@@ -6199,7 +6210,7 @@ function applyYoloCommand(ctx: AppCommandContext, text: string): void {
 	}
 	const opening = {
 		title: "YOLO mode — You Only Live Once",
-		phrase: YOLO_CONFIRMATION_PHRASE,
+		phrase: pickYoloConfirmationPhrase(),
 		off: ["Dangerous-command classifier", "Ask rules", "Approval prompts for every tool"],
 		on: [
 			"Deny rules",

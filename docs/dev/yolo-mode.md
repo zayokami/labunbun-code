@@ -134,8 +134,9 @@ The dialog shows:
   still applies.
 - The active sandbox mode by name, and the fact that the sandbox is now the
   only remaining automatic containment.
-- The exact phrase, verbatim and in the same capitalisation:
-  **`I only live once`**.
+- The exact phrase, verbatim and in the same capitalisation. One of three is
+  chosen at random each time the dialog opens: **`I only live once`**,
+  **`The World Is Yours.`**, or **`Don't Panic.`**.
 - The input field, with a persistent hint that the phrase is case-sensitive.
 - `Enter` to submit, `Esc` to cancel.
 
@@ -151,9 +152,11 @@ gap: a controller user can still choose every mode on the existing picker;
 YOLO is the one posture that requires a keyboard because it requires a typed
 acknowledgment.
 
-The phrase constant lives in one place in the app layer and is exported for
-tests. It is displayed, not hashed or hidden — the user has to be able to
-read what to type, and the phrase is a warning, not a secret.
+The phrase list lives in one place in the app layer and is exported for tests.
+Each confirmation picks one entry at random and shows that entry and nothing
+else, so only the phrase on screen can satisfy it. The phrases are displayed,
+not hashed or hidden — the user has to be able to read what to type, and a
+phrase is a warning, not a secret.
 
 ## What changes in the evaluator
 

@@ -22,7 +22,12 @@ import {
 	type StatusCardData,
 	type UiState,
 } from "@labunbun/tui";
-import { type AppCommandContext, handleAppCommand, YOLO_CONFIRMATION_PHRASE } from "../src/interactive.ts";
+import {
+	type AppCommandContext,
+	handleAppCommand,
+	pickYoloConfirmationPhrase,
+	YOLO_CONFIRMATION_PHRASES,
+} from "../src/interactive.ts";
 import { validateModeFlags } from "../src/main.ts";
 import { PermissionModeSchema } from "../src/settings.ts";
 
@@ -101,6 +106,21 @@ function makeCtx(
 	};
 }
 
+describe("the confirmation phrase", () => {
+	test("pins the three warnings, punctuation and apostrophe included", () => {
+		expect(YOLO_CONFIRMATION_PHRASES).toEqual(["I only live once", "The World Is Yours.", "Don't Panic."]);
+	});
+
+	test("every phrase is reachable, and out-of-range random values clamp", () => {
+		expect(pickYoloConfirmationPhrase(() => 0)).toBe("I only live once");
+		expect(pickYoloConfirmationPhrase(() => 0.5)).toBe("The World Is Yours.");
+		expect(pickYoloConfirmationPhrase(() => 0.999999)).toBe("Don't Panic.");
+		// Math.random stays below 1, but an injected source is not bound by that.
+		expect(pickYoloConfirmationPhrase(() => 1)).toBe("Don't Panic.");
+		expect(pickYoloConfirmationPhrase(() => -1)).toBe("I only live once");
+	});
+});
+
 describe("/yolo entry", () => {
 	test("asks for the exact phrase, and enabling keeps both axes where they were", async () => {
 		const h = makeCtx({ mode: "agent", sandbox: "workspace-write" });
@@ -108,7 +128,7 @@ describe("/yolo entry", () => {
 		expect(h.phraseRequests).toHaveLength(1);
 
 		const request = h.phraseRequests[0];
-		expect(request?.phrase).toBe(YOLO_CONFIRMATION_PHRASE);
+		expect(YOLO_CONFIRMATION_PHRASES.some((phrase) => phrase === request?.phrase)).toBe(true);
 		expect(request?.sandbox).toBe("workspace-write");
 		expect(request?.off.join(" ")).toContain("classifier");
 		expect(request?.on.join(" ")).toContain("Deny rules");
