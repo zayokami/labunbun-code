@@ -3,7 +3,17 @@
 What changed in each release. Release pages carry the download links, install
 commands, and SHA-256 checksums.
 
-## Unreleased
+## 0.1.0.5 (Alpha) — 2026-11-16
+
+A drop-in replacement for 0.1.0.3, and the largest release so far. The prompt
+is sized before the model sees it, with effort to match; the Windows read-only
+policy now runs under an AppContainer grant; a quiet session summarizes before
+its prompt cache expires; compaction requests and the turns they replace are
+booked on the bill; five more providers and the Claude Fable 5.2 / Mythos 5.2
+family join the catalog; the binary ships its built-in skills; `Ctrl+T` splits
+the screen; the approval and permission dialogs, the prompt box, and the first
+screen were reworked; `/yolo` asks for one of three phrases; and `/` typed
+through a Chinese input method now opens the command list.
 
 ### Added
 
