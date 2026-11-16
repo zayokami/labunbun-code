@@ -7,6 +7,14 @@ commands, and SHA-256 checksums.
 
 ### Added
 
+- **YOLO asks for one of three phrases.** Arming YOLO from `/yolo` now picks
+  one warning at random from `I only live once`, `The World Is Yours.`, and
+  `Don't Panic.`, and the dialog shows only the one it picked. The typed answer
+  must match that spelling exactly after trimming — case, apostrophe, and the
+  final full stop included. The list lives in one place
+  (`YOLO_CONFIRMATION_PHRASES`) and is exported for tests. See
+  `docs/dev/yolo-mode.md`.
+
 - **Windows enforces read-only without a native backend.** A read-only policy
   that used to resolve `refused` on Windows now runs under an AppContainer
   grant that carries only `FILE_READ_EXECUTE` on every granted root — the
@@ -294,6 +302,15 @@ commands, and SHA-256 checksums.
   more rather than widening a grant to a neighbour.
 
 ### Fixed
+
+- **`/` reaches the command list through a Chinese input method.** In Chinese
+  punctuation mode the IME translates the `/` key before the terminal sees it:
+  `、` under Microsoft Pinyin, `／` under full-width punctuation. The buffer
+  took the lookalike, it never matched the command prefix, and `/` read as
+  dead — no list, no error, just a character that is not the one the user
+  asked for. At an empty prompt those two characters are now stored as the
+  half-width `/` and the list opens; mid-buffer they stay the characters
+  typed, so `、` in a Chinese sentence is untouched.
 
 - **A compaction's own request is on the bill.** A summary is a full-prefix
   request — the most expensive one a session sends — and its message never

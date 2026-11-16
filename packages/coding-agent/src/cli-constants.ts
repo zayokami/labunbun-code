@@ -16,7 +16,7 @@
  */
 
 export const CLI_NAME = "labunbun";
-export const CODING_AGENT_VERSION = "0.1.0.4";
+export const CODING_AGENT_VERSION = "0.1.0.5";
 
 /** `packages/agent/src/types.ts` owns this list. */
 export const PERMISSION_MODES = ["ask", "plan", "agent"] as const;

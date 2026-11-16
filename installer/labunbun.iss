@@ -12,7 +12,7 @@
 #endif
 
 #define AppName "LaBunbun Code"
-#define AppVersion "0.1.0.4"
+#define AppVersion "0.1.0.5"
 #define AppPublisher "zayokami"
 #define AppURL "https://github.com/zayokami/labunbun-code"
 #define ExeName "labunbun.exe"
