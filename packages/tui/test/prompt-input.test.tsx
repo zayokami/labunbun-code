@@ -404,6 +404,26 @@ describe("slash command suggestions", () => {
 		unmount();
 	});
 
+	test.each([
+		["full-width punctuation", "／"],
+		["Microsoft Pinyin punctuation", "、"],
+	])("a slash lookalike from a Chinese IME (%s) still opens the command list", async (_label, lookalike) => {
+		// A Chinese input method translates the `/` key before the terminal sees
+		// it: U+FF0F under full-width punctuation, U+3001 under Microsoft Pinyin.
+		// Neither matches the command prefix; before this the buffer filled with a
+		// character that opened nothing, so `/` read as dead.
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={COMMANDS} />),
+		);
+		await delay(30);
+		stdin.write(lookalike);
+		await delay(30);
+		const frame = flat(lastFrame());
+		expect(frame).toContain("/think");
+		expect(frame).not.toContain(lookalike);
+		unmount();
+	});
+
 	test("Tab with no suggestions open does not insert anything", async () => {
 		const { stdin, lastFrame, unmount } = render(
 			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={COMMANDS} />),

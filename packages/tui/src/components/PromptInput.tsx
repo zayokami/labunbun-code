@@ -20,6 +20,13 @@ import { displayWidth } from "./SplitWorkspace.tsx";
 const SUGGESTION_ROWS = 8;
 
 /**
+ * What a Chinese input method makes of the `/` key before the terminal sees it:
+ * U+FF0F under full-width punctuation, U+3001 under Microsoft Pinyin. Neither
+ * matches the command prefix, so `/` reads as dead and no list opens.
+ */
+const IME_SLASH_LOOKALIKES = new Set(["／", "、"]);
+
+/**
  * The widest the command-name column may grow before it starts to squeeze the
  * descriptions. Command names are short; a skill named after its folder can be
  * long, and one such name must not push every description off the row.
@@ -799,6 +806,17 @@ export function PromptInput({
 			// it is a character someone typed on purpose, in a question or a glob.
 			if (input === "?" && state.text.length === 0 && onToggleHelp) {
 				onToggleHelp();
+				return;
+			}
+			// A Chinese input method translates the `/` key before the terminal sees
+			// it (see IME_SLASH_LOOKALIKES): the lookalike never matches the command
+			// prefix, so `/` looks dead and no list opens. At the start of an empty
+			// prompt the intent can only be the command door, so the half-width form
+			// is what gets stored; mid-buffer the character is what was typed.
+			if (IME_SLASH_LOOKALIKES.has(input) && state.text.length === 0) {
+				setCompletionPrefix(null);
+				setSuggestionIndex(0);
+				actions.insert("/");
 				return;
 			}
 			if (input && !key.ctrl && !key.meta && input !== "\r") {
